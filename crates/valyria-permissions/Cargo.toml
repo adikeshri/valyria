@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Modes, categories, rule evaluation, Authorization minting, approval flow."
+description = "Modes, categories, rule evaluation, Authorization minting, approval flow (§22, D2)."
 
 [package.metadata.valyria]
 layer = 3
@@ -14,8 +14,10 @@ phase = 2
 valyria-types = { workspace = true }
 valyria-util = { workspace = true }
 thiserror = { workspace = true }
-serde = { workspace = true }
 tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+parking_lot = { workspace = true }
 
 [dev-dependencies]
 valyria-testkit = { workspace = true }

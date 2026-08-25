@@ -13,9 +13,13 @@ phase = 2
 [dependencies]
 valyria-types = { workspace = true }
 valyria-util = { workspace = true }
+valyria-vfs = { workspace = true }
+valyria-store = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }
+parking_lot = { workspace = true }
 
 [dev-dependencies]
 valyria-testkit = { workspace = true }
+tempfile = { workspace = true }

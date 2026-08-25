@@ -1,24 +1,30 @@
 //! `valyria-tools` — layer 3 (Execution).
 //!
-//! Tool trait, JSON-Schema registry, first-class tools, invocation records.
-//!
-//! Status: scaffolded per the build plan (docs/PLAN.md, Phase 2). The crate
-//! compiles and is wired into the workspace layering check; full implementation
-//! lands in its designated phase.
+//! The tool runtime (§17, §18): the `Tool` trait, structured descriptors,
+//! the permission-gated invocation path (D2 enforcement point), and the
+//! 18 first-class tools. Fifteen are fully implemented; `search`,
+//! `symbol_search`, and `git_blame` are registered with real descriptors
+//! but return a clear not-yet-implemented error pending the repository
+//! index (Phase 4/5) and a `valyria-git` blame pass.
 
 #![forbid(unsafe_code)]
 
-/// Marks this crate as present in the workspace topology for the given phase.
-/// Exists so the crate is non-empty and the layering/CI checks have something
-/// real to verify before the phase implementation lands.
-pub const PHASE: u8 = 2;
+pub mod canonical;
+pub mod ctx;
+pub mod descriptor;
+pub mod error;
+pub mod invocation;
+pub mod outcome;
+pub mod runtime;
+pub mod tool_trait;
+pub mod tools;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn phase_is_recorded() {
-        assert_eq!(PHASE, 2);
-    }
-}
+pub use canonical::canonical_input_hash;
+pub use ctx::ToolCtx;
+pub use descriptor::{SideEffect, ToolDescriptor};
+pub use error::{Result, ToolError};
+pub use invocation::ToolInvocationRecord;
+pub use outcome::ToolOutcome;
+pub use runtime::{InvocationResult, ToolRegistry, ToolRuntime};
+pub use tool_trait::Tool;
+pub use tools::all_tools;

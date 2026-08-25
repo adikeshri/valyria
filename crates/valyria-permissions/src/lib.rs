@@ -1,24 +1,24 @@
 //! `valyria-permissions` — layer 3 (Execution).
 //!
-//! Modes, categories, rule evaluation, Authorization minting, approval flow.
-//!
-//! Status: scaffolded per the build plan (docs/PLAN.md, Phase 2). The crate
-//! compiles and is wired into the workspace layering check; full implementation
-//! lands in its designated phase.
+//! The permission engine (§22): modes, categories, argv-level command risk
+//! classification (§4.9), scoped grants, and the `Authorization` capability
+//! (D2) that is the *only* way a tool is allowed to execute. See
+//! [`authorization`]'s module docs for why the model can never bypass this.
 
 #![forbid(unsafe_code)]
 
-/// Marks this crate as present in the workspace topology for the given phase.
-/// Exists so the crate is non-empty and the layering/CI checks have something
-/// real to verify before the phase implementation lands.
-pub const PHASE: u8 = 2;
+pub mod authorization;
+pub mod engine;
+pub mod error;
+pub mod grants;
+pub mod request;
+pub mod risk;
+pub mod rules;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn phase_is_recorded() {
-        assert_eq!(PHASE, 2);
-    }
-}
+pub use authorization::{Authorization, AuthorizationKey};
+pub use engine::{Decision, DecisionRecord, DecisionSource, PermissionEngine};
+pub use error::{PermissionError, Result};
+pub use grants::{Grant, GrantScope, GrantStore};
+pub use request::{ActionKind, PermissionRequest, RiskLevel};
+pub use risk::classify_command;
+pub use rules::{default_decision, DefaultDecision};
