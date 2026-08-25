@@ -1,24 +1,18 @@
 //! `valyria-ledger` — layer 3 (Execution).
 //!
-//! Change ledger, file version tracking, external-modification detection, rollback.
-//!
-//! Status: scaffolded per the build plan (docs/PLAN.md, Phase 2). The crate
-//! compiles and is wired into the workspace layering check; full implementation
-//! lands in its designated phase.
+//! The change ledger (§26) and user-change protection (§25): every
+//! agent-owned modification maps to the task/step/tool-invocation that
+//! made it, and the ledger can classify a newly observed file state as
+//! agent-authored, pre-existing, or a concurrent user modification —
+//! which is what lets rollback refuse to blindly overwrite work that
+//! happened after the point it's reverting to.
 
 #![forbid(unsafe_code)]
 
-/// Marks this crate as present in the workspace topology for the given phase.
-/// Exists so the crate is non-empty and the layering/CI checks have something
-/// real to verify before the phase implementation lands.
-pub const PHASE: u8 = 2;
+pub mod error;
+pub mod ledger;
+pub mod types;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn phase_is_recorded() {
-        assert_eq!(PHASE, 2);
-    }
-}
+pub use error::{LedgerError, Result};
+pub use ledger::Ledger;
+pub use types::{AgentFileState, ChangeClassification, FileBaseline, LedgerEntry};
