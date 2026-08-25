@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Tool trait, JSON-Schema registry, first-class tools, invocation records."
+description = "Tool trait, JSON-Schema registry, first-class tools, invocation records (§17, §18)."
 
 [package.metadata.valyria]
 layer = 3
@@ -13,9 +13,20 @@ phase = 2
 [dependencies]
 valyria-types = { workspace = true }
 valyria-util = { workspace = true }
+valyria-vfs = { workspace = true }
+valyria-process = { workspace = true }
+valyria-git = { workspace = true }
+valyria-edit = { workspace = true }
+valyria-ledger = { workspace = true }
+valyria-permissions = { workspace = true }
+valyria-hardware = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 tracing = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
 
 [dev-dependencies]
 valyria-testkit = { workspace = true }
+tempfile = { workspace = true }
