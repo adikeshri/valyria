@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Spawn/supervise, streamed output with caps, timeouts, process-group kill, env scrubbing."
+description = "Spawn/supervise, streamed output with caps, timeouts, process-group kill, env scrubbing (§20)."
 
 [package.metadata.valyria]
 layer = 1
@@ -14,8 +14,12 @@ phase = 1
 valyria-types = { workspace = true }
 valyria-util = { workspace = true }
 thiserror = { workspace = true }
-serde = { workspace = true }
 tracing = { workspace = true }
+tokio = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 valyria-testkit = { workspace = true }
+tempfile = { workspace = true }

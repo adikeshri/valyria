@@ -76,7 +76,6 @@ blake3 = "1"
 rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 
 # --- filesystem ---
-notify = "6"
 ignore = "0.4"
 
 # --- tracing ---
