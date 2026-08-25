@@ -1,0 +1,20 @@
+[package]
+name = "valyria-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The `valyria` binary — a thin protocol client. Contains no agent orchestration logic."
+
+[package.metadata.valyria]
+layer = 6
+phase = 3
+
+[[bin]]
+name = "valyria"
+path = "src/main.rs"
+
+[dependencies]
+valyria-types = { workspace = true }
+valyria-util = { workspace = true }
+tokio = { workspace = true }

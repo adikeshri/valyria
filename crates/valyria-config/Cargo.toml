@@ -1,0 +1,22 @@
+[package]
+name = "valyria-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Layered config resolution, schema, validation, live reload (§4.3)."
+
+[package.metadata.valyria]
+layer = 0
+phase = 0
+
+[dependencies]
+valyria-types = { workspace = true }
+valyria-util = { workspace = true }
+toml = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

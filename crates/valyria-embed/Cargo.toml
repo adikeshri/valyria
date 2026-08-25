@@ -1,0 +1,21 @@
+[package]
+name = "valyria-embed"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Embedding pipeline, chunking, vector store (HNSW), invalidation."
+
+[package.metadata.valyria]
+layer = 2
+phase = 5
+
+[dependencies]
+valyria-types = { workspace = true }
+valyria-util = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+valyria-testkit = { workspace = true }

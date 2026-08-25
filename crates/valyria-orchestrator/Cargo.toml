@@ -1,0 +1,21 @@
+[package]
+name = "valyria-orchestrator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Role routing, model pool + admission control, tool-call transport ladder (D5), structured output, retry/repair."
+
+[package.metadata.valyria]
+layer = 4
+phase = 3
+
+[dependencies]
+valyria-types = { workspace = true }
+valyria-util = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+valyria-testkit = { workspace = true }

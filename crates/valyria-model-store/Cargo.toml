@@ -1,0 +1,21 @@
+[package]
+name = "valyria-model-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Download, resume, integrity verification, license surfacing, disk GC."
+
+[package.metadata.valyria]
+layer = 4
+phase = 9
+
+[dependencies]
+valyria-types = { workspace = true }
+valyria-util = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+valyria-testkit = { workspace = true }

@@ -1,0 +1,148 @@
+[workspace]
+resolver = "2"
+members = [
+    "xtask",
+    "crates/valyria-types",
+    "crates/valyria-util",
+    "crates/valyria-store",
+    "crates/valyria-events",
+    "crates/valyria-config",
+    "crates/valyria-testkit",
+    "crates/valyria-vfs",
+    "crates/valyria-process",
+    "crates/valyria-sandbox",
+    "crates/valyria-hardware",
+    "crates/valyria-git",
+    "crates/valyria-lang",
+    "crates/valyria-lsp",
+    "crates/valyria-index",
+    "crates/valyria-graph",
+    "crates/valyria-embed",
+    "crates/valyria-search",
+    "crates/valyria-permissions",
+    "crates/valyria-tools",
+    "crates/valyria-edit",
+    "crates/valyria-ledger",
+    "crates/valyria-verify",
+    "crates/valyria-model",
+    "crates/valyria-model-registry",
+    "crates/valyria-model-store",
+    "crates/valyria-runtime-llamacpp",
+    "crates/valyria-runtime-mlx",
+    "crates/valyria-runtime-openai-compat",
+    "crates/valyria-runtime-fake",
+    "crates/valyria-orchestrator",
+    "crates/valyria-context",
+    "crates/valyria-instructions",
+    "crates/valyria-memory",
+    "crates/valyria-plan",
+    "crates/valyria-agent",
+    "crates/valyria-task",
+    "crates/valyria-protocol",
+    "crates/valyria-app",
+    "crates/valyria-cli",
+    "crates/valyria-bench",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.1"
+license = "Apache-2.0"
+repository = "https://github.com/valyria/valyria"
+
+[workspace.dependencies]
+# --- async / runtime ---
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "fs", "io-util", "signal"] }
+tokio-util = "0.7"
+tokio-stream = "0.1"
+futures = "0.3"
+async-trait = "0.1"
+
+# --- serde / data ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# --- error handling ---
+thiserror = "2"
+anyhow = "1"
+
+# --- ids / hashing ---
+ulid = { version = "1", features = ["serde"] }
+blake3 = "1"
+
+# --- storage ---
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
+
+# --- filesystem ---
+notify = "6"
+ignore = "0.4"
+
+# --- tracing ---
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# --- git ---
+gix = { version = "0.66", default-features = false, features = ["max-performance-safe"] }
+
+# --- concurrency helpers ---
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+rayon = "1"
+
+# --- misc ---
+rand = "0.8"
+regex = "1"
+walkdir = "2"
+
+# --- testing ---
+tempfile = "3"
+proptest = "1"
+
+# --- workspace crates (internal) ---
+valyria-types = { path = "crates/valyria-types" }
+valyria-util = { path = "crates/valyria-util" }
+valyria-store = { path = "crates/valyria-store" }
+valyria-events = { path = "crates/valyria-events" }
+valyria-config = { path = "crates/valyria-config" }
+valyria-testkit = { path = "crates/valyria-testkit" }
+valyria-vfs = { path = "crates/valyria-vfs" }
+valyria-process = { path = "crates/valyria-process" }
+valyria-sandbox = { path = "crates/valyria-sandbox" }
+valyria-hardware = { path = "crates/valyria-hardware" }
+valyria-git = { path = "crates/valyria-git" }
+valyria-lang = { path = "crates/valyria-lang" }
+valyria-lsp = { path = "crates/valyria-lsp" }
+valyria-index = { path = "crates/valyria-index" }
+valyria-graph = { path = "crates/valyria-graph" }
+valyria-embed = { path = "crates/valyria-embed" }
+valyria-search = { path = "crates/valyria-search" }
+valyria-permissions = { path = "crates/valyria-permissions" }
+valyria-tools = { path = "crates/valyria-tools" }
+valyria-edit = { path = "crates/valyria-edit" }
+valyria-ledger = { path = "crates/valyria-ledger" }
+valyria-verify = { path = "crates/valyria-verify" }
+valyria-model = { path = "crates/valyria-model" }
+valyria-model-registry = { path = "crates/valyria-model-registry" }
+valyria-model-store = { path = "crates/valyria-model-store" }
+valyria-runtime-llamacpp = { path = "crates/valyria-runtime-llamacpp" }
+valyria-runtime-mlx = { path = "crates/valyria-runtime-mlx" }
+valyria-runtime-openai-compat = { path = "crates/valyria-runtime-openai-compat" }
+valyria-runtime-fake = { path = "crates/valyria-runtime-fake" }
+valyria-orchestrator = { path = "crates/valyria-orchestrator" }
+valyria-context = { path = "crates/valyria-context" }
+valyria-instructions = { path = "crates/valyria-instructions" }
+valyria-memory = { path = "crates/valyria-memory" }
+valyria-plan = { path = "crates/valyria-plan" }
+valyria-agent = { path = "crates/valyria-agent" }
+valyria-task = { path = "crates/valyria-task" }
+valyria-protocol = { path = "crates/valyria-protocol" }
+valyria-app = { path = "crates/valyria-app" }
+valyria-bench = { path = "crates/valyria-bench" }
+
+[profile.dev]
+debug = 1
+
+[profile.release]
+lto = "thin"
