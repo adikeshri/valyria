@@ -1,24 +1,26 @@
 //! `valyria-git` — layer 1 (Platform).
 //!
-//! gix-backed status/diff/log/blame/show/branches/renames/merge state; writes behind permission.
-//!
-//! Status: scaffolded per the build plan (docs/PLAN.md, Phase 1). The crate
-//! compiles and is wired into the workspace layering check; full implementation
-//! lands in its designated phase.
+//! Git as a first-class subsystem (§24): status, diff, log, blame, show,
+//! branches, renames, merge state — read via `gix` (fast, no shell, no
+//! libgit2 build dependency), never by shelling out to a `git` binary in
+//! production code paths. Write operations are behind the permission
+//! engine (layer 3, not this crate) and are out of scope here.
 
 #![forbid(unsafe_code)]
 
-/// Marks this crate as present in the workspace topology for the given phase.
-/// Exists so the crate is non-empty and the layering/CI checks have something
-/// real to verify before the phase implementation lands.
-pub const PHASE: u8 = 1;
+pub mod branches;
+pub mod diff;
+pub mod error;
+pub mod log;
+pub mod repo;
+pub mod status;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod test_support;
 
-    #[test]
-    fn phase_is_recorded() {
-        assert_eq!(PHASE, 1);
-    }
-}
+pub use branches::BranchInfo;
+pub use diff::{ChangeKind, FileDiff};
+pub use error::{GitError, Result};
+pub use log::CommitInfo;
+pub use repo::{HeadInfo, Repo};
+pub use status::{FileStatus, RepoStatus, StatusKind};
