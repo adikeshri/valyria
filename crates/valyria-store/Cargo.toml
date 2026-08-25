@@ -1,0 +1,26 @@
+[package]
+name = "valyria-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "SQLite actor, migrations, content-addressed blob store, KV, transactions (D7)."
+
+[package.metadata.valyria]
+layer = 0
+phase = 0
+
+[dependencies]
+valyria-types = { workspace = true }
+valyria-util = { workspace = true }
+rusqlite = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+
+[dev-dependencies]
+valyria-testkit = { workspace = true }
+tempfile = { workspace = true }

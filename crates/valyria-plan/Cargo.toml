@@ -1,0 +1,21 @@
+[package]
+name = "valyria-plan"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Plan model, validation, dependency/parallelism, checkpoints, rollback boundaries."
+
+[package.metadata.valyria]
+layer = 5
+phase = 8
+
+[dependencies]
+valyria-types = { workspace = true }
+valyria-util = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+valyria-testkit = { workspace = true }

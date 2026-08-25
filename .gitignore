@@ -1,0 +1,8 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+.DS_Store
+/.valyria
+*.db
+*.db-wal
+*.db-shm

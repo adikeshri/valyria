@@ -1,0 +1,21 @@
+[package]
+name = "valyria-hardware"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "OS/CPU/RAM/GPU/VRAM/unified-memory/accelerator/disk probing, capability scoring."
+
+[package.metadata.valyria]
+layer = 1
+phase = 1
+
+[dependencies]
+valyria-types = { workspace = true }
+valyria-util = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+valyria-testkit = { workspace = true }

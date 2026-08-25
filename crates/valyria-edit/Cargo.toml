@@ -1,0 +1,21 @@
+[package]
+name = "valyria-edit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Six editing strategies, application, post-verification of intended change."
+
+[package.metadata.valyria]
+layer = 3
+phase = 2
+
+[dependencies]
+valyria-types = { workspace = true }
+valyria-util = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+valyria-testkit = { workspace = true }

@@ -1,0 +1,21 @@
+[package]
+name = "valyria-runtime-llamacpp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "llama.cpp adapter (in-process FFI and/or server), GBNF constrained decoding."
+
+[package.metadata.valyria]
+layer = 4
+phase = 9
+
+[dependencies]
+valyria-types = { workspace = true }
+valyria-util = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+valyria-testkit = { workspace = true }

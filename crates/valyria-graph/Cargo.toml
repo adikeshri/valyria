@@ -1,0 +1,21 @@
+[package]
+name = "valyria-graph"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Typed knowledge graph (nodes + relationships), traversal & query API."
+
+[package.metadata.valyria]
+layer = 2
+phase = 4
+
+[dependencies]
+valyria-types = { workspace = true }
+valyria-util = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+valyria-testkit = { workspace = true }
