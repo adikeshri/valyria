@@ -1,0 +1,19 @@
+[package]
+name = "valyria-types"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "IDs, domain enums, Trust/Provenance/Evidence, and the error taxonomy. No I/O."
+
+[package.metadata.valyria]
+layer = 0
+phase = 0
+
+[dependencies]
+ulid = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]

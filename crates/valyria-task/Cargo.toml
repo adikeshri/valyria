@@ -1,0 +1,21 @@
+[package]
+name = "valyria-task"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Task manager, lifecycle, journal, snapshots, scheduling, concurrency."
+
+[package.metadata.valyria]
+layer = 5
+phase = 3
+
+[dependencies]
+valyria-types = { workspace = true }
+valyria-util = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+valyria-testkit = { workspace = true }

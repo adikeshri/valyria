@@ -1,0 +1,21 @@
+[package]
+name = "valyria-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Application layer: workspace registry, session mgmt, wiring, daemon."
+
+[package.metadata.valyria]
+layer = 6
+phase = 3
+
+[dependencies]
+valyria-types = { workspace = true }
+valyria-util = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+valyria-testkit = { workspace = true }
