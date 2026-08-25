@@ -1,24 +1,25 @@
 //! `valyria-process` — layer 1 (Platform).
 //!
-//! Spawn/supervise, streamed output with caps, timeouts, process-group kill, env scrubbing.
-//!
-//! Status: scaffolded per the build plan (docs/PLAN.md, Phase 1). The crate
-//! compiles and is wired into the workspace layering check; full implementation
-//! lands in its designated phase.
+//! The shell runtime (§20): argv-based command execution (never a raw
+//! shell string), process-group spawn and kill, streamed output under
+//! head/tail caps, wall-clock and idle timeouts, cancellation, and
+//! allowlist-first environment construction. Working-directory
+//! restriction is the caller's responsibility (typically enforced via
+//! `valyria-vfs::WorkspaceRoot` before a `CommandSpec` is even built) —
+//! this crate does not know about workspace roots.
 
-#![forbid(unsafe_code)]
+// Not `forbid(unsafe_code)`: `runner::kill_process_group` makes one
+// `libc::killpg` FFI call on unix, justified with a `SAFETY` comment at
+// the call site. Everything else in this crate is safe.
 
-/// Marks this crate as present in the workspace topology for the given phase.
-/// Exists so the crate is non-empty and the layering/CI checks have something
-/// real to verify before the phase implementation lands.
-pub const PHASE: u8 = 1;
+pub mod env_policy;
+pub mod error;
+pub mod output_cap;
+pub mod runner;
+pub mod spec;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn phase_is_recorded() {
-        assert_eq!(PHASE, 1);
-    }
-}
+pub use env_policy::EnvPolicy;
+pub use error::{ProcessError, Result};
+pub use output_cap::{CappedOutput, CapturedOutput};
+pub use runner::{run, EndReason, ExecutionResult};
+pub use spec::{CommandSpec, DEFAULT_MAX_OUTPUT_BYTES};

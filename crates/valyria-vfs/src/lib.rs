@@ -1,24 +1,25 @@
 //! `valyria-vfs` — layer 1 (Platform).
 //!
-//! Workspace-rooted filesystem: canonicalization, symlink policy, atomic writes, watcher, content hashing.
-//!
-//! Status: scaffolded per the build plan (docs/PLAN.md, Phase 1). The crate
-//! compiles and is wired into the workspace layering check; full implementation
-//! lands in its designated phase.
+//! Workspace-rooted filesystem access (§4.4): every path resolution goes
+//! through [`WorkspaceRoot::resolve`], which is the runtime's path
+//! traversal and symlink-escape defense (§49). Also owns atomic writes
+//! (D6), a stat-keyed content hash cache, binary/oversize classification,
+//! `.gitignore`-aware traversal, and debounced filesystem watching.
 
 #![forbid(unsafe_code)]
 
-/// Marks this crate as present in the workspace topology for the given phase.
-/// Exists so the crate is non-empty and the layering/CI checks have something
-/// real to verify before the phase implementation lands.
-pub const PHASE: u8 = 1;
+pub mod atomic;
+pub mod classify;
+pub mod error;
+pub mod hash_cache;
+pub mod list;
+pub mod watcher;
+pub mod workspace_path;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn phase_is_recorded() {
-        assert_eq!(PHASE, 1);
-    }
-}
+pub use atomic::write_atomic;
+pub use classify::{is_oversized, looks_binary, looks_binary_file, DEFAULT_MAX_CONTEXT_FILE_BYTES};
+pub use error::{Result, VfsError};
+pub use hash_cache::HashCache;
+pub use list::list_files;
+pub use watcher::{ChangeSet, Watcher};
+pub use workspace_path::WorkspaceRoot;

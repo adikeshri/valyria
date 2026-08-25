@@ -1,24 +1,27 @@
 //! `valyria-sandbox` — layer 1 (Platform).
 //!
-//! ProcessLauncher/FsGuard traits + platform impls, confinement reporting.
-//!
-//! Status: scaffolded per the build plan (docs/PLAN.md, Phase 1). The crate
-//! compiles and is wired into the workspace layering check; full implementation
-//! lands in its designated phase.
+//! Sandboxed execution (§21, D10). Confinement is real where implemented
+//! and verified (macOS, via Seatbelt — see [`macos`]'s module docs for the
+//! hard-won details) and honestly reported as absent where it isn't
+//! (Linux, Windows: `PermissiveSandbox`, tracked as future work rather
+//! than faked). The runtime must always know and be able to state exactly
+//! what confinement a run actually got.
 
 #![forbid(unsafe_code)]
 
-/// Marks this crate as present in the workspace topology for the given phase.
-/// Exists so the crate is non-empty and the layering/CI checks have something
-/// real to verify before the phase implementation lands.
-pub const PHASE: u8 = 1;
+pub mod confinement;
+pub mod error;
+pub mod fs_guard;
+pub mod launcher;
+pub mod permissive;
+pub mod profile;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[cfg(target_os = "macos")]
+pub mod macos;
 
-    #[test]
-    fn phase_is_recorded() {
-        assert_eq!(PHASE, 1);
-    }
-}
+pub use confinement::Confinement;
+pub use error::{Result, SandboxError};
+pub use fs_guard::{AllowlistFsGuard, FsGuard};
+pub use launcher::{detect_platform_launcher, ProcessLauncher};
+pub use permissive::PermissiveSandbox;
+pub use profile::SandboxProfile;

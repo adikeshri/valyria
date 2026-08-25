@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "gix-backed status/diff/log/blame/show/branches/renames/merge state; writes behind permission."
+description = "gix-backed status/diff/log/blame/show/branches/renames/merge state; writes behind permission (§24)."
 
 [package.metadata.valyria]
 layer = 1
@@ -14,8 +14,10 @@ phase = 1
 valyria-types = { workspace = true }
 valyria-util = { workspace = true }
 thiserror = { workspace = true }
-serde = { workspace = true }
 tracing = { workspace = true }
+serde = { workspace = true }
+gix = { workspace = true, features = ["status", "blob-diff"] }
 
 [dev-dependencies]
 valyria-testkit = { workspace = true }
+tempfile = { workspace = true }

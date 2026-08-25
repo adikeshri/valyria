@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Workspace-rooted filesystem: canonicalization, symlink policy, atomic writes, watcher, content hashing."
+description = "Workspace-rooted filesystem: canonicalization, symlink policy, atomic writes, watcher, content hashing (§4.4)."
 
 [package.metadata.valyria]
 layer = 1
@@ -14,8 +14,11 @@ phase = 1
 valyria-types = { workspace = true }
 valyria-util = { workspace = true }
 thiserror = { workspace = true }
-serde = { workspace = true }
 tracing = { workspace = true }
+ignore = { workspace = true }
+notify-debouncer-full = "0.4"
+tempfile = { workspace = true }
+parking_lot = { workspace = true }
 
 [dev-dependencies]
 valyria-testkit = { workspace = true }

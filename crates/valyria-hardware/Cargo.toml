@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "OS/CPU/RAM/GPU/VRAM/unified-memory/accelerator/disk probing, capability scoring."
+description = "OS/CPU/RAM/GPU/VRAM/unified-memory/accelerator/disk probing, capability scoring (§39, §41)."
 
 [package.metadata.valyria]
 layer = 1
@@ -14,8 +14,10 @@ phase = 1
 valyria-types = { workspace = true }
 valyria-util = { workspace = true }
 thiserror = { workspace = true }
-serde = { workspace = true }
 tracing = { workspace = true }
+sysinfo = "0.32"
+serde = { workspace = true }
+serde_json = { workspace = true }
+parking_lot = { workspace = true }
 
 [dev-dependencies]
-valyria-testkit = { workspace = true }

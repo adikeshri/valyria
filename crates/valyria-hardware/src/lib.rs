@@ -1,24 +1,18 @@
 //! `valyria-hardware` — layer 1 (Platform).
 //!
-//! OS/CPU/RAM/GPU/VRAM/unified-memory/accelerator/disk probing, capability scoring.
-//!
-//! Status: scaffolded per the build plan (docs/PLAN.md, Phase 1). The crate
-//! compiles and is wired into the workspace layering check; full implementation
-//! lands in its designated phase.
+//! Hardware detection (§39) and model/hardware fit scoring (§41). GPU/VRAM
+//! detection is honestly best-effort and platform-specific — see
+//! [`gpu`]'s module docs for exactly what is and isn't implemented today.
 
 #![forbid(unsafe_code)]
 
-/// Marks this crate as present in the workspace topology for the given phase.
-/// Exists so the crate is non-empty and the layering/CI checks have something
-/// real to verify before the phase implementation lands.
-pub const PHASE: u8 = 1;
+pub mod cache;
+pub mod fit;
+pub mod gpu;
+pub mod probe;
+pub mod report;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn phase_is_recorded() {
-        assert_eq!(PHASE, 1);
-    }
-}
+pub use cache::CachedProbe;
+pub use fit::{fits, Fit, ModelRequirement, WillNotFitReason};
+pub use probe::probe;
+pub use report::{CpuInfo, DiskInfo, GpuInfo, HardwareReport};
