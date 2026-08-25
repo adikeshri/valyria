@@ -1,0 +1,21 @@
+[package]
+name = "valyria-sandbox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "ProcessLauncher/FsGuard traits + platform impls, confinement reporting."
+
+[package.metadata.valyria]
+layer = 1
+phase = 1
+
+[dependencies]
+valyria-types = { workspace = true }
+valyria-util = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+valyria-testkit = { workspace = true }
