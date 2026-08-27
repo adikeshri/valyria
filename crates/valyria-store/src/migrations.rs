@@ -7,6 +7,7 @@ use rusqlite::Connection;
 
 use crate::error::{Result, StoreError};
 
+#[derive(Debug, Clone, Copy)]
 pub struct Migration {
     pub version: i64,
     pub description: &'static str,

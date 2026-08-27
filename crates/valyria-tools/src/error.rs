@@ -20,6 +20,8 @@ pub enum ToolError {
     Ledger(#[from] valyria_ledger::LedgerError),
     #[error("process error: {0}")]
     Process(#[from] valyria_process::ProcessError),
+    #[error("sandbox error: {0}")]
+    Sandbox(#[from] valyria_sandbox::SandboxError),
     #[error("git error: {0}")]
     Git(#[from] valyria_git::GitError),
     #[error("io error: {0}")]
@@ -38,6 +40,7 @@ impl ErrorCode for ToolError {
             ToolError::Edit(_) => "tools.edit",
             ToolError::Ledger(_) => "tools.ledger",
             ToolError::Process(_) => "tools.process",
+            ToolError::Sandbox(_) => "tools.sandbox",
             ToolError::Git(_) => "tools.git",
             ToolError::Io(_) => "tools.io",
         }

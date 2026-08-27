@@ -17,4 +17,12 @@ path = "src/main.rs"
 [dependencies]
 valyria-types = { workspace = true }
 valyria-util = { workspace = true }
+valyria-app = { workspace = true }
+valyria-protocol = { workspace = true }
 tokio = { workspace = true }
+futures = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+valyria-testkit = { workspace = true }
+tempfile = { workspace = true }

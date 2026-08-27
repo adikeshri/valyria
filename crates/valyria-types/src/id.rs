@@ -164,6 +164,14 @@ typed_id!(
     ContextSnapshotId,
     "ctx"
 );
+typed_id!(
+    /// Identifies one effect issued by the agent step driver (§7 D1: the
+    /// journal records `EffectIssued`/`EffectCompleted` entries keyed by
+    /// this id, so a resumed task can tell which in-flight effect a
+    /// completion entry corresponds to).
+    EffectId,
+    "eff"
+);
 
 /// A monotonically increasing index generation (D8). Not ULID-backed: it is
 /// a per-workspace counter, not a globally unique identifier, and ordering

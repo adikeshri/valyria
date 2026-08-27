@@ -1,24 +1,16 @@
 //! `valyria-runtime-fake` — layer 4 (Model).
 //!
-//! Deterministic scripted model (D12) used across the agent test suite.
-//!
-//! Status: scaffolded per the build plan (docs/PLAN.md, Phase 3). The crate
-//! compiles and is wired into the workspace layering check; full implementation
-//! lands in its designated phase.
+//! `FakeModelRuntime` (D12): a deterministic, scripted `ModelRuntime`. Ships
+//! in the workspace as first-class infrastructure, not test scaffolding —
+//! nearly all agent-loop tests, and Phase 3's walking-skeleton demo, run
+//! against it instead of a real model.
 
 #![forbid(unsafe_code)]
 
-/// Marks this crate as present in the workspace topology for the given phase.
-/// Exists so the crate is non-empty and the layering/CI checks have something
-/// real to verify before the phase implementation lands.
-pub const PHASE: u8 = 3;
+pub mod error;
+pub mod runtime;
+pub mod scenario;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn phase_is_recorded() {
-        assert_eq!(PHASE, 3);
-    }
-}
+pub use error::{FakeRuntimeError, Result};
+pub use runtime::FakeModelRuntime;
+pub use scenario::{Scenario, ScriptedTurn};

@@ -1,24 +1,20 @@
 //! `valyria-context` — layer 5 (Agent).
 //!
-//! Context query -> retrieval -> rank -> structural expansion -> compress -> budget -> assemble.
-//!
-//! Status: scaffolded per the build plan (docs/PLAN.md, Phase 6). The crate
-//! compiles and is wired into the workspace layering check; full implementation
-//! lands in its designated phase.
+//! Phase 3 ships only the explicit-file subset of the context pipeline
+//! (§4.17): wrap named files, read through the real permissioned tool
+//! runtime, into trust-tagged [`ContextItem`]s, budget-checked with a
+//! heuristic token counter. The full query -> retrieval -> rank ->
+//! structural expansion -> compress -> budget -> assemble pipeline (with
+//! D3's trust-ordered, nonce-fenced prompt assembly) lands in Phase 6.
 
 #![forbid(unsafe_code)]
 
-/// Marks this crate as present in the workspace topology for the given phase.
-/// Exists so the crate is non-empty and the layering/CI checks have something
-/// real to verify before the phase implementation lands.
-pub const PHASE: u8 = 6;
+pub mod assembler;
+pub mod error;
+pub mod item;
+pub mod query;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn phase_is_recorded() {
-        assert_eq!(PHASE, 6);
-    }
-}
+pub use assembler::ContextAssembler;
+pub use error::{ContextError, Result};
+pub use item::{ContextBody, ContextItem};
+pub use query::{AssembledContext, ContextQuery};

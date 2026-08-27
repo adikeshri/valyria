@@ -136,6 +136,96 @@ impl Ledger {
         Ok(id)
     }
 
+    /// Recovery-only counterpart to [`Ledger::record_write`]: reconstructs a
+    /// previously-recorded write in the in-memory index after a crash,
+    /// without re-`put`-ing content into the blob store — the bytes are
+    /// presumed already durable there from the original, pre-crash write.
+    /// Only `Ledger`'s own index (baselines/entries) is lost on crash; blob
+    /// content survives on disk regardless. Used by `valyria-task`'s
+    /// crash-recovery path (§4.23), never by normal tool execution.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rehydrate_write(
+        &self,
+        task_id: TaskId,
+        step_id: StepId,
+        tool_invocation_id: Option<ToolInvocationId>,
+        path: PathBuf,
+        before_hash: Option<ContentHash>,
+        after_hash: ContentHash,
+        clock: &dyn Clock,
+    ) -> LedgerEntryId {
+        let id = self.push_rehydrated_entry(
+            task_id,
+            step_id,
+            tool_invocation_id,
+            path.clone(),
+            before_hash,
+            Some(after_hash),
+            None,
+            clock,
+        );
+        self.set_agent_state(path, before_hash, AgentFileState::Written(after_hash));
+        id
+    }
+
+    /// Recovery-only counterpart to [`Ledger::record_delete`]. See
+    /// [`Ledger::rehydrate_write`].
+    pub fn rehydrate_delete(
+        &self,
+        task_id: TaskId,
+        step_id: StepId,
+        tool_invocation_id: Option<ToolInvocationId>,
+        path: PathBuf,
+        before_hash: ContentHash,
+        clock: &dyn Clock,
+    ) -> LedgerEntryId {
+        let id = self.push_rehydrated_entry(
+            task_id,
+            step_id,
+            tool_invocation_id,
+            path.clone(),
+            Some(before_hash),
+            None,
+            None,
+            clock,
+        );
+        self.set_agent_state(path, Some(before_hash), AgentFileState::Deleted);
+        id
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn push_rehydrated_entry(
+        &self,
+        task_id: TaskId,
+        step_id: StepId,
+        tool_invocation_id: Option<ToolInvocationId>,
+        path: PathBuf,
+        before_hash: Option<ContentHash>,
+        after_hash: Option<ContentHash>,
+        reverts: Option<LedgerEntryId>,
+        clock: &dyn Clock,
+    ) -> LedgerEntryId {
+        // Unlike `push_entry`, there is no `before_content` to `put` — we
+        // only record whether the blob the original write already stored
+        // is still present, so `rollback_entry` fails loudly instead of
+        // silently misreporting retention.
+        let content_retained = before_hash.is_some_and(|h| self.blobs.exists(h));
+        let id = LedgerEntryId::new();
+        self.entries.write().push(LedgerEntry {
+            id,
+            task_id,
+            step_id,
+            tool_invocation_id,
+            path,
+            before_hash,
+            after_hash,
+            timestamp: clock.now(),
+            content_retained,
+            reverts,
+        });
+        id
+    }
+
     fn set_agent_state(
         &self,
         path: PathBuf,
@@ -559,6 +649,74 @@ mod tests {
             .rollback_entry(entry_id, None, &root, task_id, step_id, &clock)
             .unwrap();
         assert_eq!(ws.read("f.txt"), "will be deleted");
+    }
+
+    #[test]
+    fn rehydrate_write_reconstructs_classification_without_reputting_blobs() {
+        let (_dir, ledger) = ledger();
+        let clock = FixedClock::at_millis(0);
+        let task_id = TaskId::new();
+        let step_id = StepId::new();
+        let before = ContentHash::of_bytes(b"before");
+        let after = ContentHash::of_bytes(b"after");
+
+        // Simulate: the original write happened pre-crash (blob content is
+        // durable) but the in-memory ledger index was lost.
+        ledger.record_baseline("f.txt".into(), Some(before));
+        ledger.rehydrate_write(
+            task_id,
+            step_id,
+            None,
+            "f.txt".into(),
+            Some(before),
+            after,
+            &clock,
+        );
+
+        assert_eq!(
+            ledger.classify(Path::new("f.txt"), Some(after)),
+            ChangeClassification::AgentAuthored
+        );
+    }
+
+    #[test]
+    fn rehydrate_write_reports_content_not_retained_when_blob_is_absent() {
+        let (_dir, ledger) = ledger();
+        let clock = FixedClock::at_millis(0);
+        // Never `put` into the blob store for this hash.
+        let before = ContentHash::of_bytes(b"never stored");
+        let after = ContentHash::of_bytes(b"after");
+        let id = ledger.rehydrate_write(
+            TaskId::new(),
+            StepId::new(),
+            None,
+            "f.txt".into(),
+            Some(before),
+            after,
+            &clock,
+        );
+        assert!(!ledger.entry(id).unwrap().content_retained);
+    }
+
+    #[test]
+    fn rehydrate_delete_reconstructs_classification() {
+        let (_dir, ledger) = ledger();
+        let clock = FixedClock::at_millis(0);
+        let before = ContentHash::of_bytes(b"before");
+        ledger.record_baseline("f.txt".into(), Some(before));
+        ledger.rehydrate_delete(
+            TaskId::new(),
+            StepId::new(),
+            None,
+            "f.txt".into(),
+            before,
+            &clock,
+        );
+
+        assert_eq!(
+            ledger.classify(Path::new("f.txt"), None),
+            ChangeClassification::AgentAuthored
+        );
     }
 
     #[test]

@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use valyria_ledger::Ledger;
 use valyria_permissions::PermissionEngine;
+use valyria_sandbox::{detect_platform_launcher, SandboxProfile};
 use valyria_tools::{all_tools, InvocationResult, ToolCtx, ToolOutcome, ToolRuntime};
 use valyria_types::{PermissionMode, SessionId, StepId, TaskId};
 use valyria_util::FixedClock;
@@ -30,12 +31,14 @@ fn harness(mode: PermissionMode) -> Harness {
     let runtime = ToolRuntime::new(registry, engine, clock);
 
     let ctx = ToolCtx {
+        sandbox_profile: SandboxProfile::new().allow_write(root.as_path()),
         workspace_root: root,
         hash_cache: Arc::new(HashCache::new()),
         ledger,
         task_id: TaskId::new(),
         step_id: StepId::new(),
         cancel: valyria_util::CancellationToken::new(),
+        launcher: Arc::from(detect_platform_launcher()),
     };
 
     Harness {

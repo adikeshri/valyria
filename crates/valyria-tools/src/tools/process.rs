@@ -40,10 +40,15 @@ fn build_spec(ctx: &ToolCtx, input: &Value, tool: &'static str) -> Result<Comman
     let timeout_secs = optional_u64(input, "timeout_secs").unwrap_or(120);
     let env = EnvPolicy::inherit_filtered().build(&std::env::vars().collect());
 
-    Ok(CommandSpec::new(program, ctx.workspace_root.as_path())
+    let spec = CommandSpec::new(program, ctx.workspace_root.as_path())
         .args(args)
         .env(env)
-        .timeout(Duration::from_secs(timeout_secs)))
+        .timeout(Duration::from_secs(timeout_secs));
+    // D10: every process-executing tool runs through whatever confinement
+    // this workspace's launcher provides (real on platforms that have it,
+    // `PermissiveSandbox`'s honest no-op otherwise) rather than calling
+    // `valyria_process::run` directly.
+    Ok(ctx.launcher.wrap(spec, &ctx.sandbox_profile)?)
 }
 
 fn shell_request(ctx: &ToolCtx, tool: &'static str, input: &Value) -> Result<PermissionRequest> {
@@ -175,3 +180,59 @@ process_tool!(
     "run_linter",
     "Run an explicit linter command within the workspace (does not discover which linter to use)."
 );
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    use valyria_ledger::Ledger;
+    use valyria_sandbox::{Confinement, ProcessLauncher, SandboxProfile};
+    use valyria_types::{StepId, TaskId};
+    use valyria_util::CancellationToken;
+    use valyria_vfs::{HashCache, WorkspaceRoot};
+
+    use super::*;
+
+    struct SpyLauncher {
+        called: Arc<AtomicBool>,
+    }
+
+    impl ProcessLauncher for SpyLauncher {
+        fn confinement_level(&self) -> Confinement {
+            Confinement::None
+        }
+
+        fn wrap(
+            &self,
+            spec: CommandSpec,
+            _profile: &SandboxProfile,
+        ) -> valyria_sandbox::Result<CommandSpec> {
+            self.called.store(true, Ordering::SeqCst);
+            Ok(spec)
+        }
+    }
+
+    #[test]
+    fn build_spec_wraps_through_the_configured_launcher() {
+        let ws = valyria_testkit::TempWorkspace::new();
+        let root = WorkspaceRoot::new(ws.path()).unwrap();
+        let blob_dir = tempfile::tempdir().unwrap();
+        let called = Arc::new(AtomicBool::new(false));
+        let ctx = ToolCtx {
+            workspace_root: root,
+            hash_cache: Arc::new(HashCache::new()),
+            ledger: Arc::new(Ledger::new(blob_dir.path()).unwrap()),
+            task_id: TaskId::new(),
+            step_id: StepId::new(),
+            cancel: CancellationToken::new(),
+            launcher: Arc::new(SpyLauncher {
+                called: called.clone(),
+            }),
+            sandbox_profile: SandboxProfile::new(),
+        };
+        let input = serde_json::json!({"program": "echo", "args": ["hi"]});
+        build_spec(&ctx, &input, "run_command").unwrap();
+        assert!(called.load(Ordering::SeqCst));
+    }
+}

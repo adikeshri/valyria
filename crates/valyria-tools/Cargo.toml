@@ -20,6 +20,7 @@ valyria-edit = { workspace = true }
 valyria-ledger = { workspace = true }
 valyria-permissions = { workspace = true }
 valyria-hardware = { workspace = true }
+valyria-sandbox = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

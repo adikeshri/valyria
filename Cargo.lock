@@ -402,10 +402,63 @@ dependencies = [
 ]
 
 [[package]]
+name = "futures"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a31d2a3fbaaeb2af2368bbdd904aa8e812d3c04a1ee10d3171f52d556e5d0a3"
+dependencies = [
+ "futures-channel",
+ "futures-core",
+ "futures-executor",
+ "futures-io",
+ "futures-sink",
+ "futures-task",
+ "futures-util",
+]
+
+[[package]]
+name = "futures-channel"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1f9e3d69d39e4862ffed03ed071a76f9a13ba1d9109d355b0f0aa6b15e393c4"
+dependencies = [
+ "futures-core",
+ "futures-sink",
+]
+
+[[package]]
 name = "futures-core"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92d699e522242e69e3003b94ecc1f960f3a5e015aa7c5d7486e65ad01dd94f5e"
+
+[[package]]
+name = "futures-executor"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "031b47cf1a3c6cc8bc2fc76cd437f521619387907d469316e7c0bc278f1f5432"
+dependencies = [
+ "futures-core",
+ "futures-task",
+ "futures-util",
+]
+
+[[package]]
+name = "futures-io"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53c0fa8157de1303bfffdaa1cc2a673bfffb60102f76b0ef4441659124373fed"
+
+[[package]]
+name = "futures-macro"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9fb9654ba8355388abeb8dcb4fc62f511300867002afc858860463bdd9fe0c44"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.4",
+]
 
 [[package]]
 name = "futures-sink"
@@ -425,8 +478,13 @@ version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc"
 dependencies = [
+ "futures-channel",
  "futures-core",
+ "futures-io",
+ "futures-macro",
+ "futures-sink",
  "futures-task",
+ "memchr",
  "pin-project-lite",
  "slab",
 ]
@@ -2420,23 +2478,58 @@ name = "valyria-agent"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
+ "tokio",
  "tracing",
+ "valyria-context",
+ "valyria-events",
+ "valyria-ledger",
+ "valyria-model",
+ "valyria-orchestrator",
+ "valyria-permissions",
+ "valyria-runtime-fake",
+ "valyria-sandbox",
+ "valyria-store",
+ "valyria-task",
  "valyria-testkit",
+ "valyria-tools",
  "valyria-types",
  "valyria-util",
+ "valyria-vfs",
 ]
 
 [[package]]
 name = "valyria-app"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "futures",
+ "rusqlite",
  "serde",
+ "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
+ "tokio",
  "tracing",
+ "valyria-agent",
+ "valyria-context",
+ "valyria-events",
+ "valyria-ledger",
+ "valyria-model",
+ "valyria-orchestrator",
+ "valyria-permissions",
+ "valyria-protocol",
+ "valyria-runtime-fake",
+ "valyria-sandbox",
+ "valyria-store",
+ "valyria-task",
  "valyria-testkit",
+ "valyria-tools",
  "valyria-types",
  "valyria-util",
+ "valyria-vfs",
 ]
 
 [[package]]
@@ -2455,7 +2548,13 @@ dependencies = [
 name = "valyria-cli"
 version = "0.1.0"
 dependencies = [
+ "futures",
+ "serde_json",
+ "tempfile",
  "tokio",
+ "valyria-app",
+ "valyria-protocol",
+ "valyria-testkit",
  "valyria-types",
  "valyria-util",
 ]
@@ -2477,12 +2576,22 @@ dependencies = [
 name = "valyria-context"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "serde",
+ "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
+ "tokio",
  "tracing",
+ "valyria-ledger",
+ "valyria-model",
+ "valyria-permissions",
+ "valyria-sandbox",
  "valyria-testkit",
+ "valyria-tools",
  "valyria-types",
  "valyria-util",
+ "valyria-vfs",
 ]
 
 [[package]]
@@ -2648,7 +2757,10 @@ dependencies = [
 name = "valyria-model"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "futures",
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "tracing",
  "valyria-testkit",
@@ -2686,7 +2798,10 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "thiserror 2.0.20",
+ "tokio",
  "tracing",
+ "valyria-model",
+ "valyria-runtime-fake",
  "valyria-testkit",
  "valyria-types",
  "valyria-util",
@@ -2736,7 +2851,10 @@ dependencies = [
 name = "valyria-protocol"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "futures",
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "tracing",
  "valyria-testkit",
@@ -2748,9 +2866,15 @@ dependencies = [
 name = "valyria-runtime-fake"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "futures",
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
+ "tokio",
+ "toml",
  "tracing",
+ "valyria-model",
  "valyria-testkit",
  "valyria-types",
  "valyria-util",
@@ -2839,9 +2963,14 @@ dependencies = [
 name = "valyria-task"
 version = "0.1.0"
 dependencies = [
+ "rusqlite",
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
+ "tokio",
  "tracing",
+ "valyria-events",
+ "valyria-store",
  "valyria-testkit",
  "valyria-types",
  "valyria-util",
@@ -2873,6 +3002,7 @@ dependencies = [
  "valyria-ledger",
  "valyria-permissions",
  "valyria-process",
+ "valyria-sandbox",
  "valyria-testkit",
  "valyria-types",
  "valyria-util",

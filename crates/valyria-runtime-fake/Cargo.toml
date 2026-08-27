@@ -13,9 +13,15 @@ phase = 3
 [dependencies]
 valyria-types = { workspace = true }
 valyria-util = { workspace = true }
+valyria-model = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
 tracing = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
 
 [dev-dependencies]
 valyria-testkit = { workspace = true }
+tokio = { workspace = true }

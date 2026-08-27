@@ -8,14 +8,27 @@ description = "Context query -> retrieval -> rank -> structural expansion -> com
 
 [package.metadata.valyria]
 layer = 5
-phase = 6
+# Full pipeline (retrieval/ranking/structural expansion/compression) is
+# Phase 6 per docs/PLAN.md; this crate currently implements only the
+# minimal explicit-file subset docs/PLAN.md's Phase 3 scope calls for.
+phase = 3
 
 [dependencies]
 valyria-types = { workspace = true }
 valyria-util = { workspace = true }
+valyria-model = { workspace = true }
+valyria-tools = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 tracing = { workspace = true }
+async-trait = { workspace = true }
 
 [dev-dependencies]
 valyria-testkit = { workspace = true }
+valyria-permissions = { workspace = true }
+valyria-ledger = { workspace = true }
+valyria-vfs = { workspace = true }
+valyria-sandbox = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }
