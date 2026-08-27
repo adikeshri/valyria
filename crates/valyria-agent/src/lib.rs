@@ -1,24 +1,17 @@
 //! `valyria-agent` — layer 5 (Agent).
 //!
-//! State machine, step driver, effect execution, loop/progress detection, multi-agent roles.
-//!
-//! Status: scaffolded per the build plan (docs/PLAN.md, Phase 3). The crate
-//! compiles and is wired into the workspace layering check; full implementation
-//! lands in its designated phase.
+//! The step machine's driver (§4.24, D1): `AgentDriver` executes one
+//! `AgentState` at a time against `valyria-task`'s journal and
+//! `valyria-tools`' permission-gated runtime, so every effect is durable
+//! before it runs and a crash between any two journal writes is
+//! recoverable by the same driver on restart.
 
 #![forbid(unsafe_code)]
 
-/// Marks this crate as present in the workspace topology for the given phase.
-/// Exists so the crate is non-empty and the layering/CI checks have something
-/// real to verify before the phase implementation lands.
-pub const PHASE: u8 = 3;
+pub mod action;
+pub mod driver;
+pub mod error;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn phase_is_recorded() {
-        assert_eq!(PHASE, 3);
-    }
-}
+pub use action::ActionRequest;
+pub use driver::AgentDriver;
+pub use error::{AgentError, Result};

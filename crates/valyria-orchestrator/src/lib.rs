@@ -1,24 +1,16 @@
 //! `valyria-orchestrator` — layer 4 (Model).
 //!
-//! Role routing, model pool + admission control, tool-call transport ladder (D5), structured output, retry/repair.
-//!
-//! Status: scaffolded per the build plan (docs/PLAN.md, Phase 3). The crate
-//! compiles and is wired into the workspace layering check; full implementation
-//! lands in its designated phase.
+//! Minimal role routing for Phase 3: bind a [`Role`] to a
+//! `valyria_model::ModelRuntime` and delegate `generate` calls to it. The
+//! full model pool, admission control, and tool-call transport ladder (D5)
+//! land in Phase 9 once multiple, less-reliable real adapters exist.
 
 #![forbid(unsafe_code)]
 
-/// Marks this crate as present in the workspace topology for the given phase.
-/// Exists so the crate is non-empty and the layering/CI checks have something
-/// real to verify before the phase implementation lands.
-pub const PHASE: u8 = 3;
+pub mod error;
+pub mod orchestrator;
+pub mod role;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn phase_is_recorded() {
-        assert_eq!(PHASE, 3);
-    }
-}
+pub use error::{OrchestratorError, Result};
+pub use orchestrator::Orchestrator;
+pub use role::Role;

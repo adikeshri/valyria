@@ -1,24 +1,25 @@
 //! `valyria-model` — layer 4 (Model).
 //!
-//! ModelRuntime trait (generate/stream/cancel/count_tokens/health/capabilities), messages, sampling, tokenizer trait.
-//!
-//! Status: scaffolded per the build plan (docs/PLAN.md, Phase 3). The crate
-//! compiles and is wired into the workspace layering check; full implementation
-//! lands in its designated phase.
+//! The `ModelRuntime` trait (§4.20) and the adapter-agnostic message,
+//! sampling, request, and completion vocabulary every adapter (fake,
+//! llama.cpp, MLX, OpenAI-compatible) speaks. This crate defines the
+//! contract only — no adapter lives here (see `valyria-runtime-fake` and,
+//! from Phase 9, the real adapters).
 
 #![forbid(unsafe_code)]
 
-/// Marks this crate as present in the workspace topology for the given phase.
-/// Exists so the crate is non-empty and the layering/CI checks have something
-/// real to verify before the phase implementation lands.
-pub const PHASE: u8 = 3;
+pub mod capabilities;
+pub mod completion;
+pub mod error;
+pub mod message;
+pub mod request;
+pub mod runtime;
+pub mod sampling;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn phase_is_recorded() {
-        assert_eq!(PHASE, 3);
-    }
-}
+pub use capabilities::{Capabilities, Health};
+pub use completion::{Chunk, Completion, FinishReason, TokenUsage};
+pub use error::{ModelError, Result};
+pub use message::{Message, Role, ToolCall, ToolSpec};
+pub use request::GenerateRequest;
+pub use runtime::ModelRuntime;
+pub use sampling::SamplingParams;

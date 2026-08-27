@@ -13,9 +13,29 @@ phase = 3
 [dependencies]
 valyria-types = { workspace = true }
 valyria-util = { workspace = true }
+valyria-store = { workspace = true }
+valyria-events = { workspace = true }
+valyria-vfs = { workspace = true }
+valyria-sandbox = { workspace = true }
+valyria-permissions = { workspace = true }
+valyria-ledger = { workspace = true }
+valyria-tools = { workspace = true }
+valyria-model = { workspace = true }
+valyria-runtime-fake = { workspace = true }
+valyria-orchestrator = { workspace = true }
+valyria-context = { workspace = true }
+valyria-task = { workspace = true }
+valyria-agent = { workspace = true }
+valyria-protocol = { workspace = true }
+rusqlite = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 tracing = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
 
 [dev-dependencies]
 valyria-testkit = { workspace = true }
+tempfile = { workspace = true }

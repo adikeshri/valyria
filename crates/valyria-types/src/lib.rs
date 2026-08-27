@@ -19,8 +19,8 @@ pub mod trust;
 pub use error::{CodedError, ErrorCode};
 pub use evidence::{Evidence, EvidenceBody, EvidenceSource};
 pub use id::{
-    ApprovalId, CheckpointId, ContextSnapshotId, EventId, Generation, IdParseError, LedgerEntryId,
-    MemoryId, ModelInstanceId, PlanId, SessionId, StepId, TaskId, ToolInvocationId,
+    ApprovalId, CheckpointId, ContextSnapshotId, EffectId, EventId, Generation, IdParseError,
+    LedgerEntryId, MemoryId, ModelInstanceId, PlanId, SessionId, StepId, TaskId, ToolInvocationId,
     VerificationRunId, WorkspaceId,
 };
 pub use policy::{Access, NetworkPolicy, PermissionCategory, PermissionMode};

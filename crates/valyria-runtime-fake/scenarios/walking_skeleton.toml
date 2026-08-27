@@ -1,0 +1,39 @@
+# Default Phase 3 walking-skeleton demo scenario: read a file, add a
+# function to it, run a safe command to check the result, finish.
+#
+# The `edit_file` turn's `anchor` must match, verbatim, the `src/lib.rs`
+# content of the fixture repo built by
+# `crates/valyria-cli/tests/walking_skeleton.rs` — this scenario and that
+# fixture are a matched pair, not independently generic.
+name = "walking_skeleton_default"
+
+[[turns]]
+kind = "tool_call"
+name = "read_file"
+arguments = { path = "src/lib.rs" }
+
+[[turns]]
+kind = "tool_call"
+name = "edit_file"
+arguments = { path = "src/lib.rs", precondition = "any", strategy = { type = "exact_replacement", anchor = """
+pub fn existing(a: i32) -> i32 {
+    a
+}
+""", replacement = """
+pub fn existing(a: i32) -> i32 {
+    a
+}
+
+pub fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+""" } }
+
+[[turns]]
+kind = "tool_call"
+name = "run_command"
+arguments = { program = "cat", args = ["src/lib.rs"] }
+
+[[turns]]
+kind = "finish"
+summary = "Added `add(a, b)` to src/lib.rs and printed the file to confirm."

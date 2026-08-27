@@ -84,6 +84,15 @@ impl ToolRuntime {
         self.registry.descriptors()
     }
 
+    /// Look up a registered tool by name, e.g. to call `Tool::preflight`
+    /// directly and re-derive a `PermissionRequest` — the agent loop's
+    /// `WAITING_FOR_PERMISSION` resume path needs this (both the normal
+    /// "client resolved the ask" case and crash recovery reconstruct the
+    /// request from durable data rather than caching it).
+    pub fn get_tool(&self, tool_name: &str) -> Option<Arc<dyn Tool>> {
+        self.registry.get(tool_name)
+    }
+
     /// Evaluate permission for `tool_name(input)` and, if allowed, execute
     /// it immediately.
     pub async fn invoke(&self, ctx: &ToolCtx, tool_name: &str, input: Value) -> InvocationResult {
