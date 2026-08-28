@@ -78,6 +78,15 @@ rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 # --- filesystem ---
 ignore = "0.4"
 
+# --- language parsing (D9: grammars are data behind one trait) ---
+tree-sitter = "0.26"
+tree-sitter-rust = "0.24"
+tree-sitter-python = "0.25"
+tree-sitter-go = "0.25"
+tree-sitter-java = "0.23"
+tree-sitter-javascript = "0.25"
+tree-sitter-typescript = "0.23"
+
 # --- tracing ---
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

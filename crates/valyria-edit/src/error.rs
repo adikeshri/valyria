@@ -35,6 +35,31 @@ pub enum EditError {
         strategy: &'static str,
         owning_crate: &'static str,
     },
+    #[error("language parsing: {0}")]
+    Lang(#[from] valyria_lang::LangError),
+    #[error(
+        "the symbol-aware and AST strategies need a parser, and no grammar in this build claims `{path}` \
+         (or the edit transaction was built without a language registry)"
+    )]
+    LanguageUnavailable { path: String },
+    #[error("no symbol named `{symbol_path}` in this file; it defines: {}", available.join(", "))]
+    SymbolNotFound {
+        symbol_path: String,
+        available: Vec<String>,
+    },
+    #[error("`{symbol_path}` names {count} definitions in this file; an edit addressed to it has no single correct target")]
+    SymbolAmbiguous { symbol_path: String, count: usize },
+    #[error("tree-sitter query is invalid: {0}")]
+    QueryInvalid(String),
+    #[error("query matched {count} nodes; pass `all: true` to replace every one of them")]
+    QueryAmbiguous { count: usize },
+    #[error("transform matched nothing: {0}")]
+    NoMatch(String),
+    #[error(
+        "the edit introduced syntax errors into a file that parsed cleanly before it; \
+         the file was left untouched"
+    )]
+    SyntaxRegression,
     #[error("the resulting content does not match what the strategy was expected to produce: {0}")]
     VerificationFailed(String),
 }
@@ -53,6 +78,14 @@ impl ErrorCode for EditError {
             EditError::SizeGuardTripped { .. } => "edit.size_guard_tripped",
             EditError::MissingReason => "edit.missing_reason",
             EditError::NotYetImplemented { .. } => "edit.not_yet_implemented",
+            EditError::Lang(_) => "edit.lang",
+            EditError::LanguageUnavailable { .. } => "edit.language_unavailable",
+            EditError::SymbolNotFound { .. } => "edit.symbol_not_found",
+            EditError::SymbolAmbiguous { .. } => "edit.symbol_ambiguous",
+            EditError::QueryInvalid(_) => "edit.query_invalid",
+            EditError::QueryAmbiguous { .. } => "edit.query_ambiguous",
+            EditError::NoMatch(_) => "edit.no_match",
+            EditError::SyntaxRegression => "edit.syntax_regression",
             EditError::VerificationFailed(_) => "edit.verification_failed",
         }
     }

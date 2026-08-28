@@ -1,24 +1,33 @@
 //! `valyria-lang` — layer 2 (Repository intelligence).
 //!
-//! LanguageProvider trait, tree-sitter grammars, symbol/import/test extraction queries.
+//! Language support as **data behind one trait** (D9). A
+//! [`LanguageProvider`] contributes a tree-sitter grammar and a directory
+//! of `.scm` queries; a single extraction engine
+//! ([`extract`]) turns query captures into language-neutral
+//! [`FileFacts`] — symbols, imports, call sites, tests. Nothing in this
+//! crate matches on a file extension, and nothing above it knows that
+//! tree-sitter exists.
 //!
-//! Status: scaffolded per the build plan (docs/PLAN.md, Phase 4). The crate
-//! compiles and is wired into the workspace layering check; full implementation
-//! lands in its designated phase.
+//! Adding a language is adding `queries/<lang>/` plus a small provider.
+//! It is never an edit to extraction, indexing, the graph, or search.
 
 #![forbid(unsafe_code)]
+#![warn(missing_debug_implementations)]
 
-/// Marks this crate as present in the workspace topology for the given phase.
-/// Exists so the crate is non-empty and the layering/CI checks have something
-/// real to verify before the phase implementation lands.
-pub const PHASE: u8 = 4;
+pub mod chunk;
+pub mod error;
+pub mod extract;
+pub mod languages;
+pub mod parse;
+pub mod provider;
+pub mod query;
+pub mod registry;
+pub mod symbol;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn phase_is_recorded() {
-        assert_eq!(PHASE, 4);
-    }
-}
+pub use chunk::{chunk_file, Chunk, DEFAULT_MAX_CHUNK_BYTES};
+pub use error::{LangError, Result};
+pub use parse::{CompiledLanguage, ParsedFile};
+pub use provider::{LanguageProvider, LanguageQueries, Tier};
+pub use query::{identifier_spans, query_spans};
+pub use registry::LanguageRegistry;
+pub use symbol::{Call, FileFacts, Import, Span, Symbol, SymbolKind, TestCase};

@@ -189,6 +189,14 @@ impl Generation {
     }
 }
 
+/// `INITIAL`, i.e. "nothing has been indexed yet" — the honest default for
+/// a struct that carries a generation before one exists.
+impl Default for Generation {
+    fn default() -> Self {
+        Generation::INITIAL
+    }
+}
+
 impl fmt::Display for Generation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "gen{}", self.0)
