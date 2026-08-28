@@ -1,8 +1,11 @@
-//! What an adapter can do, and its current health. Deliberately minimal for
-//! Phase 3 — vision/embeddings/batch/logprobs/kv-cache-reuse fields land
-//! additively in Phase 9 (§4.20) once real adapters need to report them;
-//! adding a field here is not a breaking change for existing callers since
-//! every field is data, not a trait method.
+//! What an adapter can do, and its current health. Deliberately minimal:
+//! the Phase 9 offline slice (catalog, model store, OpenAI-compatible
+//! adapter, transport ladder) needs only `supports_native_tools` /
+//! `supports_grammar` / `supports_streaming` / `context_length`.
+//! vision/embeddings/batch/logprobs/kv-cache-reuse fields land additively
+//! (§4.20) when an adapter that reports them arrives; adding a field here
+//! is not a breaking change for existing callers since every field is
+//! data, not a trait method.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capabilities {

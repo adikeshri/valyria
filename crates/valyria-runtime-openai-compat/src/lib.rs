@@ -1,24 +1,26 @@
 //! `valyria-runtime-openai-compat` — layer 4 (Model).
 //!
-//! Local OpenAI-compatible servers (llama-server, vLLM, Ollama, LM Studio).
+//! A [`ModelRuntime`](valyria_model::ModelRuntime) for any local
+//! OpenAI-compatible server — llama-server, vLLM, Ollama, LM Studio. This
+//! is the adapter Phase 9 leans on: it needs no FFI and no Python bridge,
+//! just a running server.
 //!
-//! Status: scaffolded per the build plan (docs/PLAN.md, Phase 9). The crate
-//! compiles and is wired into the workspace layering check; full implementation
-//! lands in its designated phase.
+//! HTTP is abstracted behind [`HttpTransport`] so request construction,
+//! response parsing (`/v1/chat/completions`, both buffered and SSE),
+//! native tool-call extraction, and mid-request / mid-stream cancellation
+//! are all covered offline against [`MockTransport`]. The concrete
+//! `reqwest`-backed transport is a small isolated impl left out of the
+//! offline build (Phase 9 scope note; see `docs/ROADMAP.md`).
 
 #![forbid(unsafe_code)]
 
-/// Marks this crate as present in the workspace topology for the given phase.
-/// Exists so the crate is non-empty and the layering/CI checks have something
-/// real to verify before the phase implementation lands.
+pub mod runtime;
+pub mod transport;
+pub mod wire;
+
+pub use runtime::OpenAiCompatRuntime;
+pub use transport::{HttpError, HttpResult, HttpTransport, MockTransport};
+
+/// Kept for backwards compatibility with the scaffold; the crate is now
+/// implemented.
 pub const PHASE: u8 = 9;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn phase_is_recorded() {
-        assert_eq!(PHASE, 9);
-    }
-}
