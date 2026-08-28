@@ -15,6 +15,56 @@ Work toward the first release. Phases refer to
 
 ### Added
 
+- **Phase 9 — real models (offline slice).** The model layer is now real: a
+  catalog, a verified download store, an OpenAI-compatible runtime adapter, and
+  the tool-call transport ladder that makes unreliable open-weight models usable.
+  - `valyria-model-registry` (new crate): the `ModelCard` catalog — id, family,
+    quantization, context length, file size, recommended sampling, per-role
+    suitability scores, `ModelRequirement`, transport preference, license, source
+    URL and blake3 hash — shipped **embedded** (`catalog.json`, compiled in) so
+    the runtime works offline. `ModelRole` is the full role set (PrimaryCoder,
+    FastCoder, Planner, Reviewer, Embedder, Reranker, Autocomplete, Summarizer)
+    with eviction priority and escalation edges. `select_for_role` scores
+    `(model, role)` pairs against **measured** hardware via
+    `valyria_hardware::fits`, penalising a `Tight` fit below a comfortably-
+    fitting alternative; `RoleBinding::derive` builds a primary + ordered
+    fallback chain.
+  - `valyria-model-store` (new crate, migration block 900-999): the on-disk
+    weights store. `plan_install` surfaces size + license + hardware fit and must
+    be `.confirm()`ed; `install` does a **resumable** chunked download behind the
+    `Fetcher` seam (`.part` file, byte-range resume), a **whole-file blake3
+    integrity check** that deletes the file and hard-errors on mismatch, a probe
+    behind the `Prober` seam, then an atomic `manifest.json`. `verify_integrity`,
+    `remove` (reports freed bytes), `gc` (drops models not in the keep-set, sweeps
+    stray partials) and `storage_report` round it out; `InstalledModelStore` is a
+    rebuildable DB index over the manifests.
+  - `valyria-runtime-openai-compat` (new crate): `OpenAiCompatRuntime`, a
+    `ModelRuntime` for any local OpenAI-compatible server (llama-server, vLLM,
+    Ollama, LM Studio). HTTP sits behind the `HttpTransport` trait, so
+    `/v1/chat/completions` request building, buffered and SSE response parsing,
+    native tool-call extraction, `/health`, and mid-request / mid-stream
+    cancellation are all covered against a scripted `MockTransport`.
+  - `valyria-orchestrator`: hardened from the Phase 3 stub. `structured` is the
+    **tool-call transport ladder** (D5) — native `tool_calls` first, then a
+    tolerant recovery parser over model text (strips ```` ```json ````,
+    `<tool_call>` / `[TOOL_CALLS]` / `<|python_tag|>` wrappers and prose; pulls
+    the first *string-aware* balanced JSON value; tolerates trailing commas;
+    accepts `{name,arguments}`, `{tool,args}`, `{function:{…}}`, `{tool_call:{…}}`
+    and arrays; stringified arguments) — then `resolve_tool_calls` feeds a parse
+    failure back to the model as evidence for a **bounded reformat-retry**.
+    `ModelPool` is memory-aware **admission control**: LRU-within-role-priority
+    eviction that never displaces a higher-priority model, emitting
+    `ResourcePressure` / `Evicted` / `Loaded` events. `RoleRouter` walks a
+    `RoleBinding`'s fallback chain, skipping unregistered or unhealthy models and
+    retrying the next on a retryable error. `Role` is now a re-export of
+    `ModelRole`; the Phase 3 `Orchestrator` is unchanged.
+  - Deliberate scope (open decision 5 — solo build defers MLX/CUDA): the concrete
+    `reqwest` HTTP transport, the real GGUF-loading probe, and the
+    `valyria-runtime-llamacpp` / `valyria-runtime-mlx` adapters remain documented
+    scaffolds; the ladder, pool and router are built and tested but not yet wired
+    into the live agent loop (which still drives through `Orchestrator`). 78 new
+    tests; 1020 pass across the workspace.
+
 - **Phase 8 — planning and multi-agent.** The runtime now turns a task into a
   validated, revisable plan and executes it step by step, checkpointing at
   rollback boundaries.

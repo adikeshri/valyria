@@ -8,6 +8,12 @@ pub enum OrchestratorError {
     NoBinding { role: Role },
     #[error("model error: {0}")]
     Model(#[from] valyria_model::ModelError),
+    #[error("every model in the fallback chain for role {role:?} failed; last error: {last}")]
+    AllFallbacksFailed { role: Role, last: String },
+    #[error(
+        "model output could not be parsed into a tool call after {attempts} attempt(s): {detail}"
+    )]
+    UnparseableToolCall { attempts: u32, detail: String },
 }
 
 impl ErrorCode for OrchestratorError {
@@ -15,6 +21,8 @@ impl ErrorCode for OrchestratorError {
         match self {
             OrchestratorError::NoBinding { .. } => "orchestrator.no_binding",
             OrchestratorError::Model(_) => "orchestrator.model",
+            OrchestratorError::AllFallbacksFailed { .. } => "orchestrator.all_fallbacks_failed",
+            OrchestratorError::UnparseableToolCall { .. } => "orchestrator.unparseable_tool_call",
         }
     }
 
@@ -22,6 +30,8 @@ impl ErrorCode for OrchestratorError {
         match self {
             OrchestratorError::NoBinding { .. } => false,
             OrchestratorError::Model(e) => e.retryable(),
+            OrchestratorError::AllFallbacksFailed { .. } => true,
+            OrchestratorError::UnparseableToolCall { .. } => false,
         }
     }
 }

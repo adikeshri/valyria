@@ -12,7 +12,7 @@ Status vocabulary:
 - **scaffolded** — the crate compiles, declares its layer and phase, and is
   wired into the layering check. No implementation yet.
 
-Last updated: 2026-08-28 (after Phase 8).
+Last updated: 2026-08-28 (after Phase 9).
 
 ---
 
@@ -29,12 +29,85 @@ Last updated: 2026-08-28 (after Phase 8).
 | 6 | Context, instructions, memory; prompt assembly with the trust lattice | **partial** — the full pipeline, instruction discovery and memory are implemented and tested against every stated exit criterion; a search-backed `Retriever` is included, but wiring retrieval + index bootstrap into the live agent loop is a deliberate follow-up (the embedded runtime still drives with explicit-file context) |
 | 7 | Verification, diagnosis, repair: `verify`, failure parsers, repair loop, loop detection | **partial** — discovery, escalation strategy, the runner, ten failure parsers, diagnosis, the completion report, five loop detectors and the driver's verify→diagnose→repair loop are all implemented and tested; a fake-model seeded-bug fix and a caught non-converging loop pass end to end. The 30-real-repo discovery corpus and the captured-output parser corpus at scale wait on `valyria-bench` (Phase 11), and mapping changed symbols → covering tests / graph-neighbour suspects in the *live* loop is a Phase 6/8 wiring follow-up |
 | 8 | Planning and multi-agent: `plan`, checkpoints, rollback boundaries, sub-tasks | **partial** — the plan model, validator (nine structured error codes), dependency/wave scheduler, checkpoint capture + ledger-backed rollback, the five multi-agent roles + typed artifacts, and the `PlanStore` (migration block 800-899) are implemented and tested; the driver runs `Planning` as a model-authored, validated, bounded-repair plan and executes it step by step with a checkpoint at each rollback boundary. Deferred: spawning a role as its own child task (sub-agents), real parallel step execution, index-backed target resolution, and verification interleaved *between* steps (the mandatory full `Verifying` run is the backstop) |
-| 9 | Real models: `runtime-llamacpp`, `runtime-mlx`, `runtime-openai-compat`, registry, store, model pool | scaffolded |
+| 9 | Real models: `runtime-llamacpp`, `runtime-mlx`, `runtime-openai-compat`, registry, store, model pool | **partial** — the embedded `ModelCard` catalog + hardware-fit selection, the verified resumable download store (migration block 900-999), the `OpenAiCompatRuntime` adapter (behind an `HttpTransport` seam), and the orchestrator's tool-call transport ladder + memory-aware model pool + fallback-chain router are all implemented and tested offline. Deferred (open decision 5, solo build): the concrete `reqwest` transport, the real GGUF-loading probe, the `runtime-llamacpp` / `runtime-mlx` adapters, and wiring the ladder/pool/router into the live agent loop |
 | 10 | Interface completion: protocol v1 freeze, schema export, full CLI, TUI, `doctor`, `clean`, daemon | not started |
 | 11 | Hardening and evaluation: `bench`, fuzzing, perf work, cross-platform matrix, release gates | not started |
 
 Phase 9 can start early against the OpenAI-compatible adapter (a locally running
 `llama-server`) without waiting for any FFI work.
+
+---
+
+## What Phase 9 delivered
+
+The model layer stopped being a single scripted fake. There is now a
+**catalog**, a **verified weights store**, a **real runtime adapter**, and
+the **transport ladder** that turns an unreliable open-weight model into a
+usable one — all runnable and tested with the network disabled.
+
+**The catalog is embedded and fit is measured.** `valyria-model-registry`
+ships `catalog.json` compiled into the binary: one `ModelCard` per
+quantization variant, carrying its `ModelRequirement`, per-role suitability
+scores, transport preference, license, source URL and blake3 hash.
+`select_for_role` runs candidates through `valyria_hardware::fits` — the
+*same* function `doctor` uses — and penalises a `Tight` fit so a
+comfortably-fitting, slightly-less-suitable model can legitimately win.
+`RoleBinding::derive` turns "which model for the planner?" into a primary
+plus an ordered fallback chain.
+
+**Downloads are resumable, verified, and never partial-on-success.**
+`valyria-model-store`'s `plan_install` surfaces size + license + hardware
+fit and returns a plan the caller must `.confirm()`. `install` streams the
+weights through the `Fetcher` seam into a `.part` file, resumes from its
+length on a retry, then runs a **whole-file blake3 check** — a mismatch
+deletes the file and hard-errors rather than leaving a broken install.
+A `Prober` seam runs the post-install load/generate probe; `manifest.json`
+is written atomically. `verify_integrity`, `remove` (reports freed bytes),
+`gc` (drops models outside the keep-set, sweeps stray partials) and
+`storage_report` are the reclamation surface; migration block 900-999
+holds the rebuildable `installed_model` index.
+
+**One adapter covers every local server.** `OpenAiCompatRuntime`
+implements `ModelRuntime` against llama-server / vLLM / Ollama / LM Studio.
+HTTP is behind the `HttpTransport` trait, so `/v1/chat/completions`
+request building, buffered *and* SSE parsing, native tool-call extraction,
+`/health`, and cancellation on both the buffered and streaming paths are
+all asserted against a scripted `MockTransport`. Mid-stream cancel stops
+the stream and emits a terminal `Cancelled`.
+
+**The transport ladder is the headline (D5).**
+`valyria_orchestrator::structured` reads a tool call out of a completion
+in three tiers: the adapter's native `tool_calls` array; failing that, a
+tolerant recovery parser over the model's text — it strips ```` ```json ````
+fences, `<tool_call>` / `<|python_tag|>` / `[TOOL_CALLS]` wrappers and
+prose, pulls the first *string-aware* balanced JSON value (a `}` inside a
+string literal does not unbalance it), tolerates trailing commas, and
+accepts every common shape (`{name,arguments}`, `{tool,args}`,
+`{function:{…}}`, `{tool_call:{…}}`, arrays, stringified arguments);
+failing *that*, `resolve_tool_calls` feeds the parse error back to the
+model as evidence and asks again, bounded by a retry budget. A 21-case
+corpus of real open-weight output shapes is the regression guard.
+
+**The pool protects the critical path.** `ModelPool` admission control is
+LRU-within-role-priority: a background embedder or reranker is evicted
+under memory pressure, the primary coder never is — an embedder that can
+only fit by displacing the coder is refused (`WontFit`) instead.
+`ResourcePressure`, `Evicted` and `Loaded` events explain every decision.
+`RoleRouter` walks a binding's fallback chain, skipping unregistered or
+unhealthy models and retrying the next on a retryable error.
+
+**Deliberate scope choices for this phase (open decision 5 — a solo build
+defers the MLX/CUDA adapters):** the concrete `reqwest`/`hyper`
+`HttpTransport` impl, the real GGUF-loading `Prober`, and the
+`valyria-runtime-llamacpp` / `valyria-runtime-mlx` adapters remain
+documented scaffolds — the first is a ~60-line trait impl, and llama.cpp's
+managed-server mode reuses `OpenAiCompatRuntime` wholesale. The ladder,
+pool and router are built and tested but the live agent loop still drives
+through the Phase 3 `Orchestrator`; wiring them in (with catalog-backed
+role bindings and a real `ModelRuntime` behind `PrimaryCoder`) is the
+Phase 9 follow-up.
+
+78 new tests; 1020 pass across the workspace, up from 942.
 
 ---
 
@@ -392,8 +465,11 @@ clear "not implemented in this phase" error rather than pretending:
 | `search` and `symbol_search` tools return `tools.not_yet_implemented` — `valyria-search` implements the engine and `valyria-context`'s `SearchRetriever` consumes it, but the first-class tools and CLI still do not | Phase 6 follow-up |
 | The index, graph and search engine are not wired into the *live* agent loop: nothing calls `bootstrap` during a task, and the embedded runtime drives with explicit-file context. `ContextEngine` + `SearchRetriever` are built and tested; wiring them into `valyria-app`/`valyria-agent` (with a bootstrap and generation-pinning strategy) is the follow-up | Phase 6 follow-up |
 | Sandbox on Linux and Windows falls back to `PermissiveSandbox` (reported, never silent) | Phase 1 completion |
-| Only the fake model runtime exists; no real inference | Phase 9 |
-| Model-authored planning is opt-in (`--plan` / `PlanningMode::ModelAuthored`); the default `Planning` is still the Phase-3 pass-through so every pre-Phase-8 scenario is unchanged. Turning it on by default waits on real models | Phase 9 |
+| No concrete HTTP transport: `OpenAiCompatRuntime` is generic over `HttpTransport`, tested against `MockTransport`; the `reqwest`/`hyper` impl that talks to a real `llama-server` is not written. `valyria-runtime-llamacpp` (managed-server mode) and `valyria-runtime-mlx` remain scaffolds | Phase 9 follow-up |
+| The transport ladder, `ModelPool` and `RoleRouter` exist and are tested, but the live agent loop still drives through the Phase 3 `Orchestrator` with a single bound runtime; catalog-backed role bindings + a real `ModelRuntime` behind `PrimaryCoder` are not wired into `valyria-app` | Phase 9 follow-up |
+| The post-install probe uses `NullProber` (records the card's declared capabilities); the real load-and-generate probe needs a GGUF-loading adapter | Phase 9 follow-up |
+| `InstalledModelStore` (migration block 900-999) is standalone; the `global.db` that §4.1 puts models/user-memory/config in has no assembly point yet (`workspace.db` does, via `valyria-app`) | Phase 10 |
+| Model-authored planning is opt-in (`--plan` / `PlanningMode::ModelAuthored`); the default `Planning` is still the Phase-3 pass-through so every pre-Phase-8 scenario is unchanged. Turning it on by default waits on the live-loop model wiring | Phase 9 follow-up |
 | Multi-agent roles + typed artifacts exist, but a role is not yet run as its own child task (own journal, budget, cancellation); the driver executes one flat plan | Phase 8 follow-up |
 | Plan steps run one at a time even when `parallelizable`; the scheduler computes the parallel groups but the executor does not use them yet | Phase 8 follow-up |
 | Plan `targets` are validated against the workspace filesystem, not the repository index (still not wired into the agent loop); no verification is run *between* plan steps — the mandatory full `Verifying` suite is the backstop | Phase 6/8 follow-up |
@@ -426,6 +502,40 @@ Two further gaps are deliberate scope choices rather than unfinished work:
 - **LSP servers are configured but unexercised against real ones.** The client
   is fully tested against a scripted server; behaviour against a real
   rust-analyzer or gopls is untested, and belongs in the Phase 11 matrix.
+
+### Phase 9 exit criteria: status
+
+- **A real local model completes the Phase 7 seeded-bug suite.** Not yet —
+  this needs the concrete `HttpTransport` impl and a running `llama-server`,
+  which are the documented follow-up. The pieces it depends on are proven:
+  `OpenAiCompatRuntime` drives a full `generate` (buffered and streamed),
+  native-tool-call, health and cancellation cycle against `MockTransport`
+  (`crates/valyria-runtime-openai-compat/tests/runtime.rs`), and the
+  transport ladder recovers a tool call from a bad turn and retries
+  (`crates/valyria-orchestrator/tests/transport_ladder.rs::reformat_retry_recovers_after_one_bad_turn`).
+- **Model install verifies integrity and surfaces license.** Done —
+  `crates/valyria-model-store/tests/install.rs`:
+  `plan_surfaces_size_license_and_fit`,
+  `happy_path_downloads_verifies_probes_and_writes_manifest`,
+  `integrity_mismatch_deletes_the_download_and_leaves_nothing_installed`,
+  `interrupted_download_resumes_from_the_part_file`. The whole-file blake3
+  check is mandatory before a manifest is written.
+- **Memory pressure triggers eviction rather than OOM.** Done —
+  `crates/valyria-orchestrator/src/pool.rs::pressure_evicts_lowest_priority_first_and_keeps_the_coder`,
+  `::a_low_priority_model_will_not_evict_a_higher_priority_one`,
+  `::lru_breaks_ties_within_a_priority`, `::a_model_bigger_than_the_whole_budget_wont_fit`.
+  Admission returns `WontFit` or an eviction plan; it never over-commits the
+  budget.
+- **Mid-generation cancel actually stops the runtime.** Done at the adapter
+  boundary —
+  `crates/valyria-runtime-openai-compat/tests/runtime.rs::stream_stops_when_the_token_is_cancelled_midway`
+  and `::generate_honours_a_pre_cancelled_token`: the buffered path races
+  the cancel token with `tokio::select!`, and the SSE path stops pulling and
+  emits a terminal `Cancelled` the moment the token trips.
+- **Deliberate scope choice (open decision 5):** the `reqwest` transport,
+  the GGUF-loading probe, and the llama.cpp / MLX adapters are follow-ups.
+  Every criterion above that does not require a live server is met; the
+  first is blocked only on that ~60-line transport impl.
 
 ### Phase 8 exit criteria: status
 

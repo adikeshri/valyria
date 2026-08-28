@@ -1,9 +1,6 @@
-//! Model roles (§38). Phase 3 only needs enough to route a request to the
-//! single registered fake-model adapter; the full role set
-//! (FAST_CODER, PLANNER, REVIEWER, EMBEDDER, RERANKER, AUTOCOMPLETE,
-//! SUMMARIZER) and fallback-chain escalation land in Phase 9.
+//! Model roles (§38). The canonical definition lives in
+//! `valyria-model-registry`, next to the catalog that scores models for
+//! each role; the orchestrator re-exports it as `Role` so existing callers
+//! keep a stable path.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Role {
-    PrimaryCoder,
-}
+pub use valyria_model_registry::ModelRole as Role;

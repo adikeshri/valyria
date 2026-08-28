@@ -2,9 +2,11 @@
 //!
 //! Apple-silicon MLX adapter.
 //!
-//! Status: scaffolded per the build plan (docs/PLAN.md, Phase 9). The crate
-//! compiles and is wired into the workspace layering check; full implementation
-//! lands in its designated phase.
+//! Status: **deferred within Phase 9** (open decision 5 — a solo build
+//! defers the MLX/CUDA adapters). MLX is Python-side, so this adapter is a
+//! managed `mlx-lm` server subprocess with a strict handshake; it reuses
+//! the OpenAI-compatible client once a concrete `HttpTransport` exists. The
+//! crate compiles and is wired into the layering check until then.
 
 #![forbid(unsafe_code)]
 

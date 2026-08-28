@@ -2921,8 +2921,11 @@ name = "valyria-model-registry"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "tracing",
+ "valyria-hardware",
+ "valyria-model",
  "valyria-testkit",
  "valyria-types",
  "valyria-util",
@@ -2932,9 +2935,18 @@ dependencies = [
 name = "valyria-model-store"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "rusqlite",
  "serde",
+ "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
+ "tokio",
  "tracing",
+ "valyria-hardware",
+ "valyria-model",
+ "valyria-model-registry",
+ "valyria-store",
  "valyria-testkit",
  "valyria-types",
  "valyria-util",
@@ -2944,11 +2956,15 @@ dependencies = [
 name = "valyria-orchestrator"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "futures",
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
  "valyria-model",
+ "valyria-model-registry",
  "valyria-runtime-fake",
  "valyria-testkit",
  "valyria-types",
@@ -3063,9 +3079,14 @@ dependencies = [
 name = "valyria-runtime-openai-compat"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "futures",
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
+ "tokio",
  "tracing",
+ "valyria-model",
  "valyria-testkit",
  "valyria-types",
  "valyria-util",

@@ -14,11 +14,15 @@ phase = 3
 valyria-types = { workspace = true }
 valyria-util = { workspace = true }
 valyria-model = { workspace = true }
+valyria-model-registry = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
 valyria-testkit = { workspace = true }
 valyria-runtime-fake = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
 tokio = { workspace = true }
