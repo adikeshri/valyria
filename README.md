@@ -7,7 +7,7 @@ models that run on your own machine. There is no cloud service, no telemetry,
 and no network dependency at runtime — the offline test job in CI exists to
 keep it that way.
 
-> **Status: early.** The workspace is a ~40-crate skeleton in which phases 0–4
+> **Status: early.** The workspace is a ~40-crate skeleton in which phases 0–5
 > of [the build plan](docs/PLAN.md) are implemented and the remaining phases are
 > scaffolded stubs. The end-to-end agent loop runs today against a deterministic
 > **fake** model; real model runtimes (llama.cpp, MLX, OpenAI-compatible
@@ -44,11 +44,17 @@ than just its bytes:
   change here affect, which tests cover it — with a confidence on every edge
   that name-based resolution could get wrong;
 - **enriches** all of that from a language server when one is installed, and
-  works exactly as well when none is.
+  works exactly as well when none is;
+- **searches** it seven ways — lexical, regex, symbol, semantic, AST,
+  dependency and git — fused into one ranked list where every hit explains its
+  own score, over generational chunk embeddings behind an `Embedder` trait
+  (a deterministic offline embedder stands in until a real model lands in
+  Phase 9), and still works with embeddings switched off.
 
-Not yet built: search and embeddings, planning, memory, verification/repair, and
-every real model adapter. The index and graph are not yet wired into the agent
-loop — that arrives with retrieval in Phases 5–6.
+Not yet built: planning, memory, verification/repair, and every real model
+adapter. The index, graph and search engine are not yet wired into the agent
+loop or the `search` tool — that wiring arrives with the context engine in
+Phase 6.
 
 ## Requirements
 
@@ -131,7 +137,7 @@ docs/ROADMAP.md    per-phase status
 ## Development
 
 ```bash
-cargo test --workspace              # 664 tests as of Phase 4
+cargo test --workspace              # 720 tests as of Phase 5
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p xtask -- check-layering

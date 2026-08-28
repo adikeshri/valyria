@@ -85,7 +85,7 @@ process spawn/supervision with output caps, timeouts and process-group kill;
 sandbox traits with per-platform implementations; hardware probing; `gix`-backed
 git reads.
 
-### Layer 2 — Repository intelligence *(`embed` and `search` scaffolded, Phase 5)*
+### Layer 2 — Repository intelligence
 `valyria-lang` · `valyria-lsp` · `valyria-index` · `valyria-graph` ·
 `valyria-embed` · `valyria-search`
 
@@ -96,7 +96,13 @@ generation range they were valid for, so a read at generation *N* always sees
 the repository as it was then. A typed knowledge graph derived from one index
 generation, with confidence on every edge that name-based resolution could get
 wrong. An LSP client pool that enriches those answers where a server exists and
-degrades silently where one does not.
+degrades silently where one does not. Generational chunk embeddings behind an
+`Embedder` trait — a deterministic offline default until a real model exists —
+searched through an HNSW index checked against exact cosine. And one search
+engine over all of it: seven retrieval modes fused by reciprocal-rank fusion
+and a task-aware reranker, every hit carrying the feature breakdown that
+produced its score, and every mode free to step aside when it has nothing to
+add (search still works with embeddings switched off).
 
 ### Layer 3 — Execution
 `valyria-permissions` · `valyria-tools` · `valyria-edit` · `valyria-ledger` ·

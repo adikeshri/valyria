@@ -13,9 +13,19 @@ phase = 5
 [dependencies]
 valyria-types = { workspace = true }
 valyria-util = { workspace = true }
+valyria-store = { workspace = true }
+valyria-lang = { workspace = true }
+valyria-index = { workspace = true }
+valyria-graph = { workspace = true }
+valyria-embed = { workspace = true }
+valyria-git = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }
+regex = { workspace = true }
+rayon = { workspace = true }
 
 [dev-dependencies]
 valyria-testkit = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = { workspace = true }

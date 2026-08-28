@@ -2,7 +2,7 @@
 //! 200-299 are reserved for this crate, continuing the hundred-block
 //! convention started in `valyria-task` (`valyria-events` owns 1-99,
 //! `valyria-task` owns 100-199, `valyria-index` owns 300-399,
-//! `valyria-graph` owns 400-499).
+//! `valyria-graph` owns 400-499, `valyria-embed` owns 500-599).
 
 use valyria_store::Migration;
 
@@ -23,6 +23,7 @@ pub fn workspace_migrations() -> Vec<Migration> {
     all.extend(MIGRATIONS.iter().copied());
     all.extend(valyria_index::MIGRATIONS.iter().copied());
     all.extend(valyria_graph::MIGRATIONS.iter().copied());
+    all.extend(valyria_embed::MIGRATIONS.iter().copied());
     all
 }
 
@@ -55,6 +56,7 @@ mod tests {
         assert!(applied.contains(&200));
         assert!(applied.contains(&300));
         assert!(applied.contains(&400));
+        assert!(applied.contains(&500));
     }
 
     #[test]
@@ -70,6 +72,7 @@ mod tests {
             ("valyria-app", 200..300),
             ("valyria-index", 300..400),
             ("valyria-graph", 400..500),
+            ("valyria-embed", 500..600),
         ] {
             assert!(
                 versions.iter().any(|v| block.contains(v)),

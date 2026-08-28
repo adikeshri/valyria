@@ -15,6 +15,27 @@ Work toward the first release. Phases refer to
 
 ### Added
 
+- **Phase 5 — search.** One query, several ways of answering it, one ranked and
+  explained result.
+  - `valyria-embed`: the embedding half of semantic search. An `Embedder` trait
+    that `valyria-model` will implement once a real model is loaded, plus a
+    deterministic `HashingEmbedder` that runs offline so semantic search works
+    on a machine that never downloads a model. A generational vector store — the
+    same D8 model as the index, with a rebuild reusing the vectors of unchanged
+    chunks by content hash — and a compact, seeded `Hnsw` index checked against
+    brute-force cosine so approximate search cannot be subtly wrong without a
+    test noticing. Migration block 500-599.
+  - `valyria-search`: seven independent retrieval modes — lexical (TF-IDF
+    weighted content scan plus the symbol FTS), regex, symbol, semantic, AST
+    (tree-sitter query patterns), dependency (graph traversal from the task's
+    anchor files) and git (recent history) — combined by reciprocal-rank
+    fusion and a task-aware feature reranker (recency, churn, import-graph
+    distance, test proximity, a path prior). A mode with nothing to contribute
+    steps aside with a note; **search works fully with embeddings disabled**.
+    Every hit carries a `ScoreExplanation` whose features sum exactly to the
+    hit's score, so "why this file?" is answered from stored data and the
+    number cannot drift from its own explanation. A labeled-retrieval-set test
+    guards ranking quality by recall@5 and MRR.
 - **Phase 4 — repository intelligence.** The runtime now understands the code it
   is editing rather than only its bytes.
   - `valyria-lang`: the `LanguageProvider` trait, tree-sitter grammars and a
@@ -85,7 +106,8 @@ Work toward the first release. Phases refer to
 ### Known limitations
 
 Tracked in [docs/ROADMAP.md](docs/ROADMAP.md#known-gaps). In short: no real
-model runtime, no search or embeddings, no planning, memory or verification, and
-no sandbox confinement outside macOS.
+model runtime; the `search` and `symbol_search` tools and the agent loop are not
+yet wired to the search engine (Phase 6); no planning, memory or verification;
+and no sandbox confinement outside macOS.
 
 [Unreleased]: https://github.com/adikeshri/valyria/commits/main

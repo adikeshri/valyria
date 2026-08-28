@@ -12,7 +12,7 @@ Status vocabulary:
 - **scaffolded** — the crate compiles, declares its layer and phase, and is
   wired into the layering check. No implementation yet.
 
-Last updated: 2026-08-28 (after Phase 4).
+Last updated: 2026-08-28 (after Phase 5).
 
 ---
 
@@ -25,7 +25,7 @@ Last updated: 2026-08-28 (after Phase 4).
 | 2 | Execution: `permissions`, `tools`, `edit`, `ledger` | **partial** — 16 of 18 tools live; all 6 edit strategies live as of Phase 4 |
 | 3 ⭐ | Walking skeleton: `model` + `runtime-fake` + minimal `orchestrator`, `task`, `agent`, minimal `context`, `protocol`, `app`, `cli` | **done** |
 | 4 | Repository intelligence: `lang`, `index`, `graph`, incremental pipeline, `lsp` | **partial** — 7 languages of the 11 planned tier-1 set; no large-repo performance run yet |
-| 5 | Search: `embed`, `search`, fusion ranking, explanations | scaffolded |
+| 5 | Search: `embed`, `search`, fusion ranking, explanations | **partial** — engine and all seven modes live; not yet wired to the `search` tool or the agent loop, and semantic ranking rides a placeholder embedder until Phase 9 |
 | 6 | Context, instructions, memory; prompt assembly with the trust lattice | scaffolded |
 | 7 | Verification, diagnosis, repair: `verify`, failure parsers, repair loop, loop detection | scaffolded |
 | 8 | Planning and multi-agent: `plan`, checkpoints, rollback boundaries, sub-tasks | scaffolded |
@@ -33,9 +33,59 @@ Last updated: 2026-08-28 (after Phase 4).
 | 10 | Interface completion: protocol v1 freeze, schema export, full CLI, TUI, `doctor`, `clean`, daemon | not started |
 | 11 | Hardening and evaluation: `bench`, fuzzing, perf work, cross-platform matrix, release gates | not started |
 
-Phases 5 and 7 are parallelizable now that 4 has landed. Phase 9 can start early
-against the OpenAI-compatible adapter (a locally running `llama-server`) without
-waiting for any FFI work.
+Phase 7 is parallelizable now that 4 has landed. Phase 9 can start early against
+the OpenAI-compatible adapter (a locally running `llama-server`) without waiting
+for any FFI work.
+
+---
+
+## What Phase 5 delivered
+
+The runtime can now be asked "which files matter for this?" and give a ranked,
+explained answer.
+
+**Semantic retrieval works without a model.** `valyria-embed`'s `Embedder`
+trait is what `valyria-model` will implement once a real embedding model is
+loaded (Phase 9). Until then, `HashingEmbedder` produces deterministic
+feature-hashed vectors offline — a modest but real retrieval signal, and one
+that lets the search tests assert exact rankings. Semantic search is treated
+everywhere as *one ranked input among several*, never the sole authority.
+
+**Vectors are generational, like the index.** Every row is stamped with the
+index generation it was derived from, so a search at generation *N* sees the
+vectors for *N*. A rebuild for a new generation copies forward the vector of any
+chunk whose content hash is unchanged and only re-embeds the rest — the
+chunk-level invalidation §4.15 calls for.
+
+**The nearest-neighbour index is checked, not trusted.** `EmbedStore::search`
+(HNSW) and `EmbedStore::search_exact` (brute-force cosine) sit side by side and
+a test asserts they agree on the top results, because an approximate index that
+is subtly wrong has no symptom of its own — the same reasoning behind
+`verify_index`.
+
+**Seven modes, one ranked list.** Lexical (TF-IDF-weighted content scan folded
+with the symbol FTS), regex, symbol, semantic, AST (tree-sitter query
+patterns), dependency (graph traversal from the task's anchor files) and git
+(recent history) each produce a ranked list of files; reciprocal-rank fusion
+combines them and a feature reranker adjusts for recency, git churn,
+import-graph distance from the anchors, test proximity and a path prior. A mode
+with nothing to contribute — no embeddings, not a git repo, no anchors — returns
+a `degraded` note rather than an error, and **search works fully with
+embeddings disabled** (a Phase 5 exit criterion, asserted).
+
+**Every result explains itself.** Each hit carries a `ScoreExplanation` with the
+per-mode stage scores, every reranking feature's weighted contribution, and the
+ordered retrieval path — and `hit.score` is set from exactly that feature sum,
+so a test can (and does) assert the number never drifts from its own
+explanation. This is the same data `SearchHit::provenance()` hands to
+`context.explain` (§14).
+
+**Ranking has a regression guard.** A labeled retrieval set — "which files must
+be touched to answer this?" over a fixture repository — is scored by recall@5
+and mean reciprocal rank in CI, with margin left for a real embedder to
+*improve* the numbers.
+
+56 new tests; 720 pass across the workspace, up from 664.
 
 ---
 
@@ -118,8 +168,8 @@ clear "not implemented in this phase" error rather than pretending:
 
 | Gap | Lands in |
 |---|---|
-| `search` and `symbol_search` tools return `tools.not_yet_implemented` — the index behind them exists, the tool wiring does not | Phase 5 |
-| The index and graph are not wired into the agent loop or the CLI yet: nothing calls `bootstrap` during a task | Phase 5/6 |
+| `search` and `symbol_search` tools return `tools.not_yet_implemented` — `valyria-search` now implements the engine, but the tool and CLI wiring does not call it yet | Phase 6 |
+| The index, graph and search engine are not wired into the agent loop or the CLI yet: nothing calls `bootstrap` during a task | Phase 6 |
 | Sandbox on Linux and Windows falls back to `PermissiveSandbox` (reported, never silent) | Phase 1 completion |
 | Context assembly handles explicitly-named files only — no retrieval or ranking | Phase 6 |
 | Only the fake model runtime exists; no real inference | Phase 9 |
@@ -152,6 +202,24 @@ Two further gaps are deliberate scope choices rather than unfinished work:
 - **LSP servers are configured but unexercised against real ones.** The client
   is fully tested against a scripted server; behaviour against a real
   rust-analyzer or gopls is untested, and belongs in the Phase 11 matrix.
+
+### Phase 5 exit criteria: status
+
+- **Ranking evaluated against a labeled retrieval set.** Done, at fixture
+  scale: `crates/valyria-search/tests/ranking_eval.rs` scores recall@5 and MRR
+  over a labeled "which files must change?" set and fails below threshold.
+  Building the set from real repositories at scale belongs with `valyria-bench`
+  (Phase 11).
+- **`--explain` output complete for every result.** Done. Every `SearchHit`
+  carries a `ScoreExplanation`, `is_complete()` is asserted for every hit in
+  the integration suite, and `hit.score` is set from the feature sum so it
+  cannot disagree with its own breakdown.
+- **Search works with embeddings disabled.** Done and asserted
+  (`search_works_fully_with_embeddings_disabled`).
+- **Deliberate scope choice:** semantic ranking rides `HashingEmbedder`, a
+  deterministic offline stand-in, until a real embedding model lands with the
+  model runtimes in Phase 9. The `Embedder` trait means that swap changes no
+  code above it.
 
 ---
 
