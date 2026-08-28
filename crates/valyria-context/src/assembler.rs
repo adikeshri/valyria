@@ -19,6 +19,12 @@ pub struct ContextAssembler {
     counter: Arc<dyn TokenCounter>,
 }
 
+impl std::fmt::Debug for ContextAssembler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ContextAssembler").finish_non_exhaustive()
+    }
+}
+
 impl ContextAssembler {
     pub fn new(tools: Arc<ToolRuntime>) -> Self {
         Self {

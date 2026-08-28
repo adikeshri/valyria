@@ -15,6 +15,42 @@ Work toward the first release. Phases refer to
 
 ### Added
 
+- **Phase 6 — context, instructions, memory.** A task and a repository become a
+  trust-ordered, budget-fitted, injection-fenced prompt that can be rebuilt
+  byte-for-byte from what was stored.
+  - `valyria-context`: the full §4.17 pipeline. `PromptAssembler` is the one
+    place candidates become messages and enforces the trust lattice (D3)
+    structurally — only `Policy`/`Instruction` content takes a system position;
+    everything at `Evidence` or below is wrapped in a per-assembly 128-bit
+    nonce fence and framed as data. A dedicated detector annotates (never
+    strips) instruction-shaped text — overrides, forged role/system tags, bidi
+    and zero-width characters, homoglyphs, encoded blobs, fence forgery — with a
+    visible warning; an eleven-payload red-team suite asserts isolation,
+    preservation, annotation and fence integrity. The budget allocator carries
+    `{ min, ideal, max, priority }` per section, reserves output tokens, and
+    returns `BudgetInfeasible` rather than truncate silently. Compression drops
+    whole lines or whole symbols (`Full → Outline → Signature → Reference`) and
+    never a fragment of one. Assembly produces a `ContextSnapshot` whose
+    `render()` *is* the message list, so `serialize → deserialize → render` is
+    byte-identical. A `Retriever` seam with a `StaticRetriever` and a
+    feature-gated `SearchRetriever` (turns `valyria-search` hits into
+    provenance-carrying source candidates); `ContextEngine` runs the whole
+    thing. The Phase 3 explicit-file `ContextAssembler` is unchanged and still
+    what the embedded runtime drives with.
+  - `valyria-instructions`: discovery with a fixed authority order —
+    `~/.valyria/instructions.md`, `VALYRIA.md`, `AGENTS.md`, `CLAUDE.md`,
+    directory-scoped files (nearest-to-the-edited-file wins), then advisory
+    `CONTRIBUTING.md` / `README` (mined for facts, never obeyed). Trust
+    assignment (`Instruction` vs. `RepoData`), a line-boundary size cap, a
+    whole-set fingerprint for "re-read on change", and a conservative
+    contradiction detector whose winner is always the higher authority.
+  - `valyria-memory`: session / task / repository / user tiers in a new
+    `workspace.db` block (600-699). Agent-extracted entries are `Trust::Evidence`
+    and decay (confidence halves every 30 days of silence, revived on
+    retrieval); user-authored entries are `Trust::Instruction` and do not.
+    Retrieval scores term overlap × decayed confidence and pins session memory
+    to the header; `retire` / `purge` back the eventual `valyria clean --memory`.
+
 - **Phase 5 — search.** One query, several ways of answering it, one ranked and
   explained result.
   - `valyria-embed`: the embedding half of semantic search. An `Embedder` trait
