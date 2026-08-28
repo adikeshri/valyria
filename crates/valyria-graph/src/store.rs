@@ -449,10 +449,12 @@ impl GraphStore {
             .map_err(GraphError::from)
     }
 
-    async fn ensure_built(&self, generation: Generation) -> Result<()> {
+    /// Whether a graph exists for this index generation. Never errors on
+    /// "not built" — it is the check a caller uses to decide whether to
+    /// run a graph query at all, or to fall back to something else.
+    pub async fn is_built(&self, generation: Generation) -> Result<bool> {
         let g = generation.0 as i64;
-        let built: bool = self
-            .store
+        self.store
             .call(move |conn| {
                 Ok(conn.query_row(
                     "SELECT EXISTS(SELECT 1 FROM graph_build WHERE generation = ?1)",
@@ -460,8 +462,12 @@ impl GraphStore {
                     |row| row.get(0),
                 )?)
             })
-            .await?;
-        if built {
+            .await
+            .map_err(GraphError::from)
+    }
+
+    async fn ensure_built(&self, generation: Generation) -> Result<()> {
+        if self.is_built(generation).await? {
             Ok(())
         } else {
             Err(GraphError::NotBuilt(generation))

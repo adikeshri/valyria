@@ -2602,6 +2602,7 @@ dependencies = [
  "tracing",
  "valyria-agent",
  "valyria-context",
+ "valyria-embed",
  "valyria-events",
  "valyria-graph",
  "valyria-index",
@@ -2703,9 +2704,17 @@ dependencies = [
 name = "valyria-embed"
 version = "0.1.0"
 dependencies = [
+ "rand 0.8.8",
+ "rayon",
+ "rusqlite",
  "serde",
+ "tempfile",
  "thiserror 2.0.20",
+ "tokio",
  "tracing",
+ "valyria-index",
+ "valyria-lang",
+ "valyria-store",
  "valyria-testkit",
  "valyria-types",
  "valyria-util",
@@ -3053,9 +3062,19 @@ dependencies = [
 name = "valyria-search"
 version = "0.1.0"
 dependencies = [
+ "rayon",
+ "regex",
  "serde",
+ "tempfile",
  "thiserror 2.0.20",
+ "tokio",
  "tracing",
+ "valyria-embed",
+ "valyria-git",
+ "valyria-graph",
+ "valyria-index",
+ "valyria-lang",
+ "valyria-store",
  "valyria-testkit",
  "valyria-types",
  "valyria-util",
