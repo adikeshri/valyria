@@ -8,21 +8,33 @@ description = "Context query -> retrieval -> rank -> structural expansion -> com
 
 [package.metadata.valyria]
 layer = 5
-# Full pipeline (retrieval/ranking/structural expansion/compression) is
-# Phase 6 per docs/PLAN.md; this crate currently implements only the
-# minimal explicit-file subset docs/PLAN.md's Phase 3 scope calls for.
-phase = 3
+phase = 6
+
+[features]
+default = ["intelligence"]
+# `intelligence` wires the repository-intelligence stack (search + index)
+# into the retrieval seam via `SearchRetriever`. The core pipeline —
+# ranking, compression, the budget allocator, trust-lattice prompt
+# assembly, injection defense, replayable snapshots — builds and is fully
+# tested without it.
+intelligence = ["dep:valyria-search", "dep:valyria-index", "dep:tokio"]
 
 [dependencies]
 valyria-types = { workspace = true }
 valyria-util = { workspace = true }
 valyria-model = { workspace = true }
 valyria-tools = { workspace = true }
+valyria-instructions = { workspace = true }
+valyria-memory = { workspace = true }
+valyria-search = { workspace = true, optional = true }
+valyria-index = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
+regex = { workspace = true }
 
 [dev-dependencies]
 valyria-testkit = { workspace = true }
@@ -30,5 +42,9 @@ valyria-permissions = { workspace = true }
 valyria-ledger = { workspace = true }
 valyria-vfs = { workspace = true }
 valyria-sandbox = { workspace = true }
+valyria-store = { workspace = true }
+valyria-graph = { workspace = true }
+valyria-embed = { workspace = true }
+valyria-lang = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }

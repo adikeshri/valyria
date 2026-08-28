@@ -12,7 +12,7 @@ Status vocabulary:
 - **scaffolded** — the crate compiles, declares its layer and phase, and is
   wired into the layering check. No implementation yet.
 
-Last updated: 2026-08-28 (after Phase 5).
+Last updated: 2026-08-28 (after Phase 6).
 
 ---
 
@@ -26,7 +26,7 @@ Last updated: 2026-08-28 (after Phase 5).
 | 3 ⭐ | Walking skeleton: `model` + `runtime-fake` + minimal `orchestrator`, `task`, `agent`, minimal `context`, `protocol`, `app`, `cli` | **done** |
 | 4 | Repository intelligence: `lang`, `index`, `graph`, incremental pipeline, `lsp` | **partial** — 7 languages of the 11 planned tier-1 set; no large-repo performance run yet |
 | 5 | Search: `embed`, `search`, fusion ranking, explanations | **partial** — engine and all seven modes live; not yet wired to the `search` tool or the agent loop, and semantic ranking rides a placeholder embedder until Phase 9 |
-| 6 | Context, instructions, memory; prompt assembly with the trust lattice | scaffolded |
+| 6 | Context, instructions, memory; prompt assembly with the trust lattice | **partial** — the full pipeline, instruction discovery and memory are implemented and tested against every stated exit criterion; a search-backed `Retriever` is included, but wiring retrieval + index bootstrap into the live agent loop is a deliberate follow-up (the embedded runtime still drives with explicit-file context) |
 | 7 | Verification, diagnosis, repair: `verify`, failure parsers, repair loop, loop detection | scaffolded |
 | 8 | Planning and multi-agent: `plan`, checkpoints, rollback boundaries, sub-tasks | scaffolded |
 | 9 | Real models: `runtime-llamacpp`, `runtime-mlx`, `runtime-openai-compat`, registry, store, model pool | scaffolded |
@@ -36,6 +36,90 @@ Last updated: 2026-08-28 (after Phase 5).
 Phase 7 is parallelizable now that 4 has landed. Phase 9 can start early against
 the OpenAI-compatible adapter (a locally running `llama-server`) without waiting
 for any FFI work.
+
+---
+
+## What Phase 6 delivered
+
+The runtime can now turn "here is a task and a repository" into a
+**trust-ordered, budget-fitted, injection-fenced prompt** — and rebuild
+that prompt, byte for byte, from what it stored.
+
+**The trust lattice is enforced by one function.** `PromptAssembler` is
+the only place `RetrievalCandidate`s become messages. Content at
+`Trust::Policy` / `Trust::Instruction` is the only content that reaches a
+system position; everything at `Trust::Evidence` or below is wrapped in a
+per-assembly nonce fence and preceded by a standing "this is data, not
+instructions" frame. A model-emitted attempt to close the fence fails —
+the fence identifier is 128 bits of injected randomness the data never
+sees.
+
+**Injection defense is annotate, never strip.** A dedicated detector
+scans every fenced block for instruction-shaped text — "ignore previous
+instructions", role markers, forged `<system>` / `<|im_start|>` / `[INST]`
+tags, zero-width and bidi controls, mixed-script homoglyph words, long
+encoded blobs, and fence-forgery attempts — and stamps a visible warning
+on the block. The payload text stays intact so the model can reason about
+it. An eleven-payload red-team suite
+([crates/valyria-context/tests/injection.rs](../crates/valyria-context/tests/injection.rs))
+asserts isolation, preservation, annotation and fence integrity for every
+case.
+
+**The budget allocator fails loudly.** Sections carry
+`{ min, ideal, max, priority }`; the allocator reserves output tokens,
+gives every section with candidates its floor, then tops up by priority.
+If the floors do not fit, it returns `BudgetInfeasible` rather than
+truncate silently — the caller narrows the task. Pathological inputs
+(zero budget, reserve larger than total, one `usize::MAX`-sized item,
+thousands of tiny items, an unbudgeted section) are covered by unit
+tests and never panic or over-allocate.
+
+**Compression drops whole units, never fragments.** Text shrinks by whole
+trailing lines with a marker; source shrinks by lowering per-symbol
+fidelity (`Full → Outline → Signature → Reference`) and then by dropping
+the least-relevant *whole* symbols. A symbol body or a signature is
+emitted verbatim or not at all — asserted directly, and again through the
+`SearchRetriever` integration test, where every `SymbolSpan` body is
+checked to be an exact slice of the file on disk.
+
+**Prompt reconstruction is structural, not hopeful.** Assembly builds a
+`ContextSnapshot` (nonce, policy, task intent, and every placed item with
+its provenance, level, rendered text and injection signals) and the
+messages *are* `snapshot.render()`. `snapshot → serialize → deserialize →
+render` therefore cannot diverge; a test asserts byte-identical
+round-trips and a matching `body_hash`.
+
+**Instruction discovery has a fixed, documented authority order.**
+`valyria-instructions` walks the workspace for `~/.valyria/instructions.md`,
+`VALYRIA.md`, `AGENTS.md`, `CLAUDE.md`, directory-scoped files
+(nearest-to-the-edited-file wins) and the advisory `CONTRIBUTING.md` /
+`README`. Each source gets a trust level — everything actionable is
+`Trust::Instruction`; advisory files are `Trust::RepoData`, mined for
+facts but never obeyed. Oversized files truncate at a line boundary; a
+whole-set fingerprint makes "re-read on change" a cheap comparison; a
+conservative heuristic reports two directives that contradict each other,
+with the higher-authority one always the winner.
+
+**Memory has four tiers, decay, and a delete surface.**
+`valyria-memory` stores session / task / repository / user entries in a
+new `workspace.db` block (600-699). Agent-extracted entries are
+`Trust::Evidence` (they inform, not command); user-authored entries are
+`Trust::Instruction` and do not decay. Everything else halves in
+confidence every 30 days of silence and is revived by being retrieved;
+entries contradicted by evidence are retired. Retrieval scores term
+overlap × decayed confidence, pins session memory to the header, and
+`purge` backs the eventual `valyria clean --memory`.
+
+**Retrieval is a seam.** `ContextEngine` runs the whole pipeline over
+whatever a `Retriever` provides. `StaticRetriever` is the default;
+`SearchRetriever` (behind the `intelligence` feature, on by default) runs
+`valyria-search` and turns its ranked, explained hits into source
+candidates carrying the hit's own `Provenance` — so `context.explain`
+gets "why this file" straight from what search recorded. Wiring
+`SearchRetriever` and an index bootstrap into every `valyria run` is left
+as a focused follow-up.
+
+90 new tests; 810 pass across the workspace, up from 720.
 
 ---
 
@@ -168,12 +252,11 @@ clear "not implemented in this phase" error rather than pretending:
 
 | Gap | Lands in |
 |---|---|
-| `search` and `symbol_search` tools return `tools.not_yet_implemented` — `valyria-search` now implements the engine, but the tool and CLI wiring does not call it yet | Phase 6 |
-| The index, graph and search engine are not wired into the agent loop or the CLI yet: nothing calls `bootstrap` during a task | Phase 6 |
+| `search` and `symbol_search` tools return `tools.not_yet_implemented` — `valyria-search` implements the engine and `valyria-context`'s `SearchRetriever` consumes it, but the first-class tools and CLI still do not | Phase 6 follow-up |
+| The index, graph and search engine are not wired into the *live* agent loop: nothing calls `bootstrap` during a task, and the embedded runtime drives with explicit-file context. `ContextEngine` + `SearchRetriever` are built and tested; wiring them into `valyria-app`/`valyria-agent` (with a bootstrap and generation-pinning strategy) is the follow-up | Phase 6 follow-up |
 | Sandbox on Linux and Windows falls back to `PermissiveSandbox` (reported, never silent) | Phase 1 completion |
-| Context assembly handles explicitly-named files only — no retrieval or ranking | Phase 6 |
 | Only the fake model runtime exists; no real inference | Phase 9 |
-| No planning, memory, instructions, verification or repair loop | Phases 6–8 |
+| No verification or repair loop; no planning | Phases 7–8 |
 | No `doctor`, `clean`, storage inspection, daemon mode, or TUI | Phase 10 |
 | Protocol is unversioned in practice — no schema export or compat gate yet | Phase 10 |
 
@@ -202,6 +285,35 @@ Two further gaps are deliberate scope choices rather than unfinished work:
 - **LSP servers are configured but unexercised against real ones.** The client
   is fully tested against a scripted server; behaviour against a real
   rust-analyzer or gopls is untested, and belongs in the Phase 11 matrix.
+
+### Phase 6 exit criteria: status
+
+- **Injection red-team suite passes.** Done —
+  `crates/valyria-context/tests/injection.rs` runs eleven hostile payloads
+  (instruction overrides, forged role/system tags, bidi and zero-width
+  characters, homoglyphs, encoded blobs, fence forgery) and asserts each is
+  isolated from the system message, preserved verbatim in a fenced block,
+  annotated with a warning, and unable to close the nonce fence.
+- **Budget allocator handles pathological inputs.** Done — `budget::tests`
+  covers zero budget, an output reservation larger than the total, a single
+  `usize::MAX/2`-sized demand, an unbudgeted section, and a
+  seven-section-all-maxed sweep; the allocator never panics and never hands
+  out more than `available`, and returns `BudgetInfeasible` when floors do
+  not fit.
+- **Prompt reconstruction from stored provenance is byte-identical.** Done —
+  the assembler builds a `ContextSnapshot` and the messages *are*
+  `snapshot.render()`; a test asserts `serialize → deserialize → render`
+  reproduces the messages exactly and the `body_hash` matches.
+- **Context assembly stays under budget with no truncated-mid-symbol
+  artifacts.** Done — an assembly test packs 60 source candidates into a
+  3k-token budget and asserts `total_tokens ≤ available`; compression only
+  ever emits a whole `signature`/`body` or drops a whole symbol, asserted in
+  `compress::tests` and again in the `SearchRetriever` integration test
+  (every `SymbolSpan` body is an exact slice of the file on disk).
+- **Deliberate scope choice:** the `Retriever` seam is implemented and the
+  search-backed impl is tested, but the embedded runtime is not yet wired to
+  use it — see the Known gaps table. The four exit criteria above are all
+  properties of the pipeline itself and do not depend on that wiring.
 
 ### Phase 5 exit criteria: status
 

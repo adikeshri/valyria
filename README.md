@@ -7,7 +7,7 @@ models that run on your own machine. There is no cloud service, no telemetry,
 and no network dependency at runtime — the offline test job in CI exists to
 keep it that way.
 
-> **Status: early.** The workspace is a ~40-crate skeleton in which phases 0–5
+> **Status: early.** The workspace is a ~40-crate skeleton in which phases 0–6
 > of [the build plan](docs/PLAN.md) are implemented and the remaining phases are
 > scaffolded stubs. The end-to-end agent loop runs today against a deterministic
 > **fake** model; real model runtimes (llama.cpp, MLX, OpenAI-compatible
@@ -51,10 +51,18 @@ than just its bytes:
   (a deterministic offline embedder stands in until a real model lands in
   Phase 9), and still works with embeddings switched off.
 
-Not yet built: planning, memory, verification/repair, and every real model
-adapter. The index, graph and search engine are not yet wired into the agent
-loop or the `search` tool — that wiring arrives with the context engine in
-Phase 6.
+On top of that sits the context pipeline: a task and a repository become a
+trust-ordered prompt where only policy and authorized instructions take a
+system position, everything else is nonce-fenced as data with
+instruction-shaped text flagged (not stripped), the token budget fails loudly
+rather than truncating mid-symbol, and the whole prompt can be rebuilt
+byte-for-byte from a stored snapshot. Instruction discovery has a fixed
+authority order; memory is four decaying, inspectable tiers.
+
+Not yet built: planning, verification/repair, and every real model adapter.
+Retrieval into the *live* agent loop is a `Retriever` seam with a
+search-backed implementation ready but not yet wired in — nothing calls the
+index bootstrap during a task yet, and the `search` tool is still a stub.
 
 ## Requirements
 
@@ -137,7 +145,7 @@ docs/ROADMAP.md    per-phase status
 ## Development
 
 ```bash
-cargo test --workspace              # 720 tests as of Phase 5
+cargo test --workspace              # 810 tests as of Phase 6
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p xtask -- check-layering

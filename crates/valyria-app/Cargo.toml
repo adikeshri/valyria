@@ -27,6 +27,8 @@ valyria-model = { workspace = true }
 valyria-runtime-fake = { workspace = true }
 valyria-orchestrator = { workspace = true }
 valyria-context = { workspace = true }
+valyria-instructions = { workspace = true }
+valyria-memory = { workspace = true }
 valyria-task = { workspace = true }
 valyria-agent = { workspace = true }
 valyria-protocol = { workspace = true }

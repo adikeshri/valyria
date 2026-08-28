@@ -120,11 +120,21 @@ The `ModelRuntime` trait and its adapters. Only the deterministic fake adapter
 is implemented; the rest are scaffolded for Phase 9.
 
 ### Layer 5 — Agent
-`valyria-context` · `valyria-instructions` · `valyria-memory` · `valyria-plan` ·
-`valyria-agent` · `valyria-task`
+`valyria-context` · `valyria-instructions` · `valyria-memory` · `valyria-plan`
+*(plan scaffolded, Phase 8)* · `valyria-agent` · `valyria-task`
 
-The step machine and its driver, the task manager and journal, and (in later
-phases) context assembly, instructions, memory and planning.
+The step machine and its driver, the task manager and journal. The context
+pipeline turns a query into trust-tagged candidates, ranks and compresses
+them to a per-section token budget, and assembles a prompt where the trust
+lattice (D3) is enforced structurally: only `Policy`/`Instruction` content
+occupies a system position, everything below it is nonce-fenced as data with
+instruction-shaped text annotated (never stripped), the budget allocator
+fails loudly rather than truncate, and the result is a replayable
+`ContextSnapshot` whose `render()` *is* the prompt. Instruction discovery
+applies a fixed authority order and trust assignment; memory is four decaying,
+inspectable tiers. Retrieval is a `Retriever` seam — a search-backed
+implementation exists behind a feature flag; wiring it into the live loop is a
+follow-up. Planning lands in Phase 8.
 
 ### Layer 6 — Interface
 `valyria-protocol` · `valyria-app` · `valyria-cli` · `valyria-bench` · `xtask`

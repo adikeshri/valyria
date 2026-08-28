@@ -2606,7 +2606,9 @@ dependencies = [
  "valyria-events",
  "valyria-graph",
  "valyria-index",
+ "valyria-instructions",
  "valyria-ledger",
+ "valyria-memory",
  "valyria-model",
  "valyria-orchestrator",
  "valyria-permissions",
@@ -2667,16 +2669,25 @@ name = "valyria-context"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "valyria-embed",
+ "valyria-graph",
+ "valyria-index",
+ "valyria-instructions",
+ "valyria-lang",
  "valyria-ledger",
+ "valyria-memory",
  "valyria-model",
  "valyria-permissions",
  "valyria-sandbox",
+ "valyria-search",
+ "valyria-store",
  "valyria-testkit",
  "valyria-tools",
  "valyria-types",
@@ -2806,6 +2817,7 @@ name = "valyria-instructions"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "tempfile",
  "thiserror 2.0.20",
  "tracing",
  "valyria-testkit",
@@ -2872,9 +2884,14 @@ dependencies = [
 name = "valyria-memory"
 version = "0.1.0"
 dependencies = [
+ "rusqlite",
  "serde",
+ "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
+ "tokio",
  "tracing",
+ "valyria-store",
  "valyria-testkit",
  "valyria-types",
  "valyria-util",
