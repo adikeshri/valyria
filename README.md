@@ -7,7 +7,7 @@ models that run on your own machine. There is no cloud service, no telemetry,
 and no network dependency at runtime — the offline test job in CI exists to
 keep it that way.
 
-> **Status: early.** The workspace is a ~40-crate skeleton in which phases 0–3
+> **Status: early.** The workspace is a ~40-crate skeleton in which phases 0–4
 > of [the build plan](docs/PLAN.md) are implemented and the remaining phases are
 > scaffolded stubs. The end-to-end agent loop runs today against a deterministic
 > **fake** model; real model runtimes (llama.cpp, MLX, OpenAI-compatible
@@ -31,8 +31,24 @@ That path is covered by an integration test that drives the real compiled
 binary against a real git fixture repo
 ([crates/valyria-cli/tests/walking_skeleton.rs](crates/valyria-cli/tests/walking_skeleton.rs)).
 
-Not yet built: repository indexing, search, the knowledge graph, embeddings,
-planning, memory, verification/repair, and every real model adapter.
+Underneath it, the repository-intelligence layer understands the code rather
+than just its bytes:
+
+- **parses** Rust, Python, Go, Java, JavaScript, TypeScript and TSX into
+  symbols, imports, call sites and tests, from a per-language directory of
+  tree-sitter queries rather than from language-specific code;
+- **indexes** them generationally, so a long agent step never has the index
+  shift underneath it, and checks itself for drift by rebuilding independently
+  and diffing;
+- **relates** them in a typed knowledge graph — who calls this, what does a
+  change here affect, which tests cover it — with a confidence on every edge
+  that name-based resolution could get wrong;
+- **enriches** all of that from a language server when one is installed, and
+  works exactly as well when none is.
+
+Not yet built: search and embeddings, planning, memory, verification/repair, and
+every real model adapter. The index and graph are not yet wired into the agent
+loop — that arrives with retrieval in Phases 5–6.
 
 ## Requirements
 
@@ -115,7 +131,7 @@ docs/ROADMAP.md    per-phase status
 ## Development
 
 ```bash
-cargo test --workspace              # 431 tests as of Phase 3
+cargo test --workspace              # 664 tests as of Phase 4
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p xtask -- check-layering

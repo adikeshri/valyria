@@ -12,7 +12,7 @@ Status vocabulary:
 - **scaffolded** — the crate compiles, declares its layer and phase, and is
   wired into the layering check. No implementation yet.
 
-Last updated: 2026-08-28 (after Phase 3).
+Last updated: 2026-08-28 (after Phase 4).
 
 ---
 
@@ -22,9 +22,9 @@ Last updated: 2026-08-28 (after Phase 3).
 |---|---|---|
 | 0 | Foundations: workspace, toolchain pin, CI, `types`, `util`, `store`, `events`, `config`, `testkit`, `xtask` | **done** |
 | 1 | Platform: `vfs`, `process`, `sandbox`, `hardware`, `git` | **partial** — macOS and permissive sandboxes only; no Linux or Windows confinement |
-| 2 | Execution: `permissions`, `tools`, `edit`, `ledger` | **partial** — 16 of 18 tools live; 3 of 6 edit strategies live (the rest need the index) |
+| 2 | Execution: `permissions`, `tools`, `edit`, `ledger` | **partial** — 16 of 18 tools live; all 6 edit strategies live as of Phase 4 |
 | 3 ⭐ | Walking skeleton: `model` + `runtime-fake` + minimal `orchestrator`, `task`, `agent`, minimal `context`, `protocol`, `app`, `cli` | **done** |
-| 4 | Repository intelligence: `lang`, `index`, `graph`, incremental pipeline, `lsp` | scaffolded |
+| 4 | Repository intelligence: `lang`, `index`, `graph`, incremental pipeline, `lsp` | **partial** — 7 languages of the 11 planned tier-1 set; no large-repo performance run yet |
 | 5 | Search: `embed`, `search`, fusion ranking, explanations | scaffolded |
 | 6 | Context, instructions, memory; prompt assembly with the trust lattice | scaffolded |
 | 7 | Verification, diagnosis, repair: `verify`, failure parsers, repair loop, loop detection | scaffolded |
@@ -33,13 +33,67 @@ Last updated: 2026-08-28 (after Phase 3).
 | 10 | Interface completion: protocol v1 freeze, schema export, full CLI, TUI, `doctor`, `clean`, daemon | not started |
 | 11 | Hardening and evaluation: `bench`, fuzzing, perf work, cross-platform matrix, release gates | not started |
 
-Phases 4–5 and 7 are parallelizable now that 3 has landed. Phase 9 can start
-early against the OpenAI-compatible adapter (a locally running `llama-server`)
-without waiting for any FFI work.
+Phases 5 and 7 are parallelizable now that 4 has landed. Phase 9 can start early
+against the OpenAI-compatible adapter (a locally running `llama-server`) without
+waiting for any FFI work.
 
 ---
 
-## What Phase 3 actually delivered
+## What Phase 4 actually delivered
+
+The runtime now understands the code it is editing, not just its bytes.
+
+**Language support is data, not code** (D9). A language is a directory of `.scm`
+queries plus a ~40-line provider; one extraction engine, driven entirely by
+capture names, serves all of them. Rust, Python, Go, Java, JavaScript,
+TypeScript and TSX ship today, each behind its own cargo feature. Extraction
+produces qualified symbol paths (`Parser::parse`, `Outer.Inner.method`),
+imports, call sites, tests, doc comments and signatures — proven by a per-
+language corpus in
+[crates/valyria-lang/tests/extraction.rs](../crates/valyria-lang/tests/extraction.rs).
+
+**The index is generational** (D8). Every row records the generation range it
+was valid for, so a read at generation *N* sees the repository exactly as it was
+when *N* was published, however far the index has moved on. A long agent step
+therefore never has the index shift underneath it, and "was this planned against
+stale context?" is a comparison of two integers. Reading at a pruned generation
+fails loudly rather than quietly answering from newer data.
+
+**Index drift is tested for, not hoped about.** `verify_index` rebuilds from
+scratch, independently of the incremental pipeline, and diffs the result against
+what the index believes. A ten-round fuzz of edits, creations, renames and
+deletes ends with zero drift — and the check is shown to be capable of failing,
+by editing files behind the index's back.
+
+**The graph is honest about what it does not know.** Without a type checker,
+calls resolve by name, so every edge records *how* it was derived: `Exact` for
+structure, `Likely` for a unique match after narrowing by file and imports,
+`Ambiguous` when several candidates remain — recorded to all of them rather than
+resolved by coin flip. References that leave the repository (`serde`, `println`)
+are kept as unresolved references, because "this file depends on serde" is a
+real fact about the code.
+
+**LSP is enrichment, never a dependency.** Every entry point returns an empty
+answer rather than an error when a server is missing, slow, crashed, or rejects
+a request — so a machine with nothing installed works, it just gets index-derived
+results. The client is generic over its streams, so lifecycle, request
+correlation, timeouts, server-initiated requests, crashes and malformed frames
+are all tested against a scripted in-process server on every machine.
+
+**The editing ladder is complete.** Symbol-aware replacement resolves against
+the file's *current* content rather than the index — the index says which file
+to edit, but only the bytes on disk can position the edit safely. AST transforms
+are a closed set of typed operations (rename, delete, insert, query-driven
+replacement), not a free-text description, so they can be executed, verified and
+replayed from a journal. And §4.11's re-parse guard now applies to *every*
+strategy: an edit that introduces syntax errors into a file that parsed cleanly
+is refused and nothing is written.
+
+664 tests pass across the workspace, up from 431.
+
+---
+
+## What Phase 3 delivered
 
 `valyria run "<objective>"` against a fixture repo, driven by the deterministic
 fake model, does all of the following — proven by
@@ -55,8 +109,6 @@ which drives the real compiled binary as a separate OS process:
 - parks in `WAITING_FOR_PERMISSION` and continues after
   `valyria task permission resolve`.
 
-431 tests pass across the workspace.
-
 ---
 
 ## Known gaps
@@ -66,14 +118,40 @@ clear "not implemented in this phase" error rather than pretending:
 
 | Gap | Lands in |
 |---|---|
-| `search` and `symbol_search` tools return `tools.not_yet_implemented` | Phase 5 |
-| Edit strategies 4 (symbol-aware) and 5 (AST transform) return `EditError::NotYetImplemented` | Phase 4 |
+| `search` and `symbol_search` tools return `tools.not_yet_implemented` — the index behind them exists, the tool wiring does not | Phase 5 |
+| The index and graph are not wired into the agent loop or the CLI yet: nothing calls `bootstrap` during a task | Phase 5/6 |
 | Sandbox on Linux and Windows falls back to `PermissiveSandbox` (reported, never silent) | Phase 1 completion |
 | Context assembly handles explicitly-named files only — no retrieval or ranking | Phase 6 |
 | Only the fake model runtime exists; no real inference | Phase 9 |
 | No planning, memory, instructions, verification or repair loop | Phases 6–8 |
 | No `doctor`, `clean`, storage inspection, daemon mode, or TUI | Phase 10 |
 | Protocol is unversioned in practice — no schema export or compat gate yet | Phase 10 |
+
+### Phase 4 exit criteria not yet met
+
+The crates are built and tested; two of the phase's stated exit criteria are
+performance claims that need a measurement harness (`valyria-bench`, Phase 11)
+before they can honestly be asserted:
+
+- **Index a 100k-file repo within target; incremental update p95 < 200ms.** The
+  design is built for it — parallel scan, one write transaction, a staged
+  files-first generation — but no benchmark has been run, so the numbers in
+  [PLAN.md §9](PLAN.md#9-platform-and-performance-targets) are still targets
+  rather than results.
+- **`verify-index` shows zero drift after a 10k-operation fuzz.** A deterministic
+  ten-round fuzz of edits, creations, renames and deletes passes in CI today;
+  scaling it to 10k operations belongs with the bench harness.
+
+Two further gaps are deliberate scope choices rather than unfinished work:
+
+- **Tier-1 languages: 7 of the 11 planned.** Rust, Python, Go, Java, JavaScript,
+  TypeScript and TSX — decision 6's "cut to five ecosystems" list. C/C++, C#,
+  Ruby, PHP, Kotlin and Swift, and the tier-2 structure-only set, are each a
+  `queries/<lang>/` directory plus a small provider, with no change to
+  extraction, indexing, the graph or search.
+- **LSP servers are configured but unexercised against real ones.** The client
+  is fully tested against a scripted server; behaviour against a real
+  rust-analyzer or gopls is untested, and belongs in the Phase 11 matrix.
 
 ---
 
@@ -89,5 +167,8 @@ materially. Full context in [PLAN.md §10](PLAN.md#10-decisions-i-need-from-you)
 4. **Vector store** — default: in-house HNSW over the CAS.
 5. **Team shape** — the phase graph assumes 3–5 parallel workstreams after Phase
    3; a solo build should defer Phases 5 and 8 and the MLX/CUDA adapters.
-6. **Tier-1 language list** — 11 languages planned; cutting to 5 (Rust, TS/JS,
-   Python, Go, Java) removes noticeable effort from Phases 4 and 7.
+6. **Tier-1 language list** — 11 languages planned. **Phase 4 shipped the cut-to-
+   five set** (Rust, TS/JS, Python, Go, Java) on the default, since D9 makes each
+   further language additive: a `queries/<lang>/` directory and a small provider,
+   with no change to extraction, indexing, the graph or search. Say the word if
+   the full eleven should land before Phase 7's verification parsers.

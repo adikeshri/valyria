@@ -1,24 +1,40 @@
 //! `valyria-graph` — layer 2 (Repository intelligence).
 //!
-//! Typed knowledge graph (nodes + relationships), traversal & query API.
+//! The typed knowledge graph (§13): files, modules, symbols and tests as
+//! nodes; contains, defines, imports, calls and tests as typed edges.
+//! Derived entirely from one [`Generation`](valyria_types::Generation) of
+//! the index, so it is always safe to throw away and recompute and can
+//! never become a second, disagreeing source of truth.
 //!
-//! Status: scaffolded per the build plan (docs/PLAN.md, Phase 4). The crate
-//! compiles and is wired into the workspace layering check; full implementation
-//! lands in its designated phase.
+//! Two things distinguish it from a naive reference graph:
+//!
+//! **Edges carry confidence.** Without a type checker, a call can only be
+//! resolved by name, and names collide. Rather than dropping the uncertain
+//! edges or presenting them as facts, each records how it was derived
+//! ([`Confidence`]), so ranking can prefer the certain ones and
+//! `--explain` can say why a file was pulled into context.
+//!
+//! **References that leave the repository are kept.** An import of
+//! `serde` binds to no node, but "this file depends on serde" is a real
+//! fact; it is recorded as an [`UnresolvedRef`] instead of being
+//! discarded.
 
 #![forbid(unsafe_code)]
+#![warn(missing_debug_implementations)]
 
-/// Marks this crate as present in the workspace topology for the given phase.
-/// Exists so the crate is non-empty and the layering/CI checks have something
-/// real to verify before the phase implementation lands.
-pub const PHASE: u8 = 4;
+pub mod build;
+pub mod error;
+pub mod migrations;
+pub mod model;
+pub mod resolve;
+pub mod store;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn phase_is_recorded() {
-        assert_eq!(PHASE, 4);
-    }
-}
+pub use build::{build, BuiltGraph, GraphInput};
+pub use error::{GraphError, Result};
+pub use migrations::MIGRATIONS;
+pub use model::{
+    Confidence, Direction, Edge, EdgeKind, GraphStats, ImpactSet, Node, NodeId, NodeKind, Subgraph,
+    UnresolvedRef,
+};
+pub use resolve::{resolve_call, resolve_import, FileLookup, Resolution, SymbolLookup};
+pub use store::{adjacency, GraphStore, DEFAULT_DEPTH};

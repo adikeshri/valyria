@@ -15,6 +15,35 @@ Work toward the first release. Phases refer to
 
 ### Added
 
+- **Phase 4 — repository intelligence.** The runtime now understands the code it
+  is editing rather than only its bytes.
+  - `valyria-lang`: the `LanguageProvider` trait, tree-sitter grammars and a
+    declarative `.scm` query set per language, with one extraction engine driven
+    entirely by capture names. Rust, Python, Go, Java, JavaScript, TypeScript
+    and TSX, each behind its own cargo feature. Produces symbols with qualified
+    paths, imports, call sites, tests, doc comments and signatures, plus a
+    syntax-aware chunker for embeddings.
+  - `valyria-index`: a **generational** file/symbol index over SQLite. Every row
+    records the generation range it was valid for, so a read at generation *N*
+    sees the repository exactly as it was then however far the index has moved
+    on (D8). Parallel bootstrap that publishes a files-only generation first so
+    a large repository is searchable before symbol extraction finishes, an
+    incremental pipeline, a `resync` path for bulk changes like a branch switch,
+    FTS5 symbol search, and `verify_index` — an independent rebuild diffed
+    against the stored index, because index drift has no symptom of its own.
+  - `valyria-graph`: the typed knowledge graph — files, modules, symbols and
+    tests as nodes; contains, defines, imports, calls and tests as edges — with
+    `neighbors`, `paths`, `subgraph_around` and `impact_of`. Edges carry a
+    confidence, and references that leave the repository are recorded rather
+    than discarded.
+  - `valyria-lsp`: an LSP client, lifecycle and capped server pool. Enrichment,
+    never a dependency: every entry point degrades to an empty answer when a
+    server is missing, slow, or crashed, and each result is tagged with whether
+    it came from the index or a language server.
+  - `valyria-edit`: the last two rungs of the strategy ladder — symbol-aware
+    replacement and typed AST transformation (rename, delete, insert, and
+    query-driven replacement) — plus a re-parse guard that now refuses *any*
+    edit that introduces syntax errors into a file that parsed cleanly.
 - **Phase 3 — walking skeleton.** `valyria run "<objective>"` drives a complete
   agent loop against a real repository: the fourteen-state machine and its step
   driver (`valyria-agent`), the task manager and append-only journal
@@ -56,7 +85,7 @@ Work toward the first release. Phases refer to
 ### Known limitations
 
 Tracked in [docs/ROADMAP.md](docs/ROADMAP.md#known-gaps). In short: no real
-model runtime, no index or search, no planning, memory or verification, and no
-sandbox confinement outside macOS.
+model runtime, no search or embeddings, no planning, memory or verification, and
+no sandbox confinement outside macOS.
 
 [Unreleased]: https://github.com/adikeshri/valyria/commits/main

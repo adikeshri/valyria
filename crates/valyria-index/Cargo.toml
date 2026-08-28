@@ -13,9 +13,16 @@ phase = 4
 [dependencies]
 valyria-types = { workspace = true }
 valyria-util = { workspace = true }
+valyria-store = { workspace = true }
+valyria-vfs = { workspace = true }
+valyria-lang = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }
+rusqlite = { workspace = true }
+rayon = { workspace = true }
 
 [dev-dependencies]
 valyria-testkit = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = { workspace = true }

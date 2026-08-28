@@ -16,6 +16,8 @@ valyria-util = { workspace = true }
 valyria-store = { workspace = true }
 valyria-events = { workspace = true }
 valyria-vfs = { workspace = true }
+valyria-index = { workspace = true }
+valyria-graph = { workspace = true }
 valyria-sandbox = { workspace = true }
 valyria-permissions = { workspace = true }
 valyria-ledger = { workspace = true }

@@ -16,6 +16,27 @@ valyria-util = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }
+tree-sitter = { workspace = true }
+tree-sitter-rust = { workspace = true, optional = true }
+tree-sitter-python = { workspace = true, optional = true }
+tree-sitter-go = { workspace = true, optional = true }
+tree-sitter-java = { workspace = true, optional = true }
+tree-sitter-javascript = { workspace = true, optional = true }
+tree-sitter-typescript = { workspace = true, optional = true }
+
+[features]
+# Each grammar is a cargo feature (cross-cutting conventions, §3: "each
+# language grammar is a cargo feature"). `default` is the tier-1 set the
+# runtime ships with; a build that needs a smaller binary can pick
+# individual grammars.
+default = ["lang-rust", "lang-python", "lang-go", "lang-java", "lang-javascript", "lang-typescript"]
+lang-rust = ["dep:tree-sitter-rust"]
+lang-python = ["dep:tree-sitter-python"]
+lang-go = ["dep:tree-sitter-go"]
+lang-java = ["dep:tree-sitter-java"]
+lang-javascript = ["dep:tree-sitter-javascript"]
+lang-typescript = ["dep:tree-sitter-typescript", "lang-javascript"]
 
 [dev-dependencies]
 valyria-testkit = { workspace = true }
+serde_json = { workspace = true }

@@ -85,9 +85,18 @@ process spawn/supervision with output caps, timeouts and process-group kill;
 sandbox traits with per-platform implementations; hardware probing; `gix`-backed
 git reads.
 
-### Layer 2 — Repository intelligence *(scaffolded, Phases 4–5)*
+### Layer 2 — Repository intelligence *(`embed` and `search` scaffolded, Phase 5)*
 `valyria-lang` · `valyria-lsp` · `valyria-index` · `valyria-graph` ·
 `valyria-embed` · `valyria-search`
+
+Language support as data behind one trait — a tree-sitter grammar plus a
+directory of `.scm` queries per language, and a single extraction engine driven
+by capture names. A generational file/symbol index whose rows record the
+generation range they were valid for, so a read at generation *N* always sees
+the repository as it was then. A typed knowledge graph derived from one index
+generation, with confidence on every edge that name-based resolution could get
+wrong. An LSP client pool that enriches those answers where a server exists and
+degrades silently where one does not.
 
 ### Layer 3 — Execution
 `valyria-permissions` · `valyria-tools` · `valyria-edit` · `valyria-ledger` ·

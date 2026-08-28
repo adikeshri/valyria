@@ -1,7 +1,8 @@
 //! `valyria-app`'s own tiny slice of `workspace.db` schema. Versions
 //! 200-299 are reserved for this crate, continuing the hundred-block
 //! convention started in `valyria-task` (`valyria-events` owns 1-99,
-//! `valyria-task` owns 100-199).
+//! `valyria-task` owns 100-199, `valyria-index` owns 300-399,
+//! `valyria-graph` owns 400-499).
 
 use valyria_store::Migration;
 
@@ -20,6 +21,8 @@ pub fn workspace_migrations() -> Vec<Migration> {
     let mut all: Vec<Migration> = valyria_events::MIGRATIONS.to_vec();
     all.extend(valyria_task::MIGRATIONS.iter().copied());
     all.extend(MIGRATIONS.iter().copied());
+    all.extend(valyria_index::MIGRATIONS.iter().copied());
+    all.extend(valyria_graph::MIGRATIONS.iter().copied());
     all
 }
 
@@ -50,5 +53,28 @@ mod tests {
         assert!(applied.contains(&1));
         assert!(applied.contains(&100));
         assert!(applied.contains(&200));
+        assert!(applied.contains(&300));
+        assert!(applied.contains(&400));
+    }
+
+    #[test]
+    fn every_crates_block_is_represented() {
+        // A crate that grows tables but is never added to the
+        // concatenation above fails silently at runtime — the table simply
+        // does not exist — so the concatenation is asserted here rather
+        // than trusted.
+        let versions: Vec<i64> = workspace_migrations().iter().map(|m| m.version).collect();
+        for (crate_name, block) in [
+            ("valyria-events", 1..100),
+            ("valyria-task", 100..200),
+            ("valyria-app", 200..300),
+            ("valyria-index", 300..400),
+            ("valyria-graph", 400..500),
+        ] {
+            assert!(
+                versions.iter().any(|v| block.contains(v)),
+                "no migrations from {crate_name} reached workspace.db"
+            );
+        }
     }
 }
