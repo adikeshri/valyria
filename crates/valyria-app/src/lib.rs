@@ -18,3 +18,6 @@ pub mod runtime;
 pub use client::EmbeddedClient;
 pub use error::{AppError, Result};
 pub use runtime::{load_scenario, Runtime, RuntimeConfig};
+
+pub use valyria_agent::PlanningMode;
+pub use valyria_plan::{RollbackError, RollbackReport};

@@ -31,6 +31,7 @@ fn combined_migrations() -> Vec<Migration> {
     let mut migrations: Vec<Migration> = valyria_events::MIGRATIONS.to_vec();
     migrations.extend(valyria_task::MIGRATIONS.iter().copied());
     migrations.extend(valyria_verify::MIGRATIONS.iter().copied());
+    migrations.extend(valyria_plan::MIGRATIONS.iter().copied());
     migrations
 }
 
@@ -88,6 +89,7 @@ fn build_driver(
 
     let context = Arc::new(ContextAssembler::new(tool_runtime.clone()));
     let verification_log = Arc::new(VerificationLog::new(backing.store.clone()));
+    let plan_store = Arc::new(valyria_plan::PlanStore::new(backing.store.clone()));
     let hash_cache = Arc::new(HashCache::new());
     let launcher: Arc<dyn ProcessLauncher> = Arc::from(detect_platform_launcher());
     let sandbox_profile = SandboxProfile::new().allow_write(root.as_path());
@@ -100,6 +102,7 @@ fn build_driver(
         ledger,
         engine,
         verification_log,
+        plan_store,
         root,
         hash_cache,
         clock,

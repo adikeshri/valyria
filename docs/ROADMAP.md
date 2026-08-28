@@ -12,7 +12,7 @@ Status vocabulary:
 - **scaffolded** — the crate compiles, declares its layer and phase, and is
   wired into the layering check. No implementation yet.
 
-Last updated: 2026-08-28 (after Phase 7).
+Last updated: 2026-08-28 (after Phase 8).
 
 ---
 
@@ -28,14 +28,83 @@ Last updated: 2026-08-28 (after Phase 7).
 | 5 | Search: `embed`, `search`, fusion ranking, explanations | **partial** — engine and all seven modes live; not yet wired to the `search` tool or the agent loop, and semantic ranking rides a placeholder embedder until Phase 9 |
 | 6 | Context, instructions, memory; prompt assembly with the trust lattice | **partial** — the full pipeline, instruction discovery and memory are implemented and tested against every stated exit criterion; a search-backed `Retriever` is included, but wiring retrieval + index bootstrap into the live agent loop is a deliberate follow-up (the embedded runtime still drives with explicit-file context) |
 | 7 | Verification, diagnosis, repair: `verify`, failure parsers, repair loop, loop detection | **partial** — discovery, escalation strategy, the runner, ten failure parsers, diagnosis, the completion report, five loop detectors and the driver's verify→diagnose→repair loop are all implemented and tested; a fake-model seeded-bug fix and a caught non-converging loop pass end to end. The 30-real-repo discovery corpus and the captured-output parser corpus at scale wait on `valyria-bench` (Phase 11), and mapping changed symbols → covering tests / graph-neighbour suspects in the *live* loop is a Phase 6/8 wiring follow-up |
-| 8 | Planning and multi-agent: `plan`, checkpoints, rollback boundaries, sub-tasks | scaffolded |
+| 8 | Planning and multi-agent: `plan`, checkpoints, rollback boundaries, sub-tasks | **partial** — the plan model, validator (nine structured error codes), dependency/wave scheduler, checkpoint capture + ledger-backed rollback, the five multi-agent roles + typed artifacts, and the `PlanStore` (migration block 800-899) are implemented and tested; the driver runs `Planning` as a model-authored, validated, bounded-repair plan and executes it step by step with a checkpoint at each rollback boundary. Deferred: spawning a role as its own child task (sub-agents), real parallel step execution, index-backed target resolution, and verification interleaved *between* steps (the mandatory full `Verifying` run is the backstop) |
 | 9 | Real models: `runtime-llamacpp`, `runtime-mlx`, `runtime-openai-compat`, registry, store, model pool | scaffolded |
 | 10 | Interface completion: protocol v1 freeze, schema export, full CLI, TUI, `doctor`, `clean`, daemon | not started |
 | 11 | Hardening and evaluation: `bench`, fuzzing, perf work, cross-platform matrix, release gates | not started |
 
-Phase 8 is parallelizable now that 7 has landed. Phase 9 can start early against
-the OpenAI-compatible adapter (a locally running `llama-server`) without waiting
-for any FFI work.
+Phase 9 can start early against the OpenAI-compatible adapter (a locally running
+`llama-server`) without waiting for any FFI work.
+
+---
+
+## What Phase 8 delivered
+
+The runtime can now **turn a task into a validated plan and execute it step
+by step**, checkpointing at rollback boundaries and refusing to clobber a
+developer's work on the way back.
+
+**The model proposes; the runtime validates.** A plan is a DAG of
+`PlanStep { id, intent, targets, depends_on, parallelizable, checkpoint,
+verification, rollback_boundary, approval_required, estimated_scope }`.
+`valyria_plan::validate` runs nine checks — unique ids, resolvable
+dependencies, acyclicity (with the cycle path in the message), a
+verification on every mutating step, a checkpoint on every rollback
+boundary, targets inside `plan_scope`, `plan_scope` inside the permission
+profile, no unresolvable targets, no empty plan — and returns **every**
+failure at once, each a machine `PlanErrorCode`, not a prose paragraph.
+
+**Invalid plans are repaired, not rejected.** `Planning` (in
+`PlanningMode::ModelAuthored`) asks the model for a `submit_plan`, and a
+`PlanRepairLedger` hands the structured errors back for up to three bounded
+rounds before failing the task. The repair budget is durable: it is
+rebuilt from the journal's `plan_rejected` count on resume, and the raw
+plan submission is stored *inside* the planning `model_completion` entry so
+a crash between "model answered" and "runtime decided" re-processes that
+submission rather than re-calling the model (which would desync the shared
+turn counter).
+
+**Plans are living, revisable, diffable documents.** Every accepted
+revision is stored in `plan_revision` (migration block 800-899) with its
+parent's content hash; `Plan::diff` reports added / removed / changed steps
+between revisions.
+
+**Execution walks a schedule, durably.** `valyria_plan::schedule` groups
+steps into dependency waves (parallelizable steps bucketed within a wave,
+for a later concurrent executor); the driver runs one step at a time.
+"Which steps are done / started / checkpointed" is rebuilt from the task
+journal, never process memory, so a `kill -9` mid-plan plus `valyria task
+resume` picks up at the next incomplete step without re-running the
+finished ones or double-applying an edit.
+
+**Checkpoints are markers; rollback is the ledger's job.** A
+`checkpoint`-flagged step captures the task-touched file set with their
+on-disk hashes and a change-ledger watermark. `AgentDriver::
+rollback_to_checkpoint` replays every ledger entry after the watermark in
+reverse through `Ledger::rollback_entry`, which already refuses
+(`RollbackConflict`) to revert a file anyone — the user included — has
+touched since; the first such refusal aborts the whole rollback with the
+offending path and leaves the tree exactly as it was. A clean rollback is
+verified: every checkpointed file must hash back to what the checkpoint
+recorded.
+
+**Multi-agent is roles + typed artifacts.** `AgentRole`
+(Researcher / Planner / Implementer / Tester / Reviewer) carries a tool
+allowlist, a `can_write` flag (only the Implementer), and a permission
+ceiling; the five `Artifact` types (`ResearchBrief`, `Plan`, `ChangeSet`,
+`VerificationReport`, `ReviewFindings`) are the only inter-role channel and
+persist in `task_artifact`. Spawning a role as its own child task is a
+documented follow-up.
+
+**Deliberate scope choices for this phase:** no child-task sub-agents, no
+real parallel step execution, target resolution against the workspace
+filesystem rather than the repository index (the index is still not wired
+into the agent loop), and no verification interleaved between plan steps —
+the mandatory full `Verifying` suite after the last step (Phase 7's
+machinery) is the backstop, and per-step `verification` is still enforced
+*structurally* by the validator.
+
+46 new tests; 942 pass across the workspace, up from 896.
 
 ---
 
@@ -324,9 +393,11 @@ clear "not implemented in this phase" error rather than pretending:
 | The index, graph and search engine are not wired into the *live* agent loop: nothing calls `bootstrap` during a task, and the embedded runtime drives with explicit-file context. `ContextEngine` + `SearchRetriever` are built and tested; wiring them into `valyria-app`/`valyria-agent` (with a bootstrap and generation-pinning strategy) is the follow-up | Phase 6 follow-up |
 | Sandbox on Linux and Windows falls back to `PermissiveSandbox` (reported, never silent) | Phase 1 completion |
 | Only the fake model runtime exists; no real inference | Phase 9 |
-| No planning: `Planning` is a one-step formality, no `valyria-plan` | Phase 8 |
-| The repair loop maps changed code → covering tests / graph-neighbour suspects only when the caller supplies them; the *live* driver passes an empty set (no index/graph in the loop yet), so `diagnose` suspects come from failure locations ∩ the change ledger alone | Phase 6/8 follow-up |
-| Loop detector + repair ledger are process-local per task run; a cross-process resume rebuilds the plan from scratch (verification *runs* and the completion report are durable) | Phase 8/10 |
+| Model-authored planning is opt-in (`--plan` / `PlanningMode::ModelAuthored`); the default `Planning` is still the Phase-3 pass-through so every pre-Phase-8 scenario is unchanged. Turning it on by default waits on real models | Phase 9 |
+| Multi-agent roles + typed artifacts exist, but a role is not yet run as its own child task (own journal, budget, cancellation); the driver executes one flat plan | Phase 8 follow-up |
+| Plan steps run one at a time even when `parallelizable`; the scheduler computes the parallel groups but the executor does not use them yet | Phase 8 follow-up |
+| Plan `targets` are validated against the workspace filesystem, not the repository index (still not wired into the agent loop); no verification is run *between* plan steps — the mandatory full `Verifying` suite is the backstop | Phase 6/8 follow-up |
+| The verify→diagnose→repair loop detector + repair ledger are process-local per task run (the plan, its revisions, checkpoints and verification runs are all durable) | Phase 8/10 |
 | No `doctor`, `clean`, storage inspection, daemon mode, or TUI | Phase 10 |
 | Protocol is unversioned in practice — no schema export or compat gate yet | Phase 10 |
 
@@ -355,6 +426,36 @@ Two further gaps are deliberate scope choices rather than unfinished work:
 - **LSP servers are configured but unexercised against real ones.** The client
   is fully tested against a scripted server; behaviour against a real
   rust-analyzer or gopls is untested, and belongs in the Phase 11 matrix.
+
+### Phase 8 exit criteria: status
+
+- **Invalid plans from the model are rejected with structured feedback and
+  repaired.** Done —
+  `crates/valyria-agent/tests/plan_loop.rs::invalid_plan_is_rejected_with_structured_feedback_and_repaired`:
+  a cyclic plan is rejected with a `plan_rejected` journal entry carrying
+  the `cyclic_dependency` code, the model's next `submit_plan` is accepted,
+  and the task completes. `validate`'s nine codes each have a unit test in
+  `crates/valyria-plan/src/validate.rs`, and `PlanRepairLedger` bounds the
+  loop at three rounds (`repair.rs` tests).
+- **A multi-step plan executes with a mid-plan pause/resume across a
+  process restart.** Done — `plan_loop.rs::a_multi_step_plan_executes_step_by_step_with_a_checkpoint`
+  proves the in-process half (two steps, per-step `plan_step_started` /
+  `plan_step_completed`, one checkpoint), and
+  `crates/valyria-cli/tests/walking_skeleton.rs::multi_step_plan_survives_kill_nine_and_resumes_mid_plan`
+  drives the real binary: a plan run is `SIGKILL`ed mid-flight, resumed in
+  a fresh process, and completes with each step's file written exactly
+  once.
+- **Rollback to a checkpoint restores the tree exactly and refuses on
+  user-touched files.** Done — `plan_loop.rs::rollback_to_a_checkpoint_restores_the_tree_exactly`
+  and `::rollback_refuses_and_leaves_the_tree_alone_when_a_file_was_touched_since`,
+  plus `crates/valyria-plan/src/checkpoint.rs`'s unit tests, which drive
+  the real `Ledger`.
+- **Deliberate scope choices:** child-task sub-agents, real parallel step
+  execution, index-backed target resolution, and verification interleaved
+  between steps are follow-ups (see the Known gaps table). The exit
+  criteria above are properties of the plan model, the validator, the
+  scheduler, the checkpoint/rollback pair and the driver, and do not
+  depend on that further wiring.
 
 ### Phase 7 exit criteria: status
 

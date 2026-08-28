@@ -52,7 +52,7 @@ fn print_usage() {
     eprintln!("USAGE:");
     eprintln!(
         "    valyria run \"<objective>\" [--workspace <path>] [--scenario <file.toml>] \
-         [--permission-mode manual|assisted|autonomous] [--events]"
+         [--permission-mode manual|assisted|autonomous] [--plan] [--events]"
     );
     eprintln!("    valyria task status <task_id> [--workspace <path>]");
     eprintln!("    valyria task pause <task_id> [--workspace <path>]");
@@ -72,6 +72,9 @@ async fn build_client(parsed: &ParsedArgs) -> Result<EmbeddedClient, String> {
     if let Some(path) = &parsed.scenario {
         let scenario = load_scenario(path).map_err(|e| format!("failed to load scenario: {e}"))?;
         config = config.with_scenario(scenario);
+    }
+    if parsed.plan {
+        config = config.with_planning_mode(valyria_app::PlanningMode::ModelAuthored);
     }
     let runtime = Runtime::open(config)
         .await

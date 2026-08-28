@@ -483,3 +483,160 @@ fn version_flag_prints_a_version() {
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stdout).starts_with("valyria "));
 }
+
+// --- Phase 8: model-authored planning ------------------------------------
+
+/// A two-step plan scenario. Each step *creates* a new file with a
+/// `must_not_exist` precondition, so re-applying an interrupted write
+/// fails the precondition rather than duplicating anything — which is what
+/// makes the kill/resume assertion ("each file present exactly once")
+/// robust regardless of where the SIGKILL lands.
+const PLAN_SCENARIO_TOML: &str = r#"
+name = "two_step_plan"
+
+[[turns]]
+kind = "tool_call"
+name = "submit_plan"
+arguments = { plan_scope = ["src/"], steps = [ { id = "create_alpha", intent = "create src/alpha.rs", targets = ["src/alpha.rs"], verification = { mode = "inherit" }, checkpoint = true, rollback_boundary = true }, { id = "create_beta", intent = "create src/beta.rs", targets = ["src/beta.rs"], depends_on = ["create_alpha"], verification = { mode = "inherit" } } ] }
+
+[[turns]]
+kind = "tool_call"
+name = "write_file"
+arguments = { path = "src/alpha.rs", content = "// alpha\n", precondition = "must_not_exist" }
+
+[[turns]]
+kind = "finish"
+summary = "alpha created"
+
+[[turns]]
+kind = "tool_call"
+name = "write_file"
+arguments = { path = "src/beta.rs", content = "// beta\n", precondition = "must_not_exist" }
+
+[[turns]]
+kind = "finish"
+summary = "beta created"
+"#;
+
+fn write_plan_scenario(ws: &Path) -> PathBuf {
+    let path = ws.join("plan_scenario.toml");
+    std::fs::write(&path, PLAN_SCENARIO_TOML).unwrap();
+    path
+}
+
+#[test]
+fn model_authored_plan_runs_end_to_end_and_streams_plan_created() {
+    let ws = fixture_repo();
+    let scenario = write_plan_scenario(ws.path());
+    let out = valyria(&[
+        "run",
+        "create two files by plan",
+        "--workspace",
+        &ws.path().display().to_string(),
+        "--scenario",
+        &scenario.display().to_string(),
+        "--plan",
+        "--permission-mode",
+        "autonomous",
+        "--events",
+    ]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("\"kind\":\"plan_created\""),
+        "missing plan_created in:\n{stdout}"
+    );
+    assert!(stdout.contains("completed"), "{stdout}");
+
+    assert_eq!(
+        std::fs::read_to_string(ws.path().join("src/alpha.rs")).unwrap(),
+        "// alpha\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(ws.path().join("src/beta.rs")).unwrap(),
+        "// beta\n"
+    );
+}
+
+/// Exit criterion 2: a multi-step plan executes with a mid-plan
+/// interruption + resume across a real process restart. Same
+/// race-tolerant harness as `kill_nine_then_restart_and_resume_*`.
+#[test]
+fn multi_step_plan_survives_kill_nine_and_resumes_mid_plan() {
+    const MAX_ATTEMPTS: usize = 25;
+
+    for _attempt in 1..=MAX_ATTEMPTS {
+        let ws = fixture_repo();
+        let scenario = write_plan_scenario(ws.path());
+        let (mut child, _reader, task_id) = spawn_run(
+            ws.path(),
+            &[
+                "--scenario",
+                &scenario.display().to_string(),
+                "--plan",
+                "--permission-mode",
+                "autonomous",
+            ],
+        );
+        child.kill().unwrap();
+        let _ = child.wait();
+
+        let status = task_status(ws.path(), &task_id);
+        let state = status_field(&status, "state").unwrap();
+
+        if state == "COMPLETED" {
+            continue; // raced to completion before the kill landed
+        }
+        assert_ne!(
+            state, "FAILED",
+            "task failed instead of interrupted: {status}"
+        );
+        assert_ne!(state, "CANCELLED", "unexpected cancellation: {status}");
+
+        // Resume must be handed the same scenario + `--plan` (the CLI
+        // rebuilds the runtime per invocation and has no daemon to carry
+        // that choice), exactly as `--workspace` is repeated on every
+        // subcommand.
+        let out = valyria(&[
+            "task",
+            "resume",
+            &task_id,
+            "--workspace",
+            &ws.path().display().to_string(),
+            "--scenario",
+            &scenario.display().to_string(),
+            "--plan",
+            "--permission-mode",
+            "autonomous",
+        ]);
+        assert!(
+            out.status.success(),
+            "resume failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let final_status = task_status(ws.path(), &task_id);
+        assert_eq!(
+            status_field(&final_status, "state").as_deref(),
+            Some("COMPLETED"),
+            "{final_status}"
+        );
+
+        // Both plan steps ran, exactly once each, across the restart.
+        assert_eq!(
+            std::fs::read_to_string(ws.path().join("src/alpha.rs")).unwrap(),
+            "// alpha\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.path().join("src/beta.rs")).unwrap(),
+            "// beta\n"
+        );
+        return;
+    }
+
+    panic!("never interrupted the plan mid-flight in {MAX_ATTEMPTS} attempts");
+}
