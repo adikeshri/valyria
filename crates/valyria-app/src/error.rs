@@ -22,6 +22,8 @@ pub enum AppError {
     CorruptWorkspaceId(String),
     #[error("task {0} was not paused, so there is no state to resume it into")]
     NotPaused(valyria_types::TaskId),
+    #[error("plan error: {0}")]
+    Plan(String),
 }
 
 impl ErrorCode for AppError {
@@ -37,6 +39,7 @@ impl ErrorCode for AppError {
             AppError::InvalidTaskId(_) => "app.invalid_task_id",
             AppError::CorruptWorkspaceId(_) => "app.corrupt_workspace_id",
             AppError::NotPaused(_) => "app.not_paused",
+            AppError::Plan(_) => "app.plan",
         }
     }
 
@@ -52,6 +55,7 @@ impl ErrorCode for AppError {
             AppError::InvalidTaskId(_) => false,
             AppError::CorruptWorkspaceId(_) => false,
             AppError::NotPaused(_) => false,
+            AppError::Plan(_) => false,
         }
     }
 }

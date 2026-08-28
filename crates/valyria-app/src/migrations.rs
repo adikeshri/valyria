@@ -3,7 +3,8 @@
 //! convention started in `valyria-task` (`valyria-events` owns 1-99,
 //! `valyria-task` owns 100-199, `valyria-index` owns 300-399,
 //! `valyria-graph` owns 400-499, `valyria-embed` owns 500-599,
-//! `valyria-memory` owns 600-699, `valyria-verify` owns 700-799).
+//! `valyria-memory` owns 600-699, `valyria-verify` owns 700-799,
+//! `valyria-plan` owns 800-899).
 
 use valyria_store::Migration;
 
@@ -27,6 +28,7 @@ pub fn workspace_migrations() -> Vec<Migration> {
     all.extend(valyria_embed::MIGRATIONS.iter().copied());
     all.extend(valyria_memory::MIGRATIONS.iter().copied());
     all.extend(valyria_verify::MIGRATIONS.iter().copied());
+    all.extend(valyria_plan::MIGRATIONS.iter().copied());
     all
 }
 
@@ -62,6 +64,7 @@ mod tests {
         assert!(applied.contains(&500));
         assert!(applied.contains(&600));
         assert!(applied.contains(&700));
+        assert!(applied.contains(&800));
     }
 
     #[test]
@@ -80,6 +83,7 @@ mod tests {
             ("valyria-embed", 500..600),
             ("valyria-memory", 600..700),
             ("valyria-verify", 700..800),
+            ("valyria-plan", 800..900),
         ] {
             assert!(
                 versions.iter().any(|v| block.contains(v)),

@@ -17,6 +17,9 @@ pub struct ParsedArgs {
     pub events: bool,
     pub allow: bool,
     pub deny: bool,
+    /// `--plan`: run `Planning` as a model-authored, validated plan
+    /// (Phase 8) instead of the pass-through.
+    pub plan: bool,
 }
 
 pub fn parse(raw: &[String]) -> Result<ParsedArgs, String> {
@@ -45,6 +48,7 @@ pub fn parse(raw: &[String]) -> Result<ParsedArgs, String> {
                 });
             }
             "--events" => parsed.events = true,
+            "--plan" => parsed.plan = true,
             "--allow" => parsed.allow = true,
             "--deny" => parsed.deny = true,
             other => parsed.positional.push(other.to_string()),
@@ -81,6 +85,12 @@ mod tests {
     fn permission_mode_parses_known_values() {
         let parsed = parse(&args("run x --permission-mode autonomous")).unwrap();
         assert_eq!(parsed.permission_mode, Some(PermissionMode::Autonomous));
+    }
+
+    #[test]
+    fn plan_flag_is_off_by_default_and_opt_in() {
+        assert!(!parse(&args("run x")).unwrap().plan);
+        assert!(parse(&args("run x --plan")).unwrap().plan);
     }
 
     #[test]

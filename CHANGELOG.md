@@ -15,6 +15,45 @@ Work toward the first release. Phases refer to
 
 ### Added
 
+- **Phase 8 — planning and multi-agent.** The runtime now turns a task into a
+  validated, revisable plan and executes it step by step, checkpointing at
+  rollback boundaries.
+  - `valyria-plan` (new crate, migration block 800-899): the plan model — a DAG
+    of `PlanStep { id, intent, targets, depends_on, parallelizable, checkpoint,
+    verification, rollback_boundary, approval_required, estimated_scope }` — plus
+    a **validator** that returns *every* problem at once, each a machine
+    `PlanErrorCode` (empty plan, duplicate id, unknown dependency, cycle — with
+    the path, mutating step without verification, rollback boundary without
+    checkpoint, target outside `plan_scope`, `plan_scope` outside the permission
+    profile, unresolvable target). A **scheduler** groups steps into dependency
+    waves (parallelizable steps bucketed for a later concurrent executor).
+    **Checkpoints** capture the task-touched file set + a change-ledger
+    watermark; **rollback** replays the ledger entries after the watermark in
+    reverse through `Ledger::rollback_entry`, which refuses on any file touched
+    since — the first refusal aborts and leaves the tree untouched, and a clean
+    rollback is hash-verified against the checkpoint. **Multi-agent** ships as
+    `AgentRole` (Researcher / Planner / Implementer / Tester / Reviewer — tool
+    allowlist, write ban, permission ceiling) plus the five typed `Artifact`s
+    (`ResearchBrief`, `Plan`, `ChangeSet`, `VerificationReport`,
+    `ReviewFindings`) persisted in `task_artifact`; `PlanStore` persists plan
+    revisions (with parent hash), checkpoints and artifacts.
+  - `valyria-agent`: `Planning` (opt-in `PlanningMode::ModelAuthored`, `--plan`
+    on the CLI) asks the model for a `submit_plan`, validates it, and repairs
+    invalid plans for up to three bounded rounds — the budget rebuilt from the
+    journal on resume, the raw submission stored in the planning `model_completion`
+    entry so a crash never forces a re-call. Plan-driven `Implementing` walks the
+    schedule one step at a time; "which steps are done / started / checkpointed"
+    is rebuilt from the journal, so `kill -9` mid-plan + `valyria task resume`
+    continues at the next incomplete step with no re-run and no double-apply.
+    `AgentDriver::rollback_to_checkpoint` (also on `Runtime`) exposes the
+    checkpoint rollback. `plan_accepted` projects a `plan_created` event.
+  - Deliberate scope: no child-task sub-agents, no real parallel step execution,
+    target resolution against the workspace filesystem rather than the index,
+    and no verification interleaved between steps — the mandatory full
+    `Verifying` run is the backstop. A fake-model integration suite covers all
+    three exit criteria; a CLI test `SIGKILL`s a plan run mid-flight and resumes
+    it in a fresh process. 46 new tests; 942 pass across the workspace.
+
 - **Phase 7 — verification, diagnosis, repair.** The runtime now runs the
   repository's own checks, distils a failure into a structured diagnosis, and
   drives a bounded repair loop that can be caught looping.

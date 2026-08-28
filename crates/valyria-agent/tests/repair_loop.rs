@@ -29,6 +29,7 @@ fn migrations() -> Vec<Migration> {
     let mut m: Vec<Migration> = valyria_events::MIGRATIONS.to_vec();
     m.extend(valyria_task::MIGRATIONS.iter().copied());
     m.extend(valyria_verify::MIGRATIONS.iter().copied());
+    m.extend(valyria_plan::MIGRATIONS.iter().copied());
     m
 }
 
@@ -84,6 +85,7 @@ fn build_driver(backing: &Backing, scenario: Scenario) -> (Arc<TaskManager>, Age
     );
     let context = Arc::new(ContextAssembler::new(tools.clone()));
     let verification_log = Arc::new(VerificationLog::new(backing.store.clone()));
+    let plan_store = Arc::new(valyria_plan::PlanStore::new(backing.store.clone()));
     let launcher: Arc<dyn ProcessLauncher> = Arc::from(detect_platform_launcher());
     let sandbox_profile = SandboxProfile::new().allow_write(root.as_path());
 
@@ -95,6 +97,7 @@ fn build_driver(backing: &Backing, scenario: Scenario) -> (Arc<TaskManager>, Age
         ledger,
         engine,
         verification_log.clone(),
+        plan_store,
         root,
         Arc::new(HashCache::new()),
         clock,

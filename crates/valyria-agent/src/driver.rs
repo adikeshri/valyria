@@ -10,9 +10,10 @@
 //! effect of the Tool call (via `ToolRuntime::invoke`'s internal
 //! preflight+evaluate), not its own journaled effect kind; Context is
 //! folded into the `Discovery` state's handling, not a separately issued
-//! effect. Planning is a formality this driver passes straight through
-//! (no `valyria-plan` yet — Phase 8) since the state graph still requires
-//! transiting `Planning` on the way to `Implementing`.
+//! effect. Planning is a pass-through unless the driver is built with
+//! [`PlanningMode::ModelAuthored`] (Phase 8), in which case `Planning`
+//! asks the model for a plan, validates it, and repairs invalid plans
+//! under a bounded budget — see [`crate::plan_exec`].
 //!
 //! Phase 7 adds the verify → diagnose → repair loop. Verification runs
 //! are driver-initiated (not model tool calls): `Verifying` discovers the
@@ -33,6 +34,7 @@ use valyria_ledger::Ledger;
 use valyria_model::{GenerateRequest, Message};
 use valyria_orchestrator::{Orchestrator, Role};
 use valyria_permissions::{GrantScope, PermissionEngine};
+use valyria_plan::PlanStore;
 use valyria_sandbox::{ProcessLauncher, SandboxProfile};
 use valyria_task::{kinds, ControlSignal, JournalEntryKind, TaskManager};
 use valyria_tools::{InvocationResult, ToolCtx, ToolOutcome, ToolRuntime};
@@ -55,6 +57,33 @@ const DEFAULT_CONTEXT_BUDGET_TOKENS: usize = 50_000;
 
 /// Cap on repair cycles before the loop gives up to the user (§8).
 const MAX_REPAIR_ATTEMPTS: u32 = 4;
+
+/// Cap on plan-repair rounds before `Planning` fails to the user (§4.25:
+/// "bounded repair attempts").
+pub(crate) const MAX_PLAN_REPAIR_ATTEMPTS: u32 = 3;
+
+/// Model turns granted to one plan step before the driver force-completes
+/// it and lets the mandatory full `Verifying` run be the backstop. Bounds
+/// the plan loop the same way `MAX_REPAIR_ATTEMPTS` bounds repair.
+pub(crate) const MAX_STEP_TURNS: usize = 3;
+
+/// The driver-level "action" a model uses to hand back a plan: a tool call
+/// by this name whose arguments are the plan JSON. Not a real registered
+/// tool — `step_planning` intercepts it before `ToolRuntime` ever sees it.
+pub const SUBMIT_PLAN_ACTION: &str = "submit_plan";
+
+/// Whether the `Planning` state asks the model for a plan or is the
+/// Phase 3 pass-through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PlanningMode {
+    /// `Planning` transitions straight to `Implementing` with no model
+    /// call — every pre-Phase-8 scenario and test relies on this.
+    #[default]
+    Passthrough,
+    /// `Planning` asks the model for a `submit_plan`, validates it, and
+    /// repairs invalid plans under a bounded budget before `Implementing`.
+    ModelAuthored,
+}
 
 /// Process-local verify/diagnose/repair bookkeeping for one task. Cloned
 /// out, mutated, and written back by each state handler (only one driver
@@ -79,18 +108,20 @@ struct VerifyState {
 }
 
 pub struct AgentDriver {
-    tasks: Arc<TaskManager>,
-    tools: Arc<ToolRuntime>,
-    orchestrator: Arc<Orchestrator>,
-    context: Arc<ContextAssembler>,
-    ledger: Arc<Ledger>,
-    permissions: Arc<PermissionEngine>,
-    verification_log: Arc<VerificationLog>,
-    workspace_root: WorkspaceRoot,
-    hash_cache: Arc<HashCache>,
-    clock: Arc<dyn Clock>,
-    launcher: Arc<dyn ProcessLauncher>,
-    sandbox_profile: SandboxProfile,
+    pub(crate) tasks: Arc<TaskManager>,
+    pub(crate) tools: Arc<ToolRuntime>,
+    pub(crate) orchestrator: Arc<Orchestrator>,
+    pub(crate) context: Arc<ContextAssembler>,
+    pub(crate) ledger: Arc<Ledger>,
+    pub(crate) permissions: Arc<PermissionEngine>,
+    pub(crate) verification_log: Arc<VerificationLog>,
+    pub(crate) plan_store: Arc<PlanStore>,
+    pub(crate) planning_mode: PlanningMode,
+    pub(crate) workspace_root: WorkspaceRoot,
+    pub(crate) hash_cache: Arc<HashCache>,
+    pub(crate) clock: Arc<dyn Clock>,
+    pub(crate) launcher: Arc<dyn ProcessLauncher>,
+    pub(crate) sandbox_profile: SandboxProfile,
     verify_states: Mutex<HashMap<TaskId, VerifyState>>,
 }
 
@@ -104,6 +135,7 @@ impl AgentDriver {
         ledger: Arc<Ledger>,
         permissions: Arc<PermissionEngine>,
         verification_log: Arc<VerificationLog>,
+        plan_store: Arc<PlanStore>,
         workspace_root: WorkspaceRoot,
         hash_cache: Arc<HashCache>,
         clock: Arc<dyn Clock>,
@@ -118,6 +150,8 @@ impl AgentDriver {
             ledger,
             permissions,
             verification_log,
+            plan_store,
+            planning_mode: PlanningMode::Passthrough,
             workspace_root,
             hash_cache,
             clock,
@@ -125,6 +159,13 @@ impl AgentDriver {
             sandbox_profile,
             verify_states: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Opt this driver into model-authored planning (§4.25). Off by
+    /// default so every pre-Phase-8 scenario keeps its exact behaviour.
+    pub fn with_planning_mode(mut self, mode: PlanningMode) -> Self {
+        self.planning_mode = mode;
+        self
     }
 
     /// Runs `task_id` until it reaches a terminal state, is paused, or asks
@@ -174,13 +215,26 @@ impl AgentDriver {
                         .await?;
                     self.tasks.transition(task_id, AgentState::Planning).await?;
                 }
-                AgentState::Planning => {
-                    self.tasks
-                        .transition(task_id, AgentState::Implementing)
-                        .await?;
-                }
+                AgentState::Planning => match self.planning_mode {
+                    PlanningMode::Passthrough => {
+                        self.tasks
+                            .transition(task_id, AgentState::Implementing)
+                            .await?;
+                    }
+                    PlanningMode::ModelAuthored => {
+                        if self.step_planning(task_id, &cancel).await? == Flow::Return {
+                            return Ok(());
+                        }
+                    }
+                },
                 AgentState::Implementing => {
-                    self.step_implementing(task_id, &cancel).await?;
+                    if self.task_has_plan(task_id).await? {
+                        if self.step_implementing_plan(task_id, &cancel).await? == Flow::Return {
+                            return Ok(());
+                        }
+                    } else {
+                        self.step_implementing(task_id, &cancel).await?;
+                    }
                 }
                 AgentState::Verifying => {
                     if self.step_verifying(task_id, &cancel).await? == Flow::Return {
@@ -727,7 +781,7 @@ impl AgentDriver {
 
     // --- shared tool-call plumbing -----------------------------------
 
-    async fn issue_and_execute_tool_call(
+    pub(crate) async fn issue_and_execute_tool_call(
         &self,
         task_id: TaskId,
         cancel: &CancellationToken,
@@ -828,7 +882,7 @@ impl AgentDriver {
         }
     }
 
-    fn record_baseline_if_path(&self, ctx: &ToolCtx, input: &serde_json::Value) {
+    pub(crate) fn record_baseline_if_path(&self, ctx: &ToolCtx, input: &serde_json::Value) {
         let Some(path) = input.get("path").and_then(|v| v.as_str()) else {
             return;
         };
@@ -909,7 +963,7 @@ impl AgentDriver {
 
     // --- helpers ---------------------------------------------------
 
-    fn task_changed_files(&self, task_id: TaskId) -> Vec<PathBuf> {
+    pub(crate) fn task_changed_files(&self, task_id: TaskId) -> Vec<PathBuf> {
         let mut files: Vec<PathBuf> = self
             .ledger
             .entries_for_task(task_id)
@@ -954,7 +1008,12 @@ impl AgentDriver {
         self.verify_states.lock().unwrap().insert(task_id, state);
     }
 
-    fn build_ctx(&self, task_id: TaskId, step_id: StepId, cancel: CancellationToken) -> ToolCtx {
+    pub(crate) fn build_ctx(
+        &self,
+        task_id: TaskId,
+        step_id: StepId,
+        cancel: CancellationToken,
+    ) -> ToolCtx {
         ToolCtx {
             workspace_root: self.workspace_root.clone(),
             hash_cache: self.hash_cache.clone(),
@@ -971,7 +1030,7 @@ impl AgentDriver {
 /// Whether a state handler wants the outer `run` loop to keep going or to
 /// return (the task reached a state no driver should keep spinning on).
 #[derive(Debug, PartialEq, Eq)]
-enum Flow {
+pub(crate) enum Flow {
     Continue,
     Return,
 }

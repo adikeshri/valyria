@@ -35,6 +35,28 @@ pub mod kinds {
     pub const LOOP_DETECTED: &str = "loop_detected";
     /// The repair ledger's decision after a non-fixing repair cycle (§30).
     pub const REPAIR_DECISION: &str = "repair_decision";
+    /// A model-authored plan the runtime validated and accepted (§10). The
+    /// plan body itself lives in `plan_revision` (block 800-899); this
+    /// payload carries `{revision, hash, step_count}`.
+    pub const PLAN_ACCEPTED: &str = "plan_accepted";
+    /// A model-authored plan the runtime rejected; payload carries the
+    /// structured validation error codes so a resumed task can see why.
+    pub const PLAN_REJECTED: &str = "plan_rejected";
+    /// One plan step began executing (§10). Payload: `{step_id, intent}`.
+    pub const PLAN_STEP_STARTED: &str = "plan_step_started";
+    /// One plan step finished (its edits applied, its verification, if
+    /// any, green). Payload: `{step_id}`. This is the durable record the
+    /// driver rebuilds "which steps are done" from on resume.
+    pub const PLAN_STEP_COMPLETED: &str = "plan_step_completed";
+    /// A rollback checkpoint was taken at a step boundary (§4.12). Payload:
+    /// `{checkpoint_id, step_id}`.
+    pub const PLAN_CHECKPOINT: &str = "plan_checkpoint";
+    /// A rollback to a checkpoint was performed. Payload:
+    /// `{checkpoint_id, reverted}`.
+    pub const PLAN_ROLLBACK: &str = "plan_rollback";
+    /// A step tried to write outside the plan's declared `plan_scope` — a
+    /// permission event (§4.25). Payload: `{path}`.
+    pub const PLAN_SCOPE_EXPANSION: &str = "plan_scope_expansion";
 }
 
 #[derive(Debug, Clone, PartialEq)]

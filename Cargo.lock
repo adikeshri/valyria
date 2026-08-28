@@ -2576,6 +2576,7 @@ dependencies = [
  "valyria-model",
  "valyria-orchestrator",
  "valyria-permissions",
+ "valyria-plan",
  "valyria-runtime-fake",
  "valyria-sandbox",
  "valyria-store",
@@ -2613,6 +2614,7 @@ dependencies = [
  "valyria-model",
  "valyria-orchestrator",
  "valyria-permissions",
+ "valyria-plan",
  "valyria-protocol",
  "valyria-runtime-fake",
  "valyria-sandbox",
@@ -2971,12 +2973,19 @@ dependencies = [
 name = "valyria-plan"
 version = "0.1.0"
 dependencies = [
+ "rusqlite",
  "serde",
+ "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
+ "tokio",
  "tracing",
+ "valyria-ledger",
+ "valyria-store",
  "valyria-testkit",
  "valyria-types",
  "valyria-util",
+ "valyria-vfs",
 ]
 
 [[package]]

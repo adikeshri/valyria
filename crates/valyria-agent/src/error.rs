@@ -16,6 +16,10 @@ pub enum AgentError {
     NotWaitingForPermission(TaskId),
     #[error("task {0} has no pending tool call to resolve")]
     NoPendingToolCall(TaskId),
+    #[error("plan error: {0}")]
+    Plan(String),
+    #[error("checkpoint rollback failed: {0}")]
+    Rollback(String),
 }
 
 impl ErrorCode for AgentError {
@@ -28,6 +32,8 @@ impl ErrorCode for AgentError {
             AgentError::UnknownTool(_) => "agent.unknown_tool",
             AgentError::NotWaitingForPermission(_) => "agent.not_waiting_for_permission",
             AgentError::NoPendingToolCall(_) => "agent.no_pending_tool_call",
+            AgentError::Plan(_) => "agent.plan",
+            AgentError::Rollback(_) => "agent.rollback",
         }
     }
 

@@ -615,6 +615,10 @@ impl TaskManager {
                     self.emit(task_id, EventKind::TestStarted, payload.clone())
                         .await?;
                 }
+                kinds::PLAN_ACCEPTED => {
+                    self.emit(task_id, EventKind::PlanCreated, payload.clone())
+                        .await?;
+                }
                 _ => {}
             },
             JournalEntryKind::EffectCompleted {
@@ -650,6 +654,14 @@ impl TaskManager {
                 }
                 kinds::LOOP_DETECTED => {
                     self.emit(task_id, EventKind::ProgressStalled, payload.clone())
+                        .await?;
+                }
+                kinds::PLAN_SCOPE_EXPANSION => {
+                    self.emit(task_id, EventKind::ApprovalRequested, payload.clone())
+                        .await?;
+                }
+                kinds::PLAN_ROLLBACK => {
+                    self.emit(task_id, EventKind::FileChanged, payload.clone())
                         .await?;
                 }
                 _ => {}

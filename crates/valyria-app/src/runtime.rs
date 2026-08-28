@@ -7,18 +7,19 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use rusqlite::OptionalExtension;
-use valyria_agent::AgentDriver;
+use valyria_agent::{AgentDriver, PlanningMode};
 use valyria_context::ContextAssembler;
 use valyria_events::EventBus;
 use valyria_ledger::Ledger;
 use valyria_orchestrator::{Orchestrator, Role};
 use valyria_permissions::PermissionEngine;
+use valyria_plan::{PlanRevision, PlanStore, RollbackError, RollbackReport};
 use valyria_runtime_fake::{FakeModelRuntime, Scenario};
 use valyria_sandbox::{detect_platform_launcher, ProcessLauncher, SandboxProfile};
 use valyria_store::Store;
 use valyria_task::{Budget, Task, TaskManager};
 use valyria_tools::ToolRuntime;
-use valyria_types::{AgentState, PermissionMode, TaskId, WorkspaceId};
+use valyria_types::{AgentState, CheckpointId, PermissionMode, TaskId, WorkspaceId};
 use valyria_util::{CancellationToken, Clock, SystemClock};
 use valyria_verify::VerificationLog;
 use valyria_vfs::WorkspaceRoot;
@@ -44,6 +45,9 @@ pub struct RuntimeConfig {
     pub data_dir: PathBuf,
     pub permission_mode: PermissionMode,
     pub scenario: Scenario,
+    /// Whether `Planning` asks the model for a plan (Phase 8) or is the
+    /// Phase 3 pass-through. Defaults to pass-through.
+    pub planning_mode: PlanningMode,
 }
 
 impl RuntimeConfig {
@@ -55,7 +59,13 @@ impl RuntimeConfig {
             data_dir,
             permission_mode: PermissionMode::default(),
             scenario: Scenario::default_walking_skeleton(),
+            planning_mode: PlanningMode::default(),
         }
+    }
+
+    pub fn with_planning_mode(mut self, mode: PlanningMode) -> Self {
+        self.planning_mode = mode;
+        self
     }
 
     pub fn with_data_dir(mut self, data_dir: impl Into<PathBuf>) -> Self {
@@ -78,6 +88,7 @@ pub struct Runtime {
     events: Arc<EventBus>,
     tasks: Arc<TaskManager>,
     driver: Arc<AgentDriver>,
+    plan_store: Arc<PlanStore>,
     workspace_id: WorkspaceId,
 }
 
@@ -134,6 +145,7 @@ impl Runtime {
 
         let context = Arc::new(ContextAssembler::new(tool_runtime.clone()));
         let verification_log = Arc::new(VerificationLog::new(store.clone()));
+        let plan_store = Arc::new(PlanStore::new(store.clone()));
         let hash_cache = Arc::new(valyria_vfs::HashCache::new());
         let launcher: Arc<dyn ProcessLauncher> = Arc::from(detect_platform_launcher());
         let sandbox_profile = SandboxProfile::new().allow_write(workspace_root.as_path());
@@ -144,25 +156,30 @@ impl Runtime {
             clock.clone(),
         ));
 
-        let driver = Arc::new(AgentDriver::new(
-            tasks.clone(),
-            tool_runtime,
-            orchestrator,
-            context,
-            ledger,
-            engine,
-            verification_log,
-            workspace_root,
-            hash_cache,
-            clock,
-            launcher,
-            sandbox_profile,
-        ));
+        let driver = Arc::new(
+            AgentDriver::new(
+                tasks.clone(),
+                tool_runtime,
+                orchestrator,
+                context,
+                ledger,
+                engine,
+                verification_log,
+                plan_store.clone(),
+                workspace_root,
+                hash_cache,
+                clock,
+                launcher,
+                sandbox_profile,
+            )
+            .with_planning_mode(config.planning_mode),
+        );
 
         Ok(Self {
             events,
             tasks,
             driver,
+            plan_store,
             workspace_id,
         })
     }
@@ -240,6 +257,28 @@ impl Runtime {
 
     pub async fn task_status(&self, task_id: TaskId) -> Result<Task> {
         Ok(self.tasks.get(task_id).await?)
+    }
+
+    /// The latest accepted plan revision for a task, if it has one (Phase
+    /// 8). `None` for a task the driver ran as a Phase-3 pass-through.
+    pub async fn plan(&self, task_id: TaskId) -> Result<Option<PlanRevision>> {
+        self.plan_store
+            .latest_revision(task_id)
+            .await
+            .map_err(|e| AppError::Plan(e.to_string()))
+    }
+
+    /// Roll a task's workspace back to a checkpoint taken at a plan step
+    /// boundary. Restores the checkpointed files exactly; refuses on any
+    /// file touched since (§4.25).
+    pub async fn rollback_to_checkpoint(
+        &self,
+        task_id: TaskId,
+        checkpoint_id: CheckpointId,
+    ) -> std::result::Result<RollbackReport, RollbackError> {
+        self.driver
+            .rollback_to_checkpoint(task_id, checkpoint_id)
+            .await
     }
 
     fn spawn_driver(&self, task_id: TaskId) {
