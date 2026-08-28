@@ -15,6 +15,44 @@ Work toward the first release. Phases refer to
 
 ### Added
 
+- **Phase 7 — verification, diagnosis, repair.** The runtime now runs the
+  repository's own checks, distils a failure into a structured diagnosis, and
+  drives a bounded repair loop that can be caught looping.
+  - `valyria-verify`: tooling **discovery** scans manifests (`Cargo.toml`,
+    `package.json` scripts, `pyproject.toml`, `go.mod`), `Makefile`/`justfile`
+    targets, tool configs and — highest confidence — CI `run:` steps, then
+    confirms each candidate by executing a cheap probe before it is trusted.
+    An **escalation strategy** orders the confirmed commands by regression-catch
+    value per second — syntax/type check first, a mandatory full run before
+    `COMPLETED`, early exit on the first failure. A **runner** executes one
+    command via `valyria-process` under the workspace sandbox, classifies the
+    outcome and mints the `VerificationRunId` that makes the result
+    verification-sourced `Evidence` (D4). **Failure parsers** for cargo (JSON +
+    human), rust libtest, pytest, `go test`/`go build`, jest, tsc, mypy, eslint
+    and formatters, with a tolerant generic fallback, produce a small
+    `Failure { kind, location, assertion, failing_test }` set. **Diagnosis**
+    intersects those locations with the change ledger (and, when wired, the
+    graph neighbourhood) to rank suspect files. Runs persist to `workspace.db`
+    (migration block 700-799); the **completion report** is built from those
+    rows and nothing else — an unbacked "tests pass" claim is demoted to
+    *unverified*.
+  - `valyria-agent`: **loop and progress detection** — five detector classes
+    (exact repeat, `A→B→A` oscillation, repeated failure fingerprint,
+    no-change iteration, stalled verification frontier), each fed by a
+    `StepSignature` / failure fingerprint / `ProgressMetric` and each covered
+    by a purpose-built test. A **repair ledger** bounds the loop: `Continue →
+    EscalateStrategy → SwitchRole → AskUser → GiveUp`, driven by attempt count,
+    a regression, or a loop finding.
+  - `valyria-agent::AgentDriver` wires it together: `Verifying` discovers,
+    plans and runs the next check (a pass-through when the repo has no
+    tooling, exactly as Phase 3); `Diagnosing` distils the failure, feeds the
+    detector and journals a `loop_detected` / `progress_stalled` when it trips;
+    `Repairing` takes one model-authored edit and loops back. Verification runs
+    are journaled effects and projected as `test_started` / `test_passed` /
+    `test_failed` / `verification_evidence` events. A fake-model integration
+    test fixes a seeded bug end to end; another proves a non-converging loop is
+    detected and handed off rather than spun on.
+
 - **Phase 6 — context, instructions, memory.** A task and a repository become a
   trust-ordered, budget-fitted, injection-fenced prompt that can be rebuilt
   byte-for-byte from what was stored.

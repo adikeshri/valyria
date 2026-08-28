@@ -23,6 +23,7 @@ valyria-sandbox = { workspace = true }
 valyria-permissions = { workspace = true }
 valyria-ledger = { workspace = true }
 valyria-tools = { workspace = true }
+valyria-verify = { workspace = true }
 valyria-model = { workspace = true }
 valyria-runtime-fake = { workspace = true }
 valyria-orchestrator = { workspace = true }

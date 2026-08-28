@@ -24,6 +24,17 @@ pub mod kinds {
     pub const TOOL_RESULT: &str = "tool_result";
     pub const TOOL_DENIED: &str = "tool_denied";
     pub const PERMISSION_ASK: &str = "permission_ask";
+    /// A verification command the driver ran itself (§27) — not a model
+    /// tool call. Payload carries the command and, on completion, the
+    /// outcome + parsed failure count.
+    pub const VERIFY: &str = "verify";
+    pub const VERIFY_RESULT: &str = "verify_result";
+    /// The distilled diagnosis of a failing verification run (§29).
+    pub const DIAGNOSIS: &str = "diagnosis";
+    /// A loop/progress detector tripped (§31).
+    pub const LOOP_DETECTED: &str = "loop_detected";
+    /// The repair ledger's decision after a non-fixing repair cycle (§30).
+    pub const REPAIR_DECISION: &str = "repair_decision";
 }
 
 #[derive(Debug, Clone, PartialEq)]

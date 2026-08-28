@@ -12,7 +12,7 @@ Status vocabulary:
 - **scaffolded** — the crate compiles, declares its layer and phase, and is
   wired into the layering check. No implementation yet.
 
-Last updated: 2026-08-28 (after Phase 6).
+Last updated: 2026-08-28 (after Phase 7).
 
 ---
 
@@ -27,15 +27,83 @@ Last updated: 2026-08-28 (after Phase 6).
 | 4 | Repository intelligence: `lang`, `index`, `graph`, incremental pipeline, `lsp` | **partial** — 7 languages of the 11 planned tier-1 set; no large-repo performance run yet |
 | 5 | Search: `embed`, `search`, fusion ranking, explanations | **partial** — engine and all seven modes live; not yet wired to the `search` tool or the agent loop, and semantic ranking rides a placeholder embedder until Phase 9 |
 | 6 | Context, instructions, memory; prompt assembly with the trust lattice | **partial** — the full pipeline, instruction discovery and memory are implemented and tested against every stated exit criterion; a search-backed `Retriever` is included, but wiring retrieval + index bootstrap into the live agent loop is a deliberate follow-up (the embedded runtime still drives with explicit-file context) |
-| 7 | Verification, diagnosis, repair: `verify`, failure parsers, repair loop, loop detection | scaffolded |
+| 7 | Verification, diagnosis, repair: `verify`, failure parsers, repair loop, loop detection | **partial** — discovery, escalation strategy, the runner, ten failure parsers, diagnosis, the completion report, five loop detectors and the driver's verify→diagnose→repair loop are all implemented and tested; a fake-model seeded-bug fix and a caught non-converging loop pass end to end. The 30-real-repo discovery corpus and the captured-output parser corpus at scale wait on `valyria-bench` (Phase 11), and mapping changed symbols → covering tests / graph-neighbour suspects in the *live* loop is a Phase 6/8 wiring follow-up |
 | 8 | Planning and multi-agent: `plan`, checkpoints, rollback boundaries, sub-tasks | scaffolded |
 | 9 | Real models: `runtime-llamacpp`, `runtime-mlx`, `runtime-openai-compat`, registry, store, model pool | scaffolded |
 | 10 | Interface completion: protocol v1 freeze, schema export, full CLI, TUI, `doctor`, `clean`, daemon | not started |
 | 11 | Hardening and evaluation: `bench`, fuzzing, perf work, cross-platform matrix, release gates | not started |
 
-Phase 7 is parallelizable now that 4 has landed. Phase 9 can start early against
+Phase 8 is parallelizable now that 7 has landed. Phase 9 can start early against
 the OpenAI-compatible adapter (a locally running `llama-server`) without waiting
 for any FFI work.
+
+---
+
+## What Phase 7 delivered
+
+The runtime can now **run the repository's own checks, understand a
+failure, and try to fix it** — and know when it is going in circles.
+
+**Discovery reads the repo, then proves each command.** `valyria-verify`
+scans `Cargo.toml`, `package.json` `scripts`, `pyproject.toml`, `go.mod`,
+`Makefile` / `justfile` targets, tool config files and — ranked highest,
+because they are the commands the maintainers actually run —
+`.github/workflows/*` `run:` steps. Discovery itself spawns nothing; a
+separate `validate` step runs one cheap probe per program and only
+commands that actually launch on this machine are trusted.
+
+**The strategy is cost/value, not a fixed script.** Steps are ordered
+`Syntax → TargetedTest → RelatedTests → Style → Full` by
+regression-catch probability per second, with two hard rules: a failing
+check goes straight to diagnosis (no point running the slower ones), and
+the full suite must run before `COMPLETED` — a green targeted test is not
+evidence the whole thing still builds.
+
+**A verification run is the only way to get verification `Evidence`.**
+The runner executes one command through `valyria-process` under the
+workspace sandbox, classifies `Passed / Failed / Errored / TimedOut`,
+parses the output, and mints the `VerificationRunId` that `Evidence`
+(D4) requires. Runs persist to `workspace.db` (block 700-799) and the
+completion report is assembled from those rows alone — a model's "tests
+pass" with no passing run in the log is reported as *not verified*.
+
+**Ten failure parsers, one distilled shape.** cargo (both
+`--message-format=json` and human), rust libtest (old and new panic
+formats, `assertion left == right`), pytest, `go test` / `go build`,
+jest / vitest, tsc, mypy, eslint, formatters (rustfmt / gofmt /
+prettier), and a tolerant generic fallback that still records a
+`file:line` and an error line when nothing specific matches. Each
+produces `Failure { kind, primary_location, assertion, failing_test }`
+with a line/column-independent `fingerprint` for loop detection.
+
+**Diagnosis is an intersection.** A file that a failure points at *and*
+that this task changed outranks either signal alone; a changed file in
+the graph neighbourhood of a failure is next; the failing test's own
+file is a weak suspect. Only that distilled subset — failures plus the
+top few suspects — is offered to the repair prompt, never raw output.
+
+**Five loop detectors, each with its own scenario.** Exact repeat
+(identical step back-to-back), `A→B→A` oscillation, the same failure
+fingerprint N times, N steps with no file-state change, and a stalled
+progress metric (does the verification frontier advance? do failures
+decrease? are new files being touched?). A finding routes through the
+repair ledger — `Continue → EscalateStrategy → SwitchRole → AskUser →
+GiveUp` — so a stuck agent escalates and then hands off; it never spins
+silently, and it emits `ProgressStalled` the moment it trips.
+
+**The driver runs the loop.** `Verifying` discovers, plans and runs the
+next check (and is a plain pass-through when the repo has no tooling,
+exactly as Phase 3); `Diagnosing` distils the failure, feeds the
+detector, journals any `loop_detected`, and consults the repair ledger;
+`Repairing` takes one model-authored edit and loops back to `Verifying`.
+Verification runs are journaled effects, projected as
+`test_started` / `test_passed` / `test_failed` / `verification_evidence`
+events. Two fake-model integration tests: one fixes a seeded bug end to
+end (fail → diagnose → edit → pass → report `Verified`), the other
+proves a model that never actually fixes anything is caught looping and
+handed off rather than run forever.
+
+86 new tests; 896 pass across the workspace, up from 810.
 
 ---
 
@@ -256,7 +324,9 @@ clear "not implemented in this phase" error rather than pretending:
 | The index, graph and search engine are not wired into the *live* agent loop: nothing calls `bootstrap` during a task, and the embedded runtime drives with explicit-file context. `ContextEngine` + `SearchRetriever` are built and tested; wiring them into `valyria-app`/`valyria-agent` (with a bootstrap and generation-pinning strategy) is the follow-up | Phase 6 follow-up |
 | Sandbox on Linux and Windows falls back to `PermissiveSandbox` (reported, never silent) | Phase 1 completion |
 | Only the fake model runtime exists; no real inference | Phase 9 |
-| No verification or repair loop; no planning | Phases 7–8 |
+| No planning: `Planning` is a one-step formality, no `valyria-plan` | Phase 8 |
+| The repair loop maps changed code → covering tests / graph-neighbour suspects only when the caller supplies them; the *live* driver passes an empty set (no index/graph in the loop yet), so `diagnose` suspects come from failure locations ∩ the change ledger alone | Phase 6/8 follow-up |
+| Loop detector + repair ledger are process-local per task run; a cross-process resume rebuilds the plan from scratch (verification *runs* and the completion report are durable) | Phase 8/10 |
 | No `doctor`, `clean`, storage inspection, daemon mode, or TUI | Phase 10 |
 | Protocol is unversioned in practice — no schema export or compat gate yet | Phase 10 |
 
@@ -285,6 +355,41 @@ Two further gaps are deliberate scope choices rather than unfinished work:
 - **LSP servers are configured but unexercised against real ones.** The client
   is fully tested against a scripted server; behaviour against a real
   rust-analyzer or gopls is untested, and belongs in the Phase 11 matrix.
+
+### Phase 7 exit criteria: status
+
+- **Discovery finds correct commands across languages.** Done at fixture
+  scale — `crates/valyria-verify/src/discovery.rs` tests cover cargo (incl.
+  workspaces), `package.json` scripts with the right package manager,
+  `go.mod`, `Makefile` / `justfile` targets, tool-config files, `sh`
+  script conventions and CI `run:` extraction (including that CI outranks a
+  manifest guess and that non-tool `run:` lines are ignored). Running the
+  ≥30-real-repo corpus belongs with `valyria-bench` (Phase 11).
+- **Parsers tested against a captured-output corpus.** Done at unit scale —
+  `parse.rs` tests exercise every parser against representative real output
+  (JSON and human cargo, both libtest panic formats, pytest summary +
+  traceback, `go test` detail lines and `go build` errors, jest
+  expected/received, tsc, mypy, eslint stylish, rustfmt `--check`), plus
+  the dispatcher's timeout / generic-fallback / non-zero-with-no-parse
+  paths. A large captured corpus is a Phase 11 asset.
+- **A seeded-bug fixture is fixed end to end by the fake model.** Done —
+  `crates/valyria-agent/tests/repair_loop.rs::seeded_bug_is_verified_diagnosed_and_repaired_end_to_end`:
+  a `verify.sh` fixture fails, is diagnosed, the model edits the file, the
+  re-run passes, and `CompletionReport::from_runs` reports `Verified` — all
+  from the durable `verification_run` rows.
+- **Every loop-detection class is triggered by a purpose-built scenario.**
+  Done — `loop_detect.rs` has one test per class (exact repeat,
+  oscillation period 2 and 3, repeated failure, no-change iteration,
+  stalled frontier) plus resets and negative cases, and
+  `repair_loop.rs::an_unfixable_bug_trips_loop_detection_and_is_handed_off`
+  drives the whole thing through the real driver: a model that never fixes
+  anything is caught, escalated, and handed to the user with a bounded
+  number of verification runs and a `progress_stalled` event.
+- **Deliberate scope choice:** the driver's live loop passes an empty
+  graph-neighbour set to `diagnose` (no index/graph in the agent loop
+  yet — the Phase 6 follow-up), and the loop detector / repair ledger are
+  process-local. The exit criteria above are properties of the pipeline
+  and the driver and do not depend on that wiring.
 
 ### Phase 6 exit criteria: status
 

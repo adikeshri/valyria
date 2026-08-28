@@ -22,6 +22,7 @@ use valyria_task::{Budget, TaskManager};
 use valyria_tools::ToolRuntime;
 use valyria_types::{AgentState, PermissionMode, WorkspaceId};
 use valyria_util::{CancellationToken, Clock, FixedClock};
+use valyria_verify::VerificationLog;
 use valyria_vfs::{HashCache, WorkspaceRoot};
 
 const FIXTURE_LIB_RS: &str = "pub fn existing(a: i32) -> i32 {\n    a\n}\n";
@@ -29,6 +30,7 @@ const FIXTURE_LIB_RS: &str = "pub fn existing(a: i32) -> i32 {\n    a\n}\n";
 fn combined_migrations() -> Vec<Migration> {
     let mut migrations: Vec<Migration> = valyria_events::MIGRATIONS.to_vec();
     migrations.extend(valyria_task::MIGRATIONS.iter().copied());
+    migrations.extend(valyria_verify::MIGRATIONS.iter().copied());
     migrations
 }
 
@@ -85,6 +87,7 @@ fn build_driver(
     let orchestrator = Arc::new(orch);
 
     let context = Arc::new(ContextAssembler::new(tool_runtime.clone()));
+    let verification_log = Arc::new(VerificationLog::new(backing.store.clone()));
     let hash_cache = Arc::new(HashCache::new());
     let launcher: Arc<dyn ProcessLauncher> = Arc::from(detect_platform_launcher());
     let sandbox_profile = SandboxProfile::new().allow_write(root.as_path());
@@ -96,6 +99,7 @@ fn build_driver(
         context,
         ledger,
         engine,
+        verification_log,
         root,
         hash_cache,
         clock,

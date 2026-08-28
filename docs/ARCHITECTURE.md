@@ -106,10 +106,15 @@ add (search still works with embeddings switched off).
 
 ### Layer 3 — Execution
 `valyria-permissions` · `valyria-tools` · `valyria-edit` · `valyria-ledger` ·
-`valyria-verify` *(verify scaffolded, Phase 7)*
+`valyria-verify`
 
 Permission modes and rule evaluation, the tool registry and invocation records,
-the editing strategy ladder, and the change ledger.
+the editing strategy ladder, and the change ledger. `valyria-verify` discovers
+the repository's real build/test/lint commands (manifests, `Makefile`/`justfile`
+targets, CI `run:` steps), confirms each by execution, runs them under a
+cost/value escalation strategy, parses the failures of ten common tools into a
+structured diagnosis, and persists every run as `Evidence` the completion
+report is built from.
 
 ### Layer 4 — Model
 `valyria-model` · `valyria-model-registry` · `valyria-model-store` ·
@@ -134,7 +139,11 @@ fails loudly rather than truncate, and the result is a replayable
 applies a fixed authority order and trust assignment; memory is four decaying,
 inspectable tiers. Retrieval is a `Retriever` seam — a search-backed
 implementation exists behind a feature flag; wiring it into the live loop is a
-follow-up. Planning lands in Phase 8.
+follow-up. The driver's `Verifying → Diagnosing → Repairing` loop discovers and
+runs the repo's checks, distils a failure into suspect files, and takes bounded
+model-authored repair edits under a loop detector (exact repeat, oscillation,
+repeated failure, no-change, stalled frontier) that escalates and then hands
+off rather than spinning. Planning lands in Phase 8.
 
 ### Layer 6 — Interface
 `valyria-protocol` · `valyria-app` · `valyria-cli` · `valyria-bench` · `xtask`

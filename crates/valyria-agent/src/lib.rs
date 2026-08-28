@@ -11,7 +11,11 @@
 pub mod action;
 pub mod driver;
 pub mod error;
+pub mod loop_detect;
+pub mod repair;
 
 pub use action::ActionRequest;
 pub use driver::AgentDriver;
 pub use error::{AgentError, Result};
+pub use loop_detect::{DetectorConfig, LoopDetector, LoopFinding, ProgressMetric, StepSignature};
+pub use repair::{RepairAttempt, RepairDecision, RepairLedger, RepairOutcome};

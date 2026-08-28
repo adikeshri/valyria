@@ -611,6 +611,10 @@ impl TaskManager {
                     self.emit(task_id, EventKind::ToolStarted, payload.clone())
                         .await?;
                 }
+                kinds::VERIFY => {
+                    self.emit(task_id, EventKind::TestStarted, payload.clone())
+                        .await?;
+                }
                 _ => {}
             },
             JournalEntryKind::EffectCompleted {
@@ -628,6 +632,24 @@ impl TaskManager {
                 }
                 kinds::PERMISSION_ASK => {
                     self.emit(task_id, EventKind::ApprovalRequested, payload.clone())
+                        .await?;
+                }
+                kinds::VERIFY_RESULT => {
+                    self.emit(task_id, EventKind::VerificationEvidence, payload.clone())
+                        .await?;
+                    let passed = payload
+                        .get("passed")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let k = if passed {
+                        EventKind::TestPassed
+                    } else {
+                        EventKind::TestFailed
+                    };
+                    self.emit(task_id, k, payload.clone()).await?;
+                }
+                kinds::LOOP_DETECTED => {
+                    self.emit(task_id, EventKind::ProgressStalled, payload.clone())
                         .await?;
                 }
                 _ => {}

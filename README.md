@@ -59,10 +59,22 @@ rather than truncating mid-symbol, and the whole prompt can be rebuilt
 byte-for-byte from a stored snapshot. Instruction discovery has a fixed
 authority order; memory is four decaying, inspectable tiers.
 
-Not yet built: planning, verification/repair, and every real model adapter.
-Retrieval into the *live* agent loop is a `Retriever` seam with a
-search-backed implementation ready but not yet wired in — nothing calls the
-index bootstrap during a task yet, and the `search` tool is still a stub.
+It also **verifies**: discovers the repository's own build/test/lint commands
+(manifests, `Makefile`/`justfile` targets, CI `run:` steps), confirms each by
+running it, escalates them cheapest-first with a mandatory full run before
+completion, parses the failures of ten common tools into a structured
+diagnosis, and persists every run as the `Evidence` the completion report is
+built from — an unbacked "tests pass" is reported as *not verified*. On a
+failure the driver runs a bounded **repair** loop (diagnose → one edit →
+re-verify) under a loop detector — exact repeat, `A→B→A` oscillation, repeated
+failure, no-change, stalled frontier — that escalates and then hands off rather
+than spinning silently.
+
+Not yet built: planning and every real model adapter. Retrieval into the
+*live* agent loop is a `Retriever` seam with a search-backed implementation
+ready but not yet wired in — nothing calls the index bootstrap during a task
+yet, the `search` tool is still a stub, and the repair loop's suspect-ranking
+sees the change ledger but not yet the graph.
 
 ## Requirements
 
@@ -145,7 +157,7 @@ docs/ROADMAP.md    per-phase status
 ## Development
 
 ```bash
-cargo test --workspace              # 810 tests as of Phase 6
+cargo test --workspace              # 896 tests as of Phase 7
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p xtask -- check-layering
