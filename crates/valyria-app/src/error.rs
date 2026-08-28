@@ -16,8 +16,20 @@ pub enum AppError {
     Ledger(#[from] valyria_ledger::LedgerError),
     #[error("scenario error: {0}")]
     Scenario(#[from] valyria_runtime_fake::FakeRuntimeError),
+    #[error("memory error: {0}")]
+    Memory(#[from] valyria_memory::MemoryError),
+    #[error("verify error: {0}")]
+    Verify(#[from] valyria_verify::VerifyError),
+    #[error("config error: {0}")]
+    Config(#[from] valyria_config::ConfigError),
+    #[error("model store error: {0}")]
+    ModelStore(#[from] valyria_model_store::ModelStoreError),
     #[error("invalid task id `{0}`")]
     InvalidTaskId(String),
+    #[error("unknown purge scope `{0}` (expected: memory, cache, tasks, logs)")]
+    UnknownPurgeScope(String),
+    #[error("invalid checkpoint id `{0}`")]
+    InvalidCheckpointId(String),
     #[error("corrupt workspace id stored in workspace_meta: `{0}`")]
     CorruptWorkspaceId(String),
     #[error("task {0} was not paused, so there is no state to resume it into")]
@@ -36,7 +48,13 @@ impl ErrorCode for AppError {
             AppError::Vfs(_) => "app.vfs",
             AppError::Ledger(_) => "app.ledger",
             AppError::Scenario(_) => "app.scenario",
+            AppError::Memory(_) => "app.memory",
+            AppError::Verify(_) => "app.verify",
+            AppError::Config(_) => "app.config",
+            AppError::ModelStore(_) => "app.model_store",
             AppError::InvalidTaskId(_) => "app.invalid_task_id",
+            AppError::UnknownPurgeScope(_) => "app.unknown_purge_scope",
+            AppError::InvalidCheckpointId(_) => "app.invalid_checkpoint_id",
             AppError::CorruptWorkspaceId(_) => "app.corrupt_workspace_id",
             AppError::NotPaused(_) => "app.not_paused",
             AppError::Plan(_) => "app.plan",
@@ -52,7 +70,13 @@ impl ErrorCode for AppError {
             AppError::Vfs(_) => false,
             AppError::Ledger(_) => false,
             AppError::Scenario(_) => false,
+            AppError::Memory(_) => false,
+            AppError::Verify(_) => false,
+            AppError::Config(_) => false,
+            AppError::ModelStore(_) => false,
             AppError::InvalidTaskId(_) => false,
+            AppError::UnknownPurgeScope(_) => false,
+            AppError::InvalidCheckpointId(_) => false,
             AppError::CorruptWorkspaceId(_) => false,
             AppError::NotPaused(_) => false,
             AppError::Plan(_) => false,

@@ -10,7 +10,10 @@ use rusqlite::OptionalExtension;
 use valyria_agent::{AgentDriver, PlanningMode};
 use valyria_context::ContextAssembler;
 use valyria_events::EventBus;
+use valyria_index::IndexStore;
 use valyria_ledger::Ledger;
+use valyria_memory::{MemoryStore, RetrievalRequest};
+use valyria_model_registry::Catalog;
 use valyria_orchestrator::{Orchestrator, Role};
 use valyria_permissions::PermissionEngine;
 use valyria_plan::{PlanRevision, PlanStore, RollbackError, RollbackReport};
@@ -21,11 +24,14 @@ use valyria_task::{Budget, Task, TaskManager};
 use valyria_tools::ToolRuntime;
 use valyria_types::{AgentState, CheckpointId, PermissionMode, TaskId, WorkspaceId};
 use valyria_util::{CancellationToken, Clock, SystemClock};
-use valyria_verify::VerificationLog;
+use valyria_verify::{CompletionReport, VerificationLog};
 use valyria_vfs::WorkspaceRoot;
 
+use crate::doctor::{Doctor, DoctorReport};
 use crate::error::{AppError, Result};
+use crate::global::GlobalStore;
 use crate::migrations::workspace_migrations;
+use crate::storage::{PurgeOutcome, PurgeScope, StorageInspector, StorageReport};
 
 /// Loads a scenario TOML file into a `Scenario` `RuntimeConfig` can be
 /// built with, without the caller needing to depend on
@@ -48,6 +54,10 @@ pub struct RuntimeConfig {
     /// Whether `Planning` asks the model for a plan (Phase 8) or is the
     /// Phase 3 pass-through. Defaults to pass-through.
     pub planning_mode: PlanningMode,
+    /// `~/.valyria` (or `$VALYRIA_HOME`) — home of `global.db`, the model
+    /// store, and logs (§4.1). Defaults to [`GlobalStore::default_root`];
+    /// tests point it at a tempdir.
+    pub global_dir: PathBuf,
 }
 
 impl RuntimeConfig {
@@ -60,6 +70,7 @@ impl RuntimeConfig {
             permission_mode: PermissionMode::default(),
             scenario: Scenario::default_walking_skeleton(),
             planning_mode: PlanningMode::default(),
+            global_dir: GlobalStore::default_root(),
         }
     }
 
@@ -68,8 +79,20 @@ impl RuntimeConfig {
         self
     }
 
+    pub fn with_global_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.global_dir = dir.into();
+        self
+    }
+
+    /// Redirect the per-workspace data directory. Also redirects
+    /// `global_dir` to `<data_dir>/global` — tests and sandboxed runs
+    /// override `data_dir` precisely so they touch nothing outside their
+    /// tempdir, and a shared real `~/.valyria/global.db` would defeat
+    /// that. Call [`Self::with_global_dir`] afterward to point at a real
+    /// global store anyway.
     pub fn with_data_dir(mut self, data_dir: impl Into<PathBuf>) -> Self {
         self.data_dir = data_dir.into();
+        self.global_dir = self.data_dir.join("global");
         self
     }
 
@@ -90,6 +113,13 @@ pub struct Runtime {
     driver: Arc<AgentDriver>,
     plan_store: Arc<PlanStore>,
     workspace_id: WorkspaceId,
+    workspace_path: PathBuf,
+    data_dir: PathBuf,
+    index: Arc<IndexStore>,
+    verification_log: Arc<VerificationLog>,
+    memory: Arc<MemoryStore>,
+    global: Arc<GlobalStore>,
+    permission_mode: PermissionMode,
 }
 
 impl Runtime {
@@ -145,7 +175,18 @@ impl Runtime {
 
         let context = Arc::new(ContextAssembler::new(tool_runtime.clone()));
         let verification_log = Arc::new(VerificationLog::new(store.clone()));
+        let index = Arc::new(IndexStore::new(store.clone()));
+        let memory = Arc::new(MemoryStore::new(store.clone()));
         let plan_store = Arc::new(PlanStore::new(store.clone()));
+
+        let global = Arc::new(GlobalStore::open(&config.global_dir).await?);
+        global
+            .register_workspace(
+                workspace_id,
+                &config.workspace_path,
+                clock.now().as_millis() as i64,
+            )
+            .await?;
         let hash_cache = Arc::new(valyria_vfs::HashCache::new());
         let launcher: Arc<dyn ProcessLauncher> = Arc::from(detect_platform_launcher());
         let sandbox_profile = SandboxProfile::new().allow_write(workspace_root.as_path());
@@ -164,7 +205,7 @@ impl Runtime {
                 context,
                 ledger,
                 engine,
-                verification_log,
+                verification_log.clone(),
                 plan_store.clone(),
                 workspace_root,
                 hash_cache,
@@ -181,6 +222,13 @@ impl Runtime {
             driver,
             plan_store,
             workspace_id,
+            workspace_path: config.workspace_path.clone(),
+            data_dir: config.data_dir.clone(),
+            index,
+            verification_log,
+            memory,
+            global,
+            permission_mode: config.permission_mode,
         })
     }
 
@@ -279,6 +327,154 @@ impl Runtime {
         self.driver
             .rollback_to_checkpoint(task_id, checkpoint_id)
             .await
+    }
+
+    // --- Phase 10: read-only introspection surface -----------------------
+
+    pub fn workspace_path(&self) -> &std::path::Path {
+        &self.workspace_path
+    }
+
+    pub fn data_dir(&self) -> &std::path::Path {
+        &self.data_dir
+    }
+
+    pub fn global(&self) -> &Arc<GlobalStore> {
+        &self.global
+    }
+
+    pub fn permission_mode(&self) -> PermissionMode {
+        self.permission_mode
+    }
+
+    pub async fn list_tasks(&self) -> Result<Vec<Task>> {
+        Ok(self.tasks.list(self.workspace_id).await?)
+    }
+
+    /// The completion report (§15, D4) — assembled *only* from persisted
+    /// verification runs, so an unbacked "tests pass" never appears as a
+    /// verified fact.
+    pub async fn completion_report(&self, task_id: TaskId) -> Result<CompletionReport> {
+        let runs = self.verification_log.list_for_task(task_id).await?;
+        Ok(CompletionReport::from_runs(task_id, &runs, &[]))
+    }
+
+    pub async fn current_index_generation(&self) -> Result<Option<u64>> {
+        Ok(self
+            .index
+            .current()
+            .await
+            .ok()
+            .flatten()
+            .map(|g| g.generation.0))
+    }
+
+    pub async fn doctor(&self) -> DoctorReport {
+        Doctor {
+            data_dir: self.data_dir.clone(),
+            workspace_path: self.workspace_path.clone(),
+            global_root: self.global.root().to_path_buf(),
+            index: self.index.clone(),
+            models: self.global.models().clone(),
+        }
+        .run()
+        .await
+    }
+
+    fn storage_inspector(&self) -> StorageInspector {
+        StorageInspector::new(
+            self.data_dir.clone(),
+            self.global.root().to_path_buf(),
+            self.memory.clone(),
+            self.global.user_memory().clone(),
+        )
+    }
+
+    pub fn storage_inspect(&self) -> StorageReport {
+        self.storage_inspector().inspect()
+    }
+
+    pub async fn storage_purge(&self, scope: PurgeScope, dry_run: bool) -> Result<PurgeOutcome> {
+        self.storage_inspector().purge(scope, dry_run).await
+    }
+
+    /// `(key, value, origin)` for every effective config leaf `valyria
+    /// config` shows (§4.3).
+    pub fn config_show(&self) -> Result<Vec<(String, String, String)>> {
+        let resolved = valyria_config::ConfigResolver::new()
+            .global_path(self.global.root().join("config.toml"))
+            .workspace_path(self.data_dir.join("config.toml"))
+            .env_vars(std::env::vars().collect())
+            .resolve()?;
+
+        let origin = |key: &str| {
+            resolved
+                .origin_of(key)
+                .map(|o| format!("{o:?}").to_lowercase())
+                .unwrap_or_else(|| "default".to_string())
+        };
+        Ok(vec![
+            (
+                "permission.mode".to_string(),
+                format!("{:?}", resolved.settings.permission.mode).to_lowercase(),
+                origin("permission.mode"),
+            ),
+            (
+                "log.format".to_string(),
+                format!("{:?}", resolved.settings.log.format).to_lowercase(),
+                origin("log.format"),
+            ),
+            (
+                "network".to_string(),
+                format!("{:?}", resolved.settings.network).to_lowercase(),
+                origin("network"),
+            ),
+        ])
+    }
+
+    /// Relevance-ranked memory entries for `query` (§4.19). With no query,
+    /// returns nothing — a browse-all surface is a follow-up.
+    pub async fn memory_list(
+        &self,
+        query: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<valyria_memory::MemoryEntry>> {
+        let Some(query) = query else {
+            return Ok(vec![]);
+        };
+        let now = SystemClock.now().as_millis() as i64;
+        let retrieved = self
+            .memory
+            .retrieve(RetrievalRequest::new(query, now).limit(limit))
+            .await?;
+        Ok(retrieved
+            .pinned
+            .into_iter()
+            .chain(retrieved.ranked.into_iter().map(|s| s.entry))
+            .collect())
+    }
+
+    /// The catalog, each card tagged with whether its weights are
+    /// installed in the global store (§4.21).
+    pub async fn model_list(&self) -> Result<Vec<(valyria_model_registry::ModelCard, bool)>> {
+        let catalog = Catalog::embedded().map_err(|e| AppError::Plan(e.to_string()))?;
+        let installed: std::collections::BTreeSet<String> = self
+            .global
+            .models()
+            .list()
+            .await?
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        Ok(catalog
+            .cards()
+            .iter()
+            .cloned()
+            .map(|c| {
+                let is_installed = installed.contains(&c.id);
+                (c, is_installed)
+            })
+            .collect())
     }
 
     fn spawn_driver(&self, task_id: TaskId) {

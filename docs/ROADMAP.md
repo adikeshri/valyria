@@ -12,7 +12,7 @@ Status vocabulary:
 - **scaffolded** — the crate compiles, declares its layer and phase, and is
   wired into the layering check. No implementation yet.
 
-Last updated: 2026-08-28 (after Phase 9).
+Last updated: 2026-08-29 (after Phase 10).
 
 ---
 
@@ -30,11 +30,75 @@ Last updated: 2026-08-28 (after Phase 9).
 | 7 | Verification, diagnosis, repair: `verify`, failure parsers, repair loop, loop detection | **partial** — discovery, escalation strategy, the runner, ten failure parsers, diagnosis, the completion report, five loop detectors and the driver's verify→diagnose→repair loop are all implemented and tested; a fake-model seeded-bug fix and a caught non-converging loop pass end to end. The 30-real-repo discovery corpus and the captured-output parser corpus at scale wait on `valyria-bench` (Phase 11), and mapping changed symbols → covering tests / graph-neighbour suspects in the *live* loop is a Phase 6/8 wiring follow-up |
 | 8 | Planning and multi-agent: `plan`, checkpoints, rollback boundaries, sub-tasks | **partial** — the plan model, validator (nine structured error codes), dependency/wave scheduler, checkpoint capture + ledger-backed rollback, the five multi-agent roles + typed artifacts, and the `PlanStore` (migration block 800-899) are implemented and tested; the driver runs `Planning` as a model-authored, validated, bounded-repair plan and executes it step by step with a checkpoint at each rollback boundary. Deferred: spawning a role as its own child task (sub-agents), real parallel step execution, index-backed target resolution, and verification interleaved *between* steps (the mandatory full `Verifying` run is the backstop) |
 | 9 | Real models: `runtime-llamacpp`, `runtime-mlx`, `runtime-openai-compat`, registry, store, model pool | **partial** — the embedded `ModelCard` catalog + hardware-fit selection, the verified resumable download store (migration block 900-999), the `OpenAiCompatRuntime` adapter (behind an `HttpTransport` seam), and the orchestrator's tool-call transport ladder + memory-aware model pool + fallback-chain router are all implemented and tested offline. Deferred (open decision 5, solo build): the concrete `reqwest` transport, the real GGUF-loading probe, the `runtime-llamacpp` / `runtime-mlx` adapters, and wiring the ladder/pool/router into the live agent loop |
-| 10 | Interface completion: protocol v1 freeze, schema export, full CLI, TUI, `doctor`, `clean`, daemon | not started |
+| 10 | Interface completion: protocol v1 freeze, schema export + compat gate, full CLI, TUI, `doctor`, `clean`, `global.db`, daemon | **partial** — the frozen v1 protocol (all workflow operations), the schema-export + `xtask check-protocol` CI gate, the `SocketClient`/`serve` daemon transport, `GlobalStore` (`~/.valyria/global.db`), `Doctor` (ten checks), `StorageInspector` (`inspect`/`purge`), the full CLI subcommand tree with `--json`/`--connect`, and the ratatui TUI session are all implemented and tested. Deferred: a multi-workspace daemon, length-prefixed framing, TypeScript type export, and `doctor`'s live sandbox self-test |
 | 11 | Hardening and evaluation: `bench`, fuzzing, perf work, cross-platform matrix, release gates | not started |
 
 Phase 9 can start early against the OpenAI-compatible adapter (a locally running
 `llama-server`) without waiting for any FFI work.
+
+---
+
+## What Phase 10 delivered
+
+The runtime is now **drivable end to end through one frozen protocol** — in
+process, over a Unix-socket daemon, from a full CLI, or from a TUI — and it
+can inspect and repair its own environment.
+
+**The protocol is a frozen v1 (`PROTOCOL_VERSION = 1.0.0`).** `Request` /
+`Response` cover every workflow: `task_create` / `status` / `list` /
+`report` / `plan` / `rollback` / `pause` / `resume` / `cancel`,
+`permission_resolve`, `events_subscribe`, plus `workspace_status`,
+`doctor_run`, `storage_inspect` / `storage_purge`, `config_show`,
+`memory_list` and `model_list`. Every wire type derives
+`schemars::JsonSchema`; `valyria_protocol::schema::export` renders
+`docs/protocol/{request,response,event}.schema.json` + `version.txt`, and
+`cargo xtask check-protocol` (a new CI job) fails any drift that did not
+also bump `PROTOCOL_VERSION` — the §4.27 machine-checked compat gate,
+alive.
+
+**The daemon is a pure backend swap.** `valyria_protocol::transport`
+adds newline-delimited JSON framing and `SocketClient`, the
+daemon-transport implementation of the *same* `Client` trait the embedded
+runtime implements. `valyria_app::daemon::serve` binds a Unix socket and
+dispatches each framed frame straight into an `EmbeddedClient`, so the
+socket path and the in-process path run identical runtime code (the point
+of D11). `valyria serve` runs it; `valyria --connect <socket> <anything>`
+uses it — no other CLI code path changes. The frame enums are externally
+tagged *on purpose*: `WireEvent.payload` is a `serde_json::Value`, which
+does not survive serde's tagged-enum content buffer.
+
+**`global.db` finally has an opener.** `GlobalStore` opens
+`~/.valyria/global.db` (`$VALYRIA_HOME` override) — the §4.1 assembly
+point concatenating the installed-model index (block 900-999), user-scoped
+memory (600-699) and a new `workspace_registry` (block 10_100+). Every
+`Runtime::open` registers its workspace there.
+
+**`doctor` runs a real battery.** Ten checks — runtime build, data-dir
+writability, `workspace.db` `integrity_check`, disk headroom, git health,
+sandbox confinement, inotify watch ceiling, permission-config vs the
+policy floor, index presence, installed models — each returning
+`pass` / `warn` / `fail`, a plain-language detail, and a concrete
+remediation. Each check is a free function taking only its inputs, so the
+"diagnoses deliberately broken environments" criterion is tested by
+handing each one a broken input directly (a corrupt db file, a missing
+directory, a non-git workspace).
+
+**`clean` is built from inspection.** `StorageInspector::inspect` sizes
+every on-disk area (`workspace.db`, blobs, index, cache, tasks,
+`global.db`, models, logs); `purge(scope, dry_run)` reclaims `memory` /
+`cache` / `tasks` / `logs`, and `--dry-run` reports what it *would* free
+without touching anything.
+
+**The CLI is complete and the TUI is real.** Full subcommand tree with a
+global `--json` and `--connect`; `valyria` with no arguments opens a
+ratatui session — task list, live event log, compose a new objective,
+pause/resume/cancel and allow/deny on the selected task — all through the
+`Client` trait, so it works identically against a daemon.
+`crates/valyria-cli/tests/phase10.rs` drives the real binary for `doctor`,
+`status`, `config`, `model list`, `clean --dry-run`, and a full `serve` +
+`--connect` round trip.
+
+~70 new tests; 1058 pass across the workspace, up from 1020.
 
 ---
 
@@ -468,14 +532,15 @@ clear "not implemented in this phase" error rather than pretending:
 | No concrete HTTP transport: `OpenAiCompatRuntime` is generic over `HttpTransport`, tested against `MockTransport`; the `reqwest`/`hyper` impl that talks to a real `llama-server` is not written. `valyria-runtime-llamacpp` (managed-server mode) and `valyria-runtime-mlx` remain scaffolds | Phase 9 follow-up |
 | The transport ladder, `ModelPool` and `RoleRouter` exist and are tested, but the live agent loop still drives through the Phase 3 `Orchestrator` with a single bound runtime; catalog-backed role bindings + a real `ModelRuntime` behind `PrimaryCoder` are not wired into `valyria-app` | Phase 9 follow-up |
 | The post-install probe uses `NullProber` (records the card's declared capabilities); the real load-and-generate probe needs a GGUF-loading adapter | Phase 9 follow-up |
-| `InstalledModelStore` (migration block 900-999) is standalone; the `global.db` that §4.1 puts models/user-memory/config in has no assembly point yet (`workspace.db` does, via `valyria-app`) | Phase 10 |
+| `global.db` now has an opener (`valyria_app::GlobalStore`: installed-model index + user memory + workspace registry). Still standalone: user-scoped config lives in `config.toml`, not the DB, and there is no cross-machine sync | — |
 | Model-authored planning is opt-in (`--plan` / `PlanningMode::ModelAuthored`); the default `Planning` is still the Phase-3 pass-through so every pre-Phase-8 scenario is unchanged. Turning it on by default waits on the live-loop model wiring | Phase 9 follow-up |
 | Multi-agent roles + typed artifacts exist, but a role is not yet run as its own child task (own journal, budget, cancellation); the driver executes one flat plan | Phase 8 follow-up |
 | Plan steps run one at a time even when `parallelizable`; the scheduler computes the parallel groups but the executor does not use them yet | Phase 8 follow-up |
 | Plan `targets` are validated against the workspace filesystem, not the repository index (still not wired into the agent loop); no verification is run *between* plan steps — the mandatory full `Verifying` suite is the backstop | Phase 6/8 follow-up |
-| The verify→diagnose→repair loop detector + repair ledger are process-local per task run (the plan, its revisions, checkpoints and verification runs are all durable) | Phase 8/10 |
-| No `doctor`, `clean`, storage inspection, daemon mode, or TUI | Phase 10 |
-| Protocol is unversioned in practice — no schema export or compat gate yet | Phase 10 |
+| The verify→diagnose→repair loop detector + repair ledger are process-local per task run (the plan, its revisions, checkpoints and verification runs are all durable) | Phase 8/11 |
+| The `--connect` daemon owns a single workspace (one `Runtime` behind the socket); a multi-workspace daemon with `workspace.open/close` routing is a follow-up | Phase 10 follow-up |
+| `xtask schema` exports JSON Schema only; the TypeScript type export §4.27 also mentions, `agent.events` length-prefixed framing, and `doctor`'s live sandbox self-test are follow-ups | Phase 10 follow-up |
+| `valyria memory list` needs a query — a browse-all memory surface over the protocol is a follow-up | Phase 10 follow-up |
 
 ### Phase 4 exit criteria not yet met
 
@@ -502,6 +567,35 @@ Two further gaps are deliberate scope choices rather than unfinished work:
 - **LSP servers are configured but unexercised against real ones.** The client
   is fully tested against a scripted server; behaviour against a real
   rust-analyzer or gopls is untested, and belongs in the Phase 11 matrix.
+
+### Phase 10 exit criteria: status
+
+- **A client can drive every workflow through the protocol alone.** Done —
+  `Request` / `Response` cover create / status / list / report / plan /
+  rollback / pause / resume / cancel / permission plus workspace status,
+  doctor, storage inspect + purge, config and model list;
+  `crates/valyria-cli/tests/phase10.rs` drives the real binary through
+  them, and `daemon_serves_the_same_protocol_over_a_unix_socket` proves
+  the same set works unchanged over `--connect`. `EmbeddedClient` and
+  `SocketClient` are the two implementations of one `Client` trait.
+- **Schema-compat CI gate active.** Done — `valyria_protocol::schema::
+  export` renders `docs/protocol/`, `cargo xtask check-protocol` diffs the
+  committed files against the live types and fails on drift, the `protocol`
+  job in `.github/workflows/ci.yml` runs it, and
+  `xtask::tests::committed_protocol_schema_is_current` runs it in the unit
+  suite too. `PROTOCOL_VERSION` is `1.0.0` with a documented bump policy.
+- **`doctor` correctly diagnoses a battery of deliberately broken
+  environments.** Done — `doctor::tests` feed each check a broken input
+  (`corrupt_workspace_db_is_detected`, `missing_data_dir_fails`,
+  `non_git_workspace_warns_not_fails`, the disk / watch-limit threshold
+  tables) and `phase10.rs::doctor_flags_a_non_git_workspace` asserts it
+  through the real binary. Each check returns a status, a detail, and a
+  remediation.
+- **Deliberate scope choices:** the daemon is single-workspace, framing is
+  newline-delimited (not length-prefixed), the schema export is JSON
+  Schema only (no TypeScript), and `doctor`'s sandbox check reports the
+  platform's known confinement rather than running a live self-test. None
+  of the criteria above depend on that further work.
 
 ### Phase 9 exit criteria: status
 

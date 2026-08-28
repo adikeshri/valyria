@@ -224,13 +224,70 @@ fn workspace_root() -> Result<PathBuf> {
     }
 }
 
+/// Where the exported protocol schema lives, relative to the workspace root.
+const PROTOCOL_SCHEMA_DIR: &str = "docs/protocol";
+
+/// Write `docs/protocol/*.schema.json` + `version.txt` from the live
+/// `valyria-protocol` types (§4.27). Run this after any deliberate wire
+/// change; `check-protocol` gates that it was run.
+fn export_schema() -> Result<()> {
+    let root = workspace_root()?;
+    let dir = root.join(PROTOCOL_SCHEMA_DIR);
+    fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    for (name, contents) in valyria_protocol::export_schema() {
+        let path = dir.join(name);
+        fs::write(&path, contents).with_context(|| format!("writing {}", path.display()))?;
+        println!("wrote {}", path.display());
+    }
+    Ok(())
+}
+
+/// CI gate: the committed schema must match what the current types
+/// generate. A mismatch means either the schema export was not re-run
+/// (`cargo xtask schema`) or the change is breaking and
+/// `PROTOCOL_VERSION` must be bumped.
+fn check_protocol() -> Result<()> {
+    let root = workspace_root()?;
+    let dir = root.join(PROTOCOL_SCHEMA_DIR);
+    let mut stale = Vec::new();
+
+    for (name, expected) in valyria_protocol::export_schema() {
+        let path = dir.join(name);
+        let actual = fs::read_to_string(&path).unwrap_or_default();
+        if actual != expected {
+            stale.push(name);
+        }
+    }
+
+    if stale.is_empty() {
+        println!(
+            "protocol schema OK — {} (docs/protocol/ matches the live types)",
+            valyria_protocol::PROTOCOL_VERSION
+        );
+        Ok(())
+    } else {
+        eprintln!("protocol schema is out of date:");
+        for name in &stale {
+            eprintln!("  - docs/protocol/{name}");
+        }
+        eprintln!();
+        eprintln!("the wire types changed. Then, in order:");
+        eprintln!("  1. if the change is breaking, bump PROTOCOL_VERSION in");
+        eprintln!("     crates/valyria-protocol/src/version.rs (see its doc comment);");
+        eprintln!("  2. run `cargo xtask schema` and commit docs/protocol/.");
+        bail!("{} schema file(s) out of date", stale.len());
+    }
+}
+
 fn main() -> Result<()> {
     let cmd = std::env::args().nth(1);
     match cmd.as_deref() {
         Some("check-layering") => check_layering(),
+        Some("schema") => export_schema(),
+        Some("check-protocol") => check_protocol(),
         Some(other) => bail!("unknown xtask command: {other}"),
         None => {
-            println!("usage: cargo xtask <check-layering>");
+            println!("usage: cargo xtask <check-layering|schema|check-protocol>");
             Ok(())
         }
     }
@@ -239,6 +296,14 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The committed `docs/protocol/` schema must already match the live
+    /// wire types — the same check CI runs, run locally so a stale commit
+    /// is caught before push.
+    #[test]
+    fn committed_protocol_schema_is_current() {
+        check_protocol().expect("run `cargo xtask schema` and commit docs/protocol/");
+    }
 
     fn krate(name: &str, layer: u8, deps: &[&str]) -> (String, CrateInfo) {
         (

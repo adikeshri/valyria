@@ -1,0 +1,845 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Response",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "hello"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/HelloResponse"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "task_create"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/TaskCreateResponse"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "task_status"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/TaskStatusResponse"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "task_list"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/TaskListResponse"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "task_report"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/TaskReportResponse"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "task_plan"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/PlanGetResponse"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "task_rollback"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/TaskRollbackResponse"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "workspace_status"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/WorkspaceStatusResponse"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "doctor_run"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/DoctorRunResponse"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "storage_inspect"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/StorageInspectResponse"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "purge"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/PurgeResponse"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "config_show"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/ConfigShowResponse"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "memory_list"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/MemoryListResponse"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "model_list"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/ModelListResponse"
+        }
+      }
+    },
+    {
+      "description": "A request that succeeded with nothing to return (`task.pause`, `task.resume`, `task.cancel`, `permission.resolve`).",
+      "type": "object",
+      "required": [
+        "result"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "ack"
+          ]
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "error"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/WireError"
+        }
+      }
+    }
+  ],
+  "definitions": {
+    "ConfigEntryWire": {
+      "type": "object",
+      "required": [
+        "key",
+        "origin",
+        "value"
+      ],
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "origin": {
+          "description": "Where the effective value came from: `default` | `global` | `workspace` | `env` | `task`.",
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      }
+    },
+    "ConfigShowResponse": {
+      "type": "object",
+      "required": [
+        "entries"
+      ],
+      "properties": {
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ConfigEntryWire"
+          }
+        }
+      }
+    },
+    "DoctorCheckWire": {
+      "type": "object",
+      "required": [
+        "detail",
+        "name",
+        "status"
+      ],
+      "properties": {
+        "detail": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "remediation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "description": "`pass` | `warn` | `fail`.",
+          "type": "string"
+        }
+      }
+    },
+    "DoctorRunResponse": {
+      "type": "object",
+      "required": [
+        "checks",
+        "summary"
+      ],
+      "properties": {
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/DoctorCheckWire"
+          }
+        },
+        "summary": {
+          "description": "The worst status across all checks: `pass` | `warn` | `fail`.",
+          "type": "string"
+        }
+      }
+    },
+    "HelloResponse": {
+      "type": "object",
+      "required": [
+        "capabilities",
+        "protocol_version",
+        "runtime_version"
+      ],
+      "properties": {
+        "capabilities": {
+          "description": "What this runtime build can do — a client negotiates against this rather than the version string. Names are stable identifiers (`plan`, `daemon`, `doctor`, …); unknown names are ignored.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "protocol_version": {
+          "type": "string"
+        },
+        "runtime_version": {
+          "type": "string"
+        }
+      }
+    },
+    "MemoryEntryWire": {
+      "type": "object",
+      "required": [
+        "author",
+        "effective_confidence",
+        "id",
+        "kind",
+        "scope",
+        "text"
+      ],
+      "properties": {
+        "author": {
+          "type": "string"
+        },
+        "effective_confidence": {
+          "type": "number",
+          "format": "double"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      }
+    },
+    "MemoryListResponse": {
+      "type": "object",
+      "required": [
+        "entries"
+      ],
+      "properties": {
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/MemoryEntryWire"
+          }
+        }
+      }
+    },
+    "ModelListResponse": {
+      "type": "object",
+      "required": [
+        "models"
+      ],
+      "properties": {
+        "models": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ModelSummaryWire"
+          }
+        }
+      }
+    },
+    "ModelSummaryWire": {
+      "type": "object",
+      "required": [
+        "family",
+        "id",
+        "installed",
+        "license",
+        "quantization",
+        "size_bytes"
+      ],
+      "properties": {
+        "family": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "installed": {
+          "type": "boolean"
+        },
+        "license": {
+          "type": "string"
+        },
+        "quantization": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "PlanGetResponse": {
+      "type": "object",
+      "required": [
+        "steps"
+      ],
+      "properties": {
+        "content_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "description": "`None` when the task ran as the pass-through (no model-authored plan) — not an error.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PlanStepSummary"
+          }
+        }
+      }
+    },
+    "PlanStepSummary": {
+      "type": "object",
+      "required": [
+        "checkpoint",
+        "depends_on",
+        "id",
+        "intent",
+        "rollback_boundary",
+        "targets"
+      ],
+      "properties": {
+        "checkpoint": {
+          "type": "boolean"
+        },
+        "depends_on": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "id": {
+          "type": "string"
+        },
+        "intent": {
+          "type": "string"
+        },
+        "rollback_boundary": {
+          "type": "boolean"
+        },
+        "targets": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "PurgeResponse": {
+      "type": "object",
+      "required": [
+        "dry_run",
+        "freed_bytes",
+        "items_removed"
+      ],
+      "properties": {
+        "dry_run": {
+          "type": "boolean"
+        },
+        "freed_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "items_removed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "StorageEntryWire": {
+      "type": "object",
+      "required": [
+        "bytes",
+        "name",
+        "purgeable"
+      ],
+      "properties": {
+        "bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "e.g. `workspace.db`, `blobs`, `index`, `tasks`, `logs`, `models`.",
+          "type": "string"
+        },
+        "purgeable": {
+          "description": "Whether `storage.purge` can reclaim this entry.",
+          "type": "boolean"
+        }
+      }
+    },
+    "StorageInspectResponse": {
+      "type": "object",
+      "required": [
+        "entries",
+        "total_bytes"
+      ],
+      "properties": {
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/StorageEntryWire"
+          }
+        },
+        "total_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "TaskCreateResponse": {
+      "type": "object",
+      "required": [
+        "task_id"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string"
+        }
+      }
+    },
+    "TaskListResponse": {
+      "type": "object",
+      "required": [
+        "tasks"
+      ],
+      "properties": {
+        "tasks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/TaskSummary"
+          }
+        }
+      }
+    },
+    "TaskReportResponse": {
+      "description": "Mirrors `valyria_verify::CompletionReport` (§15, D4) — assembled only from persisted verification runs, so an unbacked \"tests pass\" shows up in `unverified`, never `verified`.",
+      "type": "object",
+      "required": [
+        "status",
+        "task_id",
+        "unverified",
+        "verified"
+      ],
+      "properties": {
+        "status": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "unverified": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "verified": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/VerifiedClaimWire"
+          }
+        }
+      }
+    },
+    "TaskRollbackResponse": {
+      "type": "object",
+      "required": [
+        "restored_files",
+        "reverted_entries"
+      ],
+      "properties": {
+        "restored_files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reverted_entries": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "TaskStatusResponse": {
+      "type": "object",
+      "required": [
+        "objective",
+        "state",
+        "task_id"
+      ],
+      "properties": {
+        "objective": {
+          "type": "string"
+        },
+        "paused_from": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recovery_note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string"
+        }
+      }
+    },
+    "TaskSummary": {
+      "type": "object",
+      "required": [
+        "created_at_ms",
+        "objective",
+        "state",
+        "task_id",
+        "updated_at_ms"
+      ],
+      "properties": {
+        "created_at_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "objective": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "updated_at_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "VerifiedClaimWire": {
+      "type": "object",
+      "required": [
+        "command",
+        "kind",
+        "outcome",
+        "run_id"
+      ],
+      "properties": {
+        "command": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "outcome": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        }
+      }
+    },
+    "WireError": {
+      "description": "Mirrors `valyria_types::CodedError` at the wire boundary — every `ErrorCode`-implementing error in the runtime reduces to this shape before crossing the protocol, matching §3's \"errors that reach the model [and the client] are converted through a redaction pass first\" convention (redaction itself is a later phase; the shape is stable now).",
+      "type": "object",
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      }
+    },
+    "WorkspaceStatusResponse": {
+      "type": "object",
+      "required": [
+        "active_tasks",
+        "data_dir",
+        "root",
+        "total_tasks",
+        "workspace_id"
+      ],
+      "properties": {
+        "active_tasks": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "data_dir": {
+          "type": "string"
+        },
+        "index_generation": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "root": {
+          "type": "string"
+        },
+        "total_tasks": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "workspace_id": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

@@ -15,6 +15,55 @@ Work toward the first release. Phases refer to
 
 ### Added
 
+- **Phase 10 — interface completion.** The runtime is now drivable end to end
+  through one frozen protocol — embedded, over a Unix-socket daemon, from a full
+  CLI, or from an interactive TUI — plus `doctor`, `clean`, and the `global.db`
+  assembly point.
+  - `valyria-protocol`: the wire surface is a **frozen v1** (`PROTOCOL_VERSION =
+    1.0.0`). `Request`/`Response` gained `task_list`, `task_report`, `task_plan`,
+    `task_rollback`, `workspace_status`, `doctor_run`, `storage_inspect`,
+    `storage_purge`, `config_show`, `memory_list`, `model_list`; `HelloResponse`
+    now advertises `capabilities`. Every wire type derives `schemars::JsonSchema`;
+    `schema::export` renders `docs/protocol/{request,response,event}.schema.json`
+    + `version.txt`. New `transport` module: newline-delimited JSON framing and
+    `SocketClient`, the daemon-transport implementation of `Client` — a missing
+    socket is a clean `protocol.transport` error, never a panic.
+  - `xtask schema` writes the schema files; `xtask check-protocol` (new CI job,
+    `protocol` in `ci.yml`) fails any drift in `docs/protocol/` that did not also
+    bump `PROTOCOL_VERSION` — the §4.27 machine-checked compat gate.
+  - `valyria-app`: `GlobalStore` opens `~/.valyria/global.db` (`$VALYRIA_HOME`
+    override) — the §4.1 assembly point that concatenates the installed-model
+    index (block 900-999), user-scoped memory (600-699) and a new
+    `workspace_registry` (block 10_100+); every `Runtime::open` registers its
+    workspace. `Doctor` (`doctor` module): ten environment checks — runtime
+    build, data-dir writability, `workspace.db` `integrity_check`, disk space,
+    git health, sandbox confinement, inotify watch ceiling, permission-config vs
+    the policy floor, index presence, installed models — each returning
+    `pass`/`warn`/`fail`, a detail, and a concrete remediation. `StorageInspector`
+    (`storage` module): `inspect` sizes every on-disk area, `purge(scope,
+    dry_run)` backs `valyria clean` over `memory`/`cache`/`tasks`/`logs`.
+    `daemon::serve` is the Unix-socket accept loop — it dispatches each framed
+    frame straight into an `EmbeddedClient`, so the socket path and the
+    in-process path run *identical* runtime code (the whole point of D11).
+    `Runtime` grew the read-only surface `list_tasks` / `completion_report` /
+    `doctor` / `storage_inspect` / `storage_purge` / `config_show` /
+    `memory_list` / `model_list` / `current_index_generation`.
+  - `valyria-cli`: full subcommand tree — `run`, `task
+    status|list|report|plan|rollback|pause|resume|cancel|permission`, `doctor`,
+    `clean`, `status`, `config`, `model list`, `memory list`, `serve`. Global
+    `--json` (machine output) and `--connect <socket>` (swap the embedded client
+    for `SocketClient` — no other code path changes). `valyria` with no arguments
+    opens the **TUI session** (ratatui): task list, live event log, compose a new
+    objective, pause/resume/cancel and allow/deny permission on the selected
+    task — all through the same `Client` trait, so it works identically against a
+    daemon. Integration tests (`tests/phase10.rs`) drive the real binary for
+    `doctor`, `status`, `config`, `model list`, `clean --dry-run`, and a
+    `serve` + `--connect` round trip.
+  - Deliberate scope: the `--connect` daemon is single-workspace (the socket
+    daemon owns one `Runtime`); a multi-workspace daemon, `agent.events`
+    length-prefixed framing, TypeScript type export, and `doctor`'s live sandbox
+    self-test are follow-ups. The TUI is a session view, not a full editor.
+
 - **Phase 9 — real models (offline slice).** The model layer is now real: a
   catalog, a verified download store, an OpenAI-compatible runtime adapter, and
   the tool-call transport ladder that makes unreliable open-weight models usable.

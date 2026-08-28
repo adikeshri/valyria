@@ -2,22 +2,35 @@
 //!
 //! Versioned wire types and the `Client` boundary (§4.27, D11): the only
 //! API surface `valyria-cli` (or any future desktop client) is allowed to
-//! call. Phase 3 needs the typed request/response dispatch and cursor-based
-//! event streaming to be real; full JSON-RPC 2.0 framing over stdio/socket,
-//! `xtask schema` export, and the compat-CI-gate land in Phase 10.
+//! call.
+//!
+//! As of Phase 10 this is a **frozen v1 surface**: [`schema::export`]
+//! renders the JSON Schema for [`Request`] / [`Response`] / [`WireEvent`]
+//! into `docs/protocol/`, `xtask check-protocol` gates drift against
+//! [`PROTOCOL_VERSION`] in CI, and [`transport::SocketClient`] implements
+//! [`Client`] over a Unix socket so the daemon path is a pure backend swap.
 
 #![forbid(unsafe_code)]
 
 pub mod client;
 pub mod envelope;
 pub mod messages;
+pub mod schema;
+pub mod transport;
 pub mod version;
 
 pub use client::Client;
 pub use envelope::{Request, Response};
 pub use messages::{
-    EventsSubscribeRequest, HelloRequest, HelloResponse, PermissionResolveRequest,
-    TaskCreateRequest, TaskCreateResponse, TaskIdRequest, TaskStatusRequest, TaskStatusResponse,
-    WireError, WireEvent,
+    ConfigEntryWire, ConfigShowResponse, DoctorCheckWire, DoctorRunResponse, Empty,
+    EventsSubscribeRequest, HelloRequest, HelloResponse, MemoryEntryWire, MemoryListRequest,
+    MemoryListResponse, ModelListResponse, ModelSummaryWire, PermissionResolveRequest,
+    PlanGetResponse, PlanStepSummary, PurgeResponse, StorageEntryWire, StorageInspectResponse,
+    StoragePurgeRequest, TaskCreateRequest, TaskCreateResponse, TaskIdRequest, TaskListResponse,
+    TaskReportResponse, TaskRollbackRequest, TaskRollbackResponse, TaskStatusRequest,
+    TaskStatusResponse, TaskSummary, VerifiedClaimWire, WireError, WireEvent,
+    WorkspaceStatusResponse,
 };
-pub use version::PROTOCOL_VERSION;
+pub use schema::{export as export_schema, SchemaFile};
+pub use transport::{ClientFrame, ServerFrame, SocketClient};
+pub use version::{capability, PROTOCOL_VERSION};

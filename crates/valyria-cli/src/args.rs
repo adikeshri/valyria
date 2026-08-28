@@ -1,8 +1,7 @@
-//! Minimal, dependency-free flag parsing. The command surface here is
-//! intentionally small — full ergonomics (`--help` generation, shell
-//! completions, subcommand trees) land with the rest of the CLI in Phase
-//! 10; Phase 3 only needs enough to drive and observe the walking
-//! skeleton.
+//! Minimal, dependency-free flag parsing. The CLI stays a thin protocol
+//! client (D11) — it dispatches into `valyria_protocol::Client` and holds
+//! no orchestration logic — so the parser only needs to be good enough to
+//! route a subcommand and its flags, not a full ergonomics layer.
 
 use std::path::PathBuf;
 
@@ -15,11 +14,21 @@ pub struct ParsedArgs {
     pub scenario: Option<PathBuf>,
     pub permission_mode: Option<PermissionMode>,
     pub events: bool,
+    pub json: bool,
+    pub dry_run: bool,
     pub allow: bool,
     pub deny: bool,
     /// `--plan`: run `Planning` as a model-authored, validated plan
     /// (Phase 8) instead of the pass-through.
     pub plan: bool,
+    /// `--scope <memory|cache|tasks|logs>` for `valyria clean`.
+    pub scope: Option<String>,
+    /// `--connect <path>`: talk to a running daemon over its Unix socket
+    /// instead of running the runtime in-process. Same `Client` trait,
+    /// pure backend swap (D11).
+    pub connect: Option<PathBuf>,
+    /// `--socket <path>` for `valyria serve`.
+    pub socket: Option<PathBuf>,
 }
 
 pub fn parse(raw: &[String]) -> Result<ParsedArgs, String> {
@@ -47,7 +56,24 @@ pub fn parse(raw: &[String]) -> Result<ParsedArgs, String> {
                     other => return Err(format!("unknown --permission-mode `{other}`")),
                 });
             }
+            "--scope" => {
+                i += 1;
+                let v = raw.get(i).ok_or("--scope needs a value")?;
+                parsed.scope = Some(v.clone());
+            }
+            "--connect" => {
+                i += 1;
+                let v = raw.get(i).ok_or("--connect needs a socket path")?;
+                parsed.connect = Some(PathBuf::from(v));
+            }
+            "--socket" => {
+                i += 1;
+                let v = raw.get(i).ok_or("--socket needs a path")?;
+                parsed.socket = Some(PathBuf::from(v));
+            }
             "--events" => parsed.events = true,
+            "--json" => parsed.json = true,
+            "--dry-run" => parsed.dry_run = true,
             "--plan" => parsed.plan = true,
             "--allow" => parsed.allow = true,
             "--deny" => parsed.deny = true,
@@ -103,5 +129,23 @@ mod tests {
     fn missing_flag_value_errors() {
         let err = parse(&args("run x --workspace")).unwrap_err();
         assert!(err.contains("--workspace"));
+    }
+
+    #[test]
+    fn phase10_flags_parse() {
+        let p = parse(&args(
+            "clean --scope cache --dry-run --json --connect /tmp/v.sock",
+        ))
+        .unwrap();
+        assert_eq!(p.scope.as_deref(), Some("cache"));
+        assert!(p.dry_run);
+        assert!(p.json);
+        assert_eq!(p.connect, Some(PathBuf::from("/tmp/v.sock")));
+    }
+
+    #[test]
+    fn serve_socket_flag_parses() {
+        let p = parse(&args("serve --socket /run/valyria.sock")).unwrap();
+        assert_eq!(p.socket, Some(PathBuf::from("/run/valyria.sock")));
     }
 }

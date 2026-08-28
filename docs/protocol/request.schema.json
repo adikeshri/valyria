@@ -1,0 +1,478 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Request",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "hello"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/HelloRequest"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "task_create"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/TaskCreateRequest"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "task_status"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/TaskStatusRequest"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "task_list"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/Empty"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "task_report"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/TaskIdRequest"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "task_plan"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/TaskIdRequest"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "task_rollback"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/TaskRollbackRequest"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "task_pause"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/TaskIdRequest"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "task_resume"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/TaskIdRequest"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "task_cancel"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/TaskIdRequest"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "permission_resolve"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/PermissionResolveRequest"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "events_subscribe"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/EventsSubscribeRequest"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "workspace_status"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/Empty"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "doctor_run"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/Empty"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "storage_inspect"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/Empty"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "storage_purge"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/StoragePurgeRequest"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "config_show"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/Empty"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "memory_list"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/MemoryListRequest"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "model_list"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/Empty"
+        }
+      }
+    }
+  ],
+  "definitions": {
+    "Empty": {
+      "description": "An empty request payload. Kept as a named unit struct (rather than `()`) so it has a stable schema name and a place to grow fields.",
+      "type": "object"
+    },
+    "EventsSubscribeRequest": {
+      "type": "object",
+      "required": [
+        "since"
+      ],
+      "properties": {
+        "since": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "HelloRequest": {
+      "type": "object",
+      "required": [
+        "client_name"
+      ],
+      "properties": {
+        "client_name": {
+          "type": "string"
+        }
+      }
+    },
+    "MemoryListRequest": {
+      "type": "object",
+      "properties": {
+        "limit": {
+          "default": null,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "query": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "PermissionResolveRequest": {
+      "type": "object",
+      "required": [
+        "approve",
+        "task_id"
+      ],
+      "properties": {
+        "approve": {
+          "type": "boolean"
+        },
+        "task_id": {
+          "type": "string"
+        }
+      }
+    },
+    "StoragePurgeRequest": {
+      "type": "object",
+      "required": [
+        "scope"
+      ],
+      "properties": {
+        "dry_run": {
+          "description": "When true, report what *would* be freed without deleting anything.",
+          "default": false,
+          "type": "boolean"
+        },
+        "scope": {
+          "description": "`memory` | `cache` | `tasks` | `logs`.",
+          "type": "string"
+        }
+      }
+    },
+    "TaskCreateRequest": {
+      "type": "object",
+      "required": [
+        "objective"
+      ],
+      "properties": {
+        "objective": {
+          "type": "string"
+        }
+      }
+    },
+    "TaskIdRequest": {
+      "type": "object",
+      "required": [
+        "task_id"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string"
+        }
+      }
+    },
+    "TaskRollbackRequest": {
+      "type": "object",
+      "required": [
+        "checkpoint_id",
+        "task_id"
+      ],
+      "properties": {
+        "checkpoint_id": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string"
+        }
+      }
+    },
+    "TaskStatusRequest": {
+      "type": "object",
+      "required": [
+        "task_id"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
