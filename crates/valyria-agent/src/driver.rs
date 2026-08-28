@@ -13,9 +13,20 @@
 //! effect. Planning is a formality this driver passes straight through
 //! (no `valyria-plan` yet — Phase 8) since the state graph still requires
 //! transiting `Planning` on the way to `Implementing`.
+//!
+//! Phase 7 adds the verify → diagnose → repair loop. Verification runs
+//! are driver-initiated (not model tool calls): `Verifying` discovers the
+//! repo's real commands, plans an escalation, runs the next check, and
+//! persists it as `Evidence` (D4). A failure routes to `Diagnosing`
+//! (distil the failure, feed the loop detector) and then `Repairing` (one
+//! model-authored edit) before looping back to `Verifying`. The loop
+//! detector and repair ledger are process-local per task — the durable
+//! record is the journal plus the `verification_run` table, from which
+//! the completion report is rebuilt.
 
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use valyria_context::{ContextAssembler, ContextQuery};
 use valyria_ledger::Ledger;
@@ -26,15 +37,46 @@ use valyria_sandbox::{ProcessLauncher, SandboxProfile};
 use valyria_task::{kinds, ControlSignal, JournalEntryKind, TaskManager};
 use valyria_tools::{InvocationResult, ToolCtx, ToolOutcome, ToolRuntime};
 use valyria_types::{AgentState, EffectId, StepId, TaskId};
-use valyria_util::{CancellationToken, Clock};
+use valyria_util::{CancellationToken, Clock, ContentHash};
+use valyria_verify::{
+    changeset_hash, diagnose, Diagnosis, EscalationStrategy, ProcessProbeRunner, VerificationLog,
+    VerificationPlan, VerificationRun, VerificationRunner, Verifier,
+};
 use valyria_vfs::{HashCache, WorkspaceRoot};
 
 use crate::action::ActionRequest;
 use crate::error::{AgentError, Result};
+use crate::loop_detect::{LoopDetector, LoopFinding, ProgressMetric, StepSignature};
+use crate::repair::{RepairAttempt, RepairDecision, RepairLedger, RepairOutcome};
 
 /// Token budget for the Phase 3 explicit-file context stage. Arbitrary but
 /// generous — the real, configurable budget model is Phase 6's job.
 const DEFAULT_CONTEXT_BUDGET_TOKENS: usize = 50_000;
+
+/// Cap on repair cycles before the loop gives up to the user (§8).
+const MAX_REPAIR_ATTEMPTS: u32 = 4;
+
+/// Process-local verify/diagnose/repair bookkeeping for one task. Cloned
+/// out, mutated, and written back by each state handler (only one driver
+/// loop runs per task at a time). Not persisted: a cross-process resume
+/// rebuilds the plan from scratch and the completion report from the
+/// durable `verification_run` rows.
+#[derive(Clone, Default)]
+struct VerifyState {
+    detector: LoopDetector,
+    repair: RepairLedger,
+    plan: Option<VerificationPlan>,
+    executed: usize,
+    last_passed: bool,
+    last_run: Option<VerificationRun>,
+    pending_diagnosis: Option<Diagnosis>,
+    /// Set by an `EscalateStrategy` decision — the next plan drops style
+    /// gates and keeps the full suite mandatory.
+    broaden: bool,
+    /// Role the repair Reason step uses; bumped by `SwitchRole`.
+    repair_role_primary: bool,
+    files_touched: BTreeSet<PathBuf>,
+}
 
 pub struct AgentDriver {
     tasks: Arc<TaskManager>,
@@ -43,12 +85,13 @@ pub struct AgentDriver {
     context: Arc<ContextAssembler>,
     ledger: Arc<Ledger>,
     permissions: Arc<PermissionEngine>,
+    verification_log: Arc<VerificationLog>,
     workspace_root: WorkspaceRoot,
     hash_cache: Arc<HashCache>,
-    #[allow(dead_code)]
     clock: Arc<dyn Clock>,
     launcher: Arc<dyn ProcessLauncher>,
     sandbox_profile: SandboxProfile,
+    verify_states: Mutex<HashMap<TaskId, VerifyState>>,
 }
 
 impl AgentDriver {
@@ -60,6 +103,7 @@ impl AgentDriver {
         context: Arc<ContextAssembler>,
         ledger: Arc<Ledger>,
         permissions: Arc<PermissionEngine>,
+        verification_log: Arc<VerificationLog>,
         workspace_root: WorkspaceRoot,
         hash_cache: Arc<HashCache>,
         clock: Arc<dyn Clock>,
@@ -73,11 +117,13 @@ impl AgentDriver {
             context,
             ledger,
             permissions,
+            verification_log,
             workspace_root,
             hash_cache,
             clock,
             launcher,
             sandbox_profile,
+            verify_states: Mutex::new(HashMap::new()),
         }
     }
 
@@ -85,18 +131,6 @@ impl AgentDriver {
     /// to wait on the user/a permission decision. Pause/cancel are checked
     /// only between steps (never mid-effect) so a pause always lands
     /// cleanly on a step boundary.
-    ///
-    /// Two independent signal paths, both checked every iteration:
-    /// `cancel` is an in-process `CancellationToken` (e.g. a future
-    /// same-process Ctrl+C handler in `valyria-cli`) that also propagates
-    /// into any in-flight tool call via `cancel.child()`, so it can stop
-    /// work that's already running; `task.pending_signal` is the durable,
-    /// row-stored signal `TaskManager::request_pause`/`request_cancel`
-    /// write, which is what lets a *separate* `valyria task pause <id>`
-    /// process reach a task being driven by a different `valyria run`
-    /// process (Phase 3 has no daemon yet to share an in-memory handle
-    /// across processes) — at the cost of only being noticed between
-    /// steps, not mid-effect.
     pub async fn run(&self, task_id: TaskId, cancel: CancellationToken) -> Result<()> {
         loop {
             if cancel.is_cancelled() {
@@ -135,19 +169,12 @@ impl AgentDriver {
                 }
                 AgentState::Discovery => {
                     let ctx = self.build_ctx(task_id, StepId::new(), cancel.child());
-                    // No explicit files configured in the default demo —
-                    // this is a real call through the pipeline that simply
-                    // has nothing to fetch. Real retrieval is Phase 6.
                     self.context
                         .assemble(&ctx, ContextQuery::new(DEFAULT_CONTEXT_BUDGET_TOKENS))
                         .await?;
                     self.tasks.transition(task_id, AgentState::Planning).await?;
                 }
                 AgentState::Planning => {
-                    // "Plans nothing" (docs/PLAN.md Phase 3 exit criterion):
-                    // no valyria-plan yet (Phase 8). The state graph still
-                    // requires transiting Planning on the way to
-                    // Implementing, so this is a one-step formality.
                     self.tasks
                         .transition(task_id, AgentState::Implementing)
                         .await?;
@@ -156,27 +183,26 @@ impl AgentDriver {
                     self.step_implementing(task_id, &cancel).await?;
                 }
                 AgentState::Verifying => {
-                    // Real verification strategy (§27-28) is Phase 7; the
-                    // walking skeleton treats "the model said finish" as
-                    // sufficient to complete.
-                    self.tasks
-                        .transition(task_id, AgentState::Completed)
-                        .await?;
-                    return Ok(());
+                    if self.step_verifying(task_id, &cancel).await? == Flow::Return {
+                        return Ok(());
+                    }
+                }
+                AgentState::Diagnosing => {
+                    self.step_diagnosing(task_id, &cancel).await?;
+                }
+                AgentState::Repairing => {
+                    if self.step_repairing(task_id, &cancel).await? == Flow::Return {
+                        return Ok(());
+                    }
                 }
                 AgentState::WaitingForPermission | AgentState::WaitingForUser => {
-                    // Resumed externally: `resolve_permission` for the
-                    // former, a future `WaitingForUser` answer path for the
-                    // latter (not exercised by Phase 3's default scenario).
                     return Ok(());
                 }
                 AgentState::Completed | AgentState::Failed | AgentState::Cancelled => {
+                    self.verify_states.lock().unwrap().remove(&task_id);
                     return Ok(());
                 }
-                AgentState::Diagnosing | AgentState::Repairing | AgentState::Paused => {
-                    // Not reachable by this driver: no repair loop yet
-                    // (Phase 7), and a task resumed out of `Paused` lands on
-                    // whatever state it was paused from, never stays here.
+                AgentState::Paused => {
                     return Ok(());
                 }
             }
@@ -185,9 +211,6 @@ impl AgentDriver {
 
     async fn step_implementing(&self, task_id: TaskId, cancel: &CancellationToken) -> Result<()> {
         // D1: re-issue any effect that was issued but never completed.
-        // Checked first, every time this state is entered, so a crash
-        // strictly between `EffectIssued` and any `EffectCompleted` for a
-        // tool call is healed automatically before anything new happens.
         if let Some(pending) = self.tasks.interrupted_tool_call(task_id).await? {
             self.issue_and_execute_tool_call(
                 task_id,
@@ -216,11 +239,6 @@ impl AgentDriver {
             )
             .await?;
 
-        // Phase 3's fake model is a pure function of `turn_hint`, not
-        // conversation history, so a single message carrying the task
-        // objective is enough to drive it; reconstructing the full
-        // transcript from the journal for a real model's benefit is
-        // deferred to whichever phase adds a real adapter (Phase 9).
         let messages = vec![Message::user(self.tasks.get(task_id).await?.objective)];
         let request = GenerateRequest::new(messages).with_turn_hint(turn_index);
         let completion = self
@@ -264,12 +282,451 @@ impl AgentDriver {
         Ok(())
     }
 
-    /// Authorize -> Execute -> Observe for one tool call: journals
-    /// `EffectIssued` before anything runs, then exactly one
-    /// `EffectCompleted` reflecting whatever `ToolRuntime::invoke` returned.
-    /// Shared by the normal `Implementing` path and the interrupted-call
-    /// redo path — both need identical journaling/permission/ledger
-    /// behavior, just with a different origin for `tool`/`input`.
+    // --- Phase 7: verify -> diagnose -> repair ---------------------------
+
+    /// Run the next check in the escalation plan. Returns `Flow::Return`
+    /// when the task reached a terminal state.
+    async fn step_verifying(&self, task_id: TaskId, cancel: &CancellationToken) -> Result<Flow> {
+        let mut vs = self.take_verify_state(task_id);
+        let changed = self.task_changed_files(task_id);
+
+        // (Re)build the plan on first entry or after a repair widened it.
+        if vs.plan.is_none() {
+            let report = valyria_verify::scan(self.workspace_root.as_path());
+            if report.is_empty() {
+                // Nothing to verify — honest completion, exactly as Phase 3.
+                self.put_verify_state(task_id, vs);
+                self.tasks
+                    .transition(task_id, AgentState::Completed)
+                    .await?;
+                return Ok(Flow::Return);
+            }
+            let probe = ProcessProbeRunner::new(self.workspace_root.as_path().to_path_buf());
+            let tooling = valyria_verify::validate(&report, &probe).await;
+            if tooling.validated.is_empty() {
+                self.put_verify_state(task_id, vs);
+                self.tasks
+                    .transition(task_id, AgentState::Completed)
+                    .await?;
+                return Ok(Flow::Return);
+            }
+            let opts = valyria_verify::strategy::StrategyOptions {
+                include_style: !vs.broaden,
+                require_full_suite: true,
+            };
+            let plan = EscalationStrategy::plan(
+                &tooling.validated,
+                &valyria_verify::ChangeSet::from_files(changed.clone()),
+                &[],
+                &opts,
+            );
+            if plan.is_empty() {
+                self.put_verify_state(task_id, vs);
+                self.tasks
+                    .transition(task_id, AgentState::Completed)
+                    .await?;
+                return Ok(Flow::Return);
+            }
+            vs.plan = Some(plan);
+            vs.executed = 0;
+            vs.last_passed = true;
+        }
+
+        let plan = vs.plan.clone().unwrap();
+        let step = match plan.next_after(vs.executed, vs.last_passed) {
+            Some(step) => step.clone(),
+            None if !vs.last_passed => {
+                // The last check failed — go diagnose it.
+                self.put_verify_state(task_id, vs);
+                self.tasks
+                    .transition(task_id, AgentState::Diagnosing)
+                    .await?;
+                return Ok(Flow::Continue);
+            }
+            None => {
+                // Plan exhausted, everything passed, broad run satisfied.
+                self.put_verify_state(task_id, vs);
+                self.tasks
+                    .transition(task_id, AgentState::Completed)
+                    .await?;
+                return Ok(Flow::Return);
+            }
+        };
+
+        let step_id = StepId::new();
+        let effect_id = EffectId::new();
+        self.tasks
+            .append_journal(
+                task_id,
+                JournalEntryKind::EffectIssued {
+                    effect_id,
+                    step_id,
+                    effect_kind: kinds::VERIFY.into(),
+                    payload: serde_json::json!({
+                        "command": step.command.display(),
+                        "kind": step.command.kind.as_str(),
+                        "tier": format!("{:?}", step.tier),
+                        "rationale": step.rationale,
+                    }),
+                },
+            )
+            .await?;
+
+        let runner = VerificationRunner::new(
+            self.workspace_root.as_path().to_path_buf(),
+            self.clock.clone(),
+        )
+        .with_sandbox(self.launcher.clone(), self.sandbox_profile.clone());
+
+        let cs_hash = changeset_hash(&changed);
+        let run = runner
+            .run(
+                &step.command,
+                Some(step.tier),
+                Some(cs_hash),
+                cancel.child(),
+            )
+            .await
+            .map_err(|e| AgentError::MalformedCompletion {
+                detail: format!("verification runner: {e}"),
+            })?;
+
+        self.verification_log
+            .record(task_id, &run)
+            .await
+            .map_err(|e| AgentError::MalformedCompletion {
+                detail: format!("verification log: {e}"),
+            })?;
+
+        self.tasks
+            .append_journal(
+                task_id,
+                JournalEntryKind::EffectCompleted {
+                    effect_id,
+                    step_id,
+                    outcome_kind: kinds::VERIFY_RESULT.into(),
+                    payload: serde_json::json!({
+                        "command": run.command.display(),
+                        "passed": run.passed(),
+                        "outcome": format!("{:?}", run.outcome),
+                        "exit_code": run.exit_code,
+                        "failure_count": run.failures.len(),
+                        "run_id": run.id.to_string(),
+                        "digest": run.digest(3),
+                    }),
+                },
+            )
+            .await?;
+
+        vs.executed += 1;
+        vs.last_passed = run.passed();
+        vs.last_run = Some(run.clone());
+
+        if run.passed() {
+            vs.detector.observe_failure(None);
+            self.put_verify_state(task_id, vs);
+            // Stay in Verifying: the outer loop re-enters and runs the
+            // next step (or completes when the plan is exhausted).
+            Ok(Flow::Continue)
+        } else {
+            self.put_verify_state(task_id, vs);
+            self.tasks
+                .transition(task_id, AgentState::Diagnosing)
+                .await?;
+            Ok(Flow::Continue)
+        }
+    }
+
+    async fn step_diagnosing(&self, task_id: TaskId, _cancel: &CancellationToken) -> Result<()> {
+        let mut vs = self.take_verify_state(task_id);
+        let changed = self.task_changed_files(task_id);
+
+        let failures = vs
+            .last_run
+            .as_ref()
+            .map(|r| r.failures.clone())
+            .unwrap_or_default();
+        // No graph wiring in the live loop yet (Phase 6 follow-up); an
+        // empty neighbour set means suspects come from the failure
+        // locations ∩ the change ledger alone.
+        let diagnosis = diagnose(&failures, &changed, &[]);
+        let fingerprint = diagnosis.fingerprint();
+
+        self.tasks
+            .append_journal(
+                task_id,
+                JournalEntryKind::EffectCompleted {
+                    effect_id: EffectId::new(),
+                    step_id: StepId::new(),
+                    outcome_kind: kinds::DIAGNOSIS.into(),
+                    payload: serde_json::json!({
+                        "summary": diagnosis.summary,
+                        "fingerprint": fingerprint,
+                        "suspects": diagnosis
+                            .suspects
+                            .iter()
+                            .take(5)
+                            .map(|s| s.path.display().to_string())
+                            .collect::<Vec<_>>(),
+                        "digest": diagnosis.context_digest(3, 3),
+                    }),
+                },
+            )
+            .await?;
+
+        // Loop / progress detection.
+        for f in changed.iter().cloned() {
+            vs.files_touched.insert(f);
+        }
+        let file_state = self.changed_files_state_hash(&changed);
+        let step_sig = StepSignature::default()
+            .with_error(&fingerprint)
+            .with_file_state(file_state);
+        let finding = vs
+            .detector
+            .observe_step(step_sig)
+            .or_else(|| vs.detector.observe_failure(Some(&fingerprint)))
+            .or_else(|| {
+                vs.detector.observe_progress(ProgressMetric {
+                    verification_frontier: vs.executed,
+                    failure_count: failures.len(),
+                    files_touched: vs.files_touched.clone(),
+                })
+            });
+
+        if let Some(finding) = &finding {
+            self.tasks
+                .append_journal(
+                    task_id,
+                    JournalEntryKind::EffectCompleted {
+                        effect_id: EffectId::new(),
+                        step_id: StepId::new(),
+                        outcome_kind: kinds::LOOP_DETECTED.into(),
+                        payload: serde_json::json!({
+                            "class": finding.code(),
+                            "detail": describe_finding(finding),
+                        }),
+                    },
+                )
+                .await?;
+        }
+
+        let decision = vs.repair.decide(&fingerprint, finding.as_ref());
+        self.tasks
+            .append_journal(
+                task_id,
+                JournalEntryKind::EffectCompleted {
+                    effect_id: EffectId::new(),
+                    step_id: StepId::new(),
+                    outcome_kind: kinds::REPAIR_DECISION.into(),
+                    payload: serde_json::json!({"decision": describe_decision(&decision)}),
+                },
+            )
+            .await?;
+
+        vs.pending_diagnosis = Some(diagnosis);
+
+        match decision {
+            RepairDecision::Continue => {
+                self.put_verify_state(task_id, vs);
+                self.tasks
+                    .transition(task_id, AgentState::Repairing)
+                    .await?;
+            }
+            RepairDecision::EscalateStrategy => {
+                vs.repair.mark_escalated();
+                vs.broaden = true;
+                vs.plan = None; // rebuilt wider on the way back through Verifying
+                self.put_verify_state(task_id, vs);
+                self.tasks
+                    .transition(task_id, AgentState::Repairing)
+                    .await?;
+            }
+            RepairDecision::SwitchRole => {
+                vs.repair.mark_switched_role();
+                vs.repair_role_primary = true;
+                vs.plan = None;
+                self.put_verify_state(task_id, vs);
+                self.tasks
+                    .transition(task_id, AgentState::Repairing)
+                    .await?;
+            }
+            RepairDecision::AskUser { reason } => {
+                self.tasks
+                    .append_journal(
+                        task_id,
+                        JournalEntryKind::RecoveryNote {
+                            note: format!("repair paused for the user: {reason}"),
+                        },
+                    )
+                    .await?;
+                self.put_verify_state(task_id, vs);
+                self.tasks
+                    .transition(task_id, AgentState::WaitingForUser)
+                    .await?;
+            }
+            RepairDecision::GiveUp { reason } => {
+                self.tasks
+                    .append_journal(
+                        task_id,
+                        JournalEntryKind::RecoveryNote {
+                            note: format!("repair gave up: {reason}"),
+                        },
+                    )
+                    .await?;
+                self.verify_states.lock().unwrap().remove(&task_id);
+                self.tasks.transition(task_id, AgentState::Failed).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn step_repairing(&self, task_id: TaskId, cancel: &CancellationToken) -> Result<Flow> {
+        // D1: an interrupted repair edit is redone before anything new.
+        if let Some(pending) = self.tasks.interrupted_tool_call(task_id).await? {
+            self.issue_and_execute_tool_call(
+                task_id,
+                cancel,
+                pending.step_id,
+                &pending.tool,
+                pending.input,
+            )
+            .await?;
+            if self.tasks.get(task_id).await?.state == AgentState::Repairing {
+                self.tasks
+                    .transition(task_id, AgentState::Verifying)
+                    .await?;
+            }
+            return Ok(Flow::Continue);
+        }
+
+        let mut vs = self.take_verify_state(task_id);
+        let digest = vs
+            .pending_diagnosis
+            .as_ref()
+            .map(|d| d.context_digest(4, 4))
+            .unwrap_or_else(|| "a verification check failed".to_string());
+        let fingerprint = vs
+            .pending_diagnosis
+            .as_ref()
+            .map(|d| d.fingerprint())
+            .unwrap_or_default();
+        // Only `PrimaryCoder` is bound in Phase 7; `SwitchRole` still
+        // advances the escalation ladder in `RepairLedger::decide` (next
+        // stop: the user) even though the role binding is unchanged until
+        // a `FastCoder`/`PrimaryCoder` split lands with real models.
+        let role = Role::PrimaryCoder;
+        let _ = vs.repair_role_primary;
+
+        // Reason (repair-focused).
+        let turn_index = self.tasks.count_model_calls(task_id).await?;
+        let step_id = StepId::new();
+        let model_effect_id = EffectId::new();
+        self.tasks
+            .append_journal(
+                task_id,
+                JournalEntryKind::EffectIssued {
+                    effect_id: model_effect_id,
+                    step_id,
+                    effect_kind: kinds::MODEL_CALL.into(),
+                    payload: serde_json::json!({"turn_index": turn_index, "phase": "repair"}),
+                },
+            )
+            .await?;
+
+        let objective = self.tasks.get(task_id).await?.objective;
+        let prompt = format!(
+            "{objective}\n\nA verification check just failed. Make the minimal edit that \
+             fixes it, then finish.\n\n{digest}"
+        );
+        let request = GenerateRequest::new(vec![Message::user(prompt)]).with_turn_hint(turn_index);
+        let completion = self
+            .orchestrator
+            .generate(role, request, cancel.child())
+            .await?;
+
+        self.tasks
+            .append_journal(
+                task_id,
+                JournalEntryKind::EffectCompleted {
+                    effect_id: model_effect_id,
+                    step_id,
+                    outcome_kind: kinds::MODEL_COMPLETION.into(),
+                    payload: serde_json::json!({
+                        "finish_reason": format!("{:?}", completion.finish_reason),
+                        "text": completion.text,
+                    }),
+                },
+            )
+            .await?;
+
+        let action = ActionRequest::from_completion(&completion)?;
+        let (edit_summary, outcome) = match action {
+            ActionRequest::ToolCall { tool, input } => {
+                let summary = format!("{tool} {input}");
+                self.issue_and_execute_tool_call(task_id, cancel, step_id, &tool, input)
+                    .await?;
+                (summary, RepairOutcome::Improved)
+            }
+            ActionRequest::Finish { .. } => {
+                // The model believes it is fixed without editing — let the
+                // re-verification be the judge.
+                (
+                    "no edit (model finished)".to_string(),
+                    RepairOutcome::NoChange,
+                )
+            }
+            ActionRequest::Ask { .. } => {
+                vs.repair.record(RepairAttempt {
+                    attempt: 0,
+                    diagnosis_fingerprint: fingerprint,
+                    edit_summary: "model asked a question".into(),
+                    outcome: RepairOutcome::NoChange,
+                });
+                self.put_verify_state(task_id, vs);
+                self.tasks
+                    .transition(task_id, AgentState::WaitingForUser)
+                    .await?;
+                return Ok(Flow::Return);
+            }
+        };
+
+        vs.repair.record(RepairAttempt {
+            attempt: 0,
+            diagnosis_fingerprint: fingerprint,
+            edit_summary,
+            outcome,
+        });
+        vs.plan = None; // re-verify from the start of the escalation
+        vs.executed = 0;
+        vs.last_passed = true;
+        vs.detector.observe_step(
+            StepSignature::default()
+                .with_file_state(self.changed_files_state_hash(&self.task_changed_files(task_id))),
+        );
+
+        let state_now = self.tasks.get(task_id).await?.state;
+        if state_now == AgentState::Repairing {
+            self.put_verify_state(task_id, vs);
+            self.tasks
+                .transition(task_id, AgentState::Verifying)
+                .await?;
+            Ok(Flow::Continue)
+        } else {
+            // The edit needed permission (WAITING_FOR_PERMISSION) or was
+            // denied (FAILED) — `issue_and_execute_tool_call` already
+            // transitioned; just persist the ledger and stop.
+            if state_now == AgentState::Failed {
+                self.verify_states.lock().unwrap().remove(&task_id);
+            } else {
+                self.put_verify_state(task_id, vs);
+            }
+            Ok(Flow::Return)
+        }
+    }
+
+    // --- shared tool-call plumbing -----------------------------------
+
     async fn issue_and_execute_tool_call(
         &self,
         task_id: TaskId,
@@ -327,10 +784,6 @@ impl AgentDriver {
                         },
                     )
                     .await?;
-                // Stays in Implementing either way (Phase 3 has no repair
-                // loop): the next `Reason` step decides what happens next,
-                // including reacting to a failed tool outcome via its own
-                // next scripted/real turn.
                 Ok(())
             }
             InvocationResult::AskRequired { prompt, request } => {
@@ -375,11 +828,6 @@ impl AgentDriver {
         }
     }
 
-    /// Records this path's pre-touch baseline (first-touch-wins) if the
-    /// tool input names one, so `Ledger::classify` can later tell
-    /// pre-existing content apart from a concurrent user modification
-    /// (§25). Safe to call unconditionally — `record_baseline` is a no-op
-    /// on every call after the first for a given path.
     fn record_baseline_if_path(&self, ctx: &ToolCtx, input: &serde_json::Value) {
         let Some(path) = input.get("path").and_then(|v| v.as_str()) else {
             return;
@@ -392,14 +840,6 @@ impl AgentDriver {
         self.ledger.record_baseline(PathBuf::from(path), hash);
     }
 
-    /// Resumes a task sitting in `WAITING_FOR_PERMISSION`: re-derives the
-    /// `PermissionRequest` from the tool's own (pure, side-effect-free)
-    /// `preflight` rather than trusting anything cached, mints an
-    /// `Authorization` if approved, and journals the resolution as a fresh
-    /// `EffectCompleted` that supersedes the earlier `permission_ask` one.
-    /// Does not itself continue the task loop — the caller re-invokes
-    /// `run` afterward (`WaitingForPermission -> Implementing` is then a
-    /// legal, ordinary next step).
     pub async fn resolve_permission(&self, task_id: TaskId, approve: bool) -> Result<()> {
         let task = self.tasks.get(task_id).await?;
         if task.state != AgentState::WaitingForPermission {
@@ -416,9 +856,6 @@ impl AgentDriver {
             .ok_or_else(|| AgentError::UnknownTool(pending.tool.clone()))?;
 
         let ctx = self.build_ctx(task_id, pending.step_id, CancellationToken::new());
-        // Reuse the *original* EffectIssued's id: this EffectCompleted must
-        // supersede the earlier `permission_ask` completion for the same
-        // effect, not create an unrelated, permanently-dangling one.
         let effect_id = pending.effect_id;
 
         if !approve {
@@ -452,13 +889,14 @@ impl AgentDriver {
             InvocationResult::Executed { .. } | InvocationResult::Denied { .. } => {
                 self.observe_tool_result(task_id, pending.step_id, effect_id, result)
                     .await?;
-                // A successful/denied resolution lands back in Implementing
-                // only on success; `observe_tool_result` already sent a
-                // denial to Failed. On success, explicitly continue.
+                // Resume into whichever loop phase asked for the edit.
                 if self.tasks.get(task_id).await?.state == AgentState::WaitingForPermission {
-                    self.tasks
-                        .transition(task_id, AgentState::Implementing)
-                        .await?;
+                    let resume_to = if self.verify_states.lock().unwrap().contains_key(&task_id) {
+                        AgentState::Verifying
+                    } else {
+                        AgentState::Implementing
+                    };
+                    self.tasks.transition(task_id, resume_to).await?;
                 }
                 Ok(())
             }
@@ -467,6 +905,53 @@ impl AgentDriver {
             }
             InvocationResult::UnknownTool(name) => Err(AgentError::UnknownTool(name.clone())),
         }
+    }
+
+    // --- helpers ---------------------------------------------------
+
+    fn task_changed_files(&self, task_id: TaskId) -> Vec<PathBuf> {
+        let mut files: Vec<PathBuf> = self
+            .ledger
+            .entries_for_task(task_id)
+            .into_iter()
+            .map(|e| e.path)
+            .collect();
+        files.sort();
+        files.dedup();
+        files
+    }
+
+    /// A hash over the current on-disk content of every file the task has
+    /// touched — the "file state" axis of loop detection.
+    fn changed_files_state_hash(&self, files: &[PathBuf]) -> ContentHash {
+        let mut buf = Vec::new();
+        for f in files {
+            buf.extend_from_slice(f.to_string_lossy().as_bytes());
+            buf.push(0);
+            if let Ok(resolved) = self.workspace_root.resolve(f.to_string_lossy().as_ref()) {
+                if let Ok(bytes) = std::fs::read(&resolved) {
+                    buf.extend_from_slice(&bytes);
+                }
+            }
+            buf.push(0);
+        }
+        ContentHash::of_bytes(&buf)
+    }
+
+    fn take_verify_state(&self, task_id: TaskId) -> VerifyState {
+        self.verify_states
+            .lock()
+            .unwrap()
+            .entry(task_id)
+            .or_insert_with(|| VerifyState {
+                repair: RepairLedger::new(MAX_REPAIR_ATTEMPTS),
+                ..VerifyState::default()
+            })
+            .clone()
+    }
+
+    fn put_verify_state(&self, task_id: TaskId, state: VerifyState) {
+        self.verify_states.lock().unwrap().insert(task_id, state);
     }
 
     fn build_ctx(&self, task_id: TaskId, step_id: StepId, cancel: CancellationToken) -> ToolCtx {
@@ -480,5 +965,37 @@ impl AgentDriver {
             launcher: self.launcher.clone(),
             sandbox_profile: self.sandbox_profile.clone(),
         }
+    }
+}
+
+/// Whether a state handler wants the outer `run` loop to keep going or to
+/// return (the task reached a state no driver should keep spinning on).
+#[derive(Debug, PartialEq, Eq)]
+enum Flow {
+    Continue,
+    Return,
+}
+
+fn describe_finding(f: &LoopFinding) -> String {
+    match f {
+        LoopFinding::ExactRepeat { count, .. } => format!("identical step ×{count}"),
+        LoopFinding::Oscillation { period } => format!("cycle of period {period}"),
+        LoopFinding::RepeatedFailure { count, .. } => format!("same failure ×{count}"),
+        LoopFinding::NoChangeIteration { iterations } => {
+            format!("{iterations} steps, no file change")
+        }
+        LoopFinding::FrontierStalled { iterations } => {
+            format!("{iterations} cycles, no progress")
+        }
+    }
+}
+
+fn describe_decision(d: &RepairDecision) -> String {
+    match d {
+        RepairDecision::Continue => "continue".into(),
+        RepairDecision::EscalateStrategy => "escalate_strategy".into(),
+        RepairDecision::SwitchRole => "switch_role".into(),
+        RepairDecision::AskUser { reason } => format!("ask_user: {reason}"),
+        RepairDecision::GiveUp { reason } => format!("give_up: {reason}"),
     }
 }

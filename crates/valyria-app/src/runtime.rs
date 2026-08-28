@@ -20,6 +20,7 @@ use valyria_task::{Budget, Task, TaskManager};
 use valyria_tools::ToolRuntime;
 use valyria_types::{AgentState, PermissionMode, TaskId, WorkspaceId};
 use valyria_util::{CancellationToken, Clock, SystemClock};
+use valyria_verify::VerificationLog;
 use valyria_vfs::WorkspaceRoot;
 
 use crate::error::{AppError, Result};
@@ -132,6 +133,7 @@ impl Runtime {
         let orchestrator = Arc::new(orchestrator);
 
         let context = Arc::new(ContextAssembler::new(tool_runtime.clone()));
+        let verification_log = Arc::new(VerificationLog::new(store.clone()));
         let hash_cache = Arc::new(valyria_vfs::HashCache::new());
         let launcher: Arc<dyn ProcessLauncher> = Arc::from(detect_platform_launcher());
         let sandbox_profile = SandboxProfile::new().allow_write(workspace_root.as_path());
@@ -149,6 +151,7 @@ impl Runtime {
             context,
             ledger,
             engine,
+            verification_log,
             workspace_root,
             hash_cache,
             clock,

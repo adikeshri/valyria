@@ -2584,6 +2584,7 @@ dependencies = [
  "valyria-tools",
  "valyria-types",
  "valyria-util",
+ "valyria-verify",
  "valyria-vfs",
 ]
 
@@ -2621,6 +2622,7 @@ dependencies = [
  "valyria-tools",
  "valyria-types",
  "valyria-util",
+ "valyria-verify",
  "valyria-vfs",
 ]
 
@@ -3196,12 +3198,22 @@ dependencies = [
 name = "valyria-verify"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "rusqlite",
  "serde",
+ "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
+ "tokio",
  "tracing",
+ "valyria-git",
+ "valyria-process",
+ "valyria-sandbox",
+ "valyria-store",
  "valyria-testkit",
  "valyria-types",
  "valyria-util",
+ "valyria-vfs",
 ]
 
 [[package]]
