@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Benchmark harness, task suites, metrics, reporting."
+description = "Benchmark harness, task suites, executable oracles, metrics, reporting."
 
 [package.metadata.valyria]
 layer = 6
@@ -13,9 +13,23 @@ phase = 11
 [dependencies]
 valyria-types = { workspace = true }
 valyria-util = { workspace = true }
+valyria-events = { workspace = true }
+valyria-task = { workspace = true }
+valyria-verify = { workspace = true }
+valyria-runtime-fake = { workspace = true }
+valyria-app = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 tracing = { workspace = true }
+tokio = { workspace = true }
+blake3 = { workspace = true }
+walkdir = { workspace = true }
+tempfile = { workspace = true }
 
 [dev-dependencies]
 valyria-testkit = { workspace = true }
+
+[[bin]]
+name = "valyria-bench"
+path = "src/bin/valyria-bench.rs"

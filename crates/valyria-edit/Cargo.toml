@@ -21,5 +21,6 @@ tracing = { workspace = true }
 diffy = "0.5.1"
 
 [dev-dependencies]
+proptest = { workspace = true }
 valyria-testkit = { workspace = true }
 tempfile = { workspace = true }

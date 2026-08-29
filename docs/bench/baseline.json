@@ -1,0 +1,159 @@
+{
+  "generated_at_ms": 0,
+  "runs": [
+    {
+      "id": "feature_add_function",
+      "category": "feature",
+      "objective": "add an `add(a, b)` function to src/lib.rs",
+      "final_state": "COMPLETED",
+      "report_status": "NotVerified",
+      "oracle": "all[task_completed & file_contains(src/lib.rs, \"pub fn add(a: i32, b: i32)\")]",
+      "oracle_detail": "[ok] task reached COMPLETED; [ok] src/lib.rs contains \"pub fn add(a: i32, b: i32)\"",
+      "passed": true,
+      "metrics": {
+        "wall_ms": 0,
+        "state_changes": 6,
+        "model_calls": 3,
+        "tool_calls": 2,
+        "files_changed": 1,
+        "verification_runs": 0,
+        "tests_passed": 0,
+        "tests_failed": 0,
+        "progress_stalls": 0,
+        "reached_terminal": true
+      }
+    },
+    {
+      "id": "bugfix_verified",
+      "category": "bug_fix",
+      "objective": "make check.sh pass by setting ANSWER=42",
+      "final_state": "COMPLETED",
+      "report_status": "Verified",
+      "oracle": "all[file_contains(src/answer.txt, \"ANSWER=42\") & report_verified & command_succeeds(sh check.sh)]",
+      "oracle_detail": "[ok] src/answer.txt contains \"ANSWER=42\"; [ok] completion report: Verified; [ok] `command_succeeds(sh check.sh)` exited 0",
+      "passed": true,
+      "metrics": {
+        "wall_ms": 0,
+        "state_changes": 6,
+        "model_calls": 3,
+        "tool_calls": 2,
+        "files_changed": 1,
+        "verification_runs": 1,
+        "tests_passed": 1,
+        "tests_failed": 0,
+        "progress_stalls": 0,
+        "reached_terminal": true
+      }
+    },
+    {
+      "id": "debugging_repair_loop",
+      "category": "debugging",
+      "objective": "make check.sh pass",
+      "final_state": "COMPLETED",
+      "report_status": "Verified",
+      "oracle": "all[file_contains(src/answer.txt, \"ANSWER=42\") & report_verified & command_succeeds(sh check.sh)]",
+      "oracle_detail": "[ok] src/answer.txt contains \"ANSWER=42\"; [ok] completion report: Verified; [ok] `command_succeeds(sh check.sh)` exited 0",
+      "passed": true,
+      "metrics": {
+        "wall_ms": 0,
+        "state_changes": 9,
+        "model_calls": 3,
+        "tool_calls": 2,
+        "files_changed": 1,
+        "verification_runs": 2,
+        "tests_passed": 1,
+        "tests_failed": 1,
+        "progress_stalls": 0,
+        "reached_terminal": true
+      }
+    },
+    {
+      "id": "refactor_rename",
+      "category": "refactor",
+      "objective": "rename `oldname` to `newname` in src/math.rs",
+      "final_state": "COMPLETED",
+      "report_status": "NotVerified",
+      "oracle": "all[task_completed & file_contains(src/math.rs, \"pub fn newname\") & file_lacks(src/math.rs, \"oldname\")]",
+      "oracle_detail": "[ok] task reached COMPLETED; [ok] src/math.rs contains \"pub fn newname\"; [ok] src/math.rs free of \"oldname\"",
+      "passed": true,
+      "metrics": {
+        "wall_ms": 0,
+        "state_changes": 6,
+        "model_calls": 3,
+        "tool_calls": 2,
+        "files_changed": 1,
+        "verification_runs": 0,
+        "tests_passed": 0,
+        "tests_failed": 0,
+        "progress_stalls": 0,
+        "reached_terminal": true
+      }
+    },
+    {
+      "id": "test_creation",
+      "category": "test_creation",
+      "objective": "add a test file under tests/",
+      "final_state": "COMPLETED",
+      "report_status": "NotVerified",
+      "oracle": "all[task_completed & file_exists(tests/double.rs) & file_contains(tests/double.rs, \"fn doubles()\")]",
+      "oracle_detail": "[ok] task reached COMPLETED; [ok] tests/double.rs exists; [ok] tests/double.rs contains \"fn doubles()\"",
+      "passed": true,
+      "metrics": {
+        "wall_ms": 0,
+        "state_changes": 6,
+        "model_calls": 2,
+        "tool_calls": 1,
+        "files_changed": 1,
+        "verification_runs": 0,
+        "tests_passed": 0,
+        "tests_failed": 0,
+        "progress_stalls": 0,
+        "reached_terminal": true
+      }
+    },
+    {
+      "id": "dependency_work",
+      "category": "dependency_work",
+      "objective": "add the serde dependency to deps.txt",
+      "final_state": "COMPLETED",
+      "report_status": "NotVerified",
+      "oracle": "all[task_completed & file_contains(deps.txt, \"serde = \\\"1\\\"\")]",
+      "oracle_detail": "[ok] task reached COMPLETED; [ok] deps.txt contains \"serde = \\\"1\\\"\"",
+      "passed": true,
+      "metrics": {
+        "wall_ms": 0,
+        "state_changes": 6,
+        "model_calls": 3,
+        "tool_calls": 2,
+        "files_changed": 1,
+        "verification_runs": 0,
+        "tests_passed": 0,
+        "tests_failed": 0,
+        "progress_stalls": 0,
+        "reached_terminal": true
+      }
+    },
+    {
+      "id": "exploration_readonly",
+      "category": "exploration",
+      "objective": "look around the repository and report back",
+      "final_state": "COMPLETED",
+      "report_status": "NotVerified",
+      "oracle": "all[task_completed & max_files_changed(0)]",
+      "oracle_detail": "[ok] task reached COMPLETED; [ok] 0 file(s) changed (≤ 0)",
+      "passed": true,
+      "metrics": {
+        "wall_ms": 0,
+        "state_changes": 6,
+        "model_calls": 4,
+        "tool_calls": 3,
+        "files_changed": 0,
+        "verification_runs": 0,
+        "tests_passed": 0,
+        "tests_failed": 0,
+        "progress_stalls": 0,
+        "reached_terminal": true
+      }
+    }
+  ]
+}

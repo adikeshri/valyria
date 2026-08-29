@@ -23,5 +23,6 @@ futures = { workspace = true }
 tokio = { workspace = true, features = ["net", "io-util", "sync"] }
 
 [dev-dependencies]
+proptest = { workspace = true }
 valyria-testkit = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "net", "io-util", "time"] }

@@ -279,15 +279,119 @@ fn check_protocol() -> Result<()> {
     }
 }
 
+/// Where the committed benchmark baseline lives, relative to the root.
+const BENCH_BASELINE: &str = "docs/bench/baseline.json";
+
+/// Run the offline fixture benchmark suite (`valyria-bench`). With
+/// `--bless`, (over)write `docs/bench/baseline.json`; otherwise diff the
+/// fresh run against the committed baseline and fail on any regression —
+/// the Phase 11 "benchmark baseline recorded" gate.
+fn bench(bless: bool) -> Result<()> {
+    use valyria_bench::{compare, fixture_suite, BenchReport, BenchRunner};
+
+    let root = workspace_root()?;
+    let baseline_path = root.join(BENCH_BASELINE);
+
+    let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
+    let report = rt
+        .block_on(BenchRunner::new().run_suite(&fixture_suite()))
+        .map_err(|e| anyhow::anyhow!("bench suite errored ({}): {e}", e.code()))?;
+    print!("{}", report.render_table());
+
+    if bless {
+        if let Some(parent) = baseline_path.parent() {
+            fs::create_dir_all(parent).ok();
+        }
+        fs::write(
+            &baseline_path,
+            format!("{}\n", report.stabilized().to_json_pretty()),
+        )
+        .with_context(|| format!("writing {}", baseline_path.display()))?;
+        println!("blessed baseline -> {}", baseline_path.display());
+        return Ok(());
+    }
+
+    if !report.all_passed() {
+        bail!("bench suite has failing tasks (see table above)");
+    }
+
+    let baseline_src = fs::read_to_string(&baseline_path).with_context(|| {
+        format!(
+            "reading {} (run `cargo xtask bench --bless` to create it)",
+            baseline_path.display()
+        )
+    })?;
+    let baseline = BenchReport::from_json(&baseline_src)
+        .with_context(|| format!("parsing {}", baseline_path.display()))?;
+    let cmp = compare(&baseline, &report);
+    print!("{}", cmp.render());
+    if !cmp.is_clean() {
+        bail!("benchmark regression against {BENCH_BASELINE} (bless it if intentional)");
+    }
+    println!("bench OK — no regression against {BENCH_BASELINE}");
+    Ok(())
+}
+
+/// Aggregate release gate (§52 / PLAN Phase 11): every machine-checkable
+/// gate in one run, with a summary table. Non-zero exit if any fails.
+type Gate = (&'static str, Box<dyn Fn() -> Result<()>>);
+
+fn release_gates() -> Result<()> {
+    let root = workspace_root()?;
+    let gates: Vec<Gate> = vec![
+        ("crate layering", Box::new(check_layering)),
+        ("protocol schema compat", Box::new(check_protocol)),
+        ("benchmark baseline", Box::new(|| bench(false))),
+        (
+            "acceptance mapping doc",
+            Box::new(move || {
+                let p = root.join("docs/ACCEPTANCE.md");
+                if p.exists() {
+                    Ok(())
+                } else {
+                    bail!("missing {}", p.display())
+                }
+            }),
+        ),
+    ];
+
+    let mut failed = Vec::new();
+    println!("release gates\n");
+    for (name, run) in &gates {
+        match run() {
+            Ok(()) => println!("  [pass] {name}"),
+            Err(e) => {
+                println!("  [FAIL] {name}: {e}");
+                failed.push(*name);
+            }
+        }
+    }
+    println!();
+    if failed.is_empty() {
+        println!("all {} release gates pass", gates.len());
+        Ok(())
+    } else {
+        bail!(
+            "{} release gate(s) failed: {}",
+            failed.len(),
+            failed.join(", ")
+        );
+    }
+}
+
 fn main() -> Result<()> {
-    let cmd = std::env::args().nth(1);
-    match cmd.as_deref() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
         Some("check-layering") => check_layering(),
         Some("schema") => export_schema(),
         Some("check-protocol") => check_protocol(),
+        Some("bench") => bench(args.iter().any(|a| a == "--bless")),
+        Some("release-gates") => release_gates(),
         Some(other) => bail!("unknown xtask command: {other}"),
         None => {
-            println!("usage: cargo xtask <check-layering|schema|check-protocol>");
+            println!(
+                "usage: cargo xtask <check-layering|schema|check-protocol|bench [--bless]|release-gates>"
+            );
             Ok(())
         }
     }

@@ -29,5 +29,6 @@ tokio = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]
+proptest = { workspace = true }
 valyria-testkit = { workspace = true }
 tempfile = { workspace = true }

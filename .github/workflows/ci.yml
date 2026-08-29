@@ -99,3 +99,45 @@ jobs:
           toolchain: ${{ steps.pin.outputs.version }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace
+
+  # Phase 11: the offline evaluation suite is a regression gate. Runs the
+  # `valyria-bench` fixture tasks against the deterministic fake model and
+  # diffs the result against docs/bench/baseline.json — any task that
+  # stops passing, or a cost metric that blows up, fails the build.
+  bench:
+    name: benchmark suite
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo xtask bench
+
+  # Phase 11: property / fuzz gate for the parser surfaces §7 calls out —
+  # patch & diff parser, protocol frame decoder, tool-input canonicaliser.
+  # A higher case count than the default `cargo test` run.
+  property:
+    name: property / fuzz tests
+    runs-on: macos-latest
+    env:
+      PROPTEST_CASES: "2048"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: >
+          cargo test
+          -p valyria-edit --test fuzz_edit
+          -p valyria-protocol --test fuzz_protocol
+          -p valyria-tools --test fuzz_tool_inputs
+
+  # Phase 11: one aggregate gate — layering + protocol compat + benchmark
+  # baseline + the acceptance-mapping doc, with a summary table.
+  release-gates:
+    name: release gates
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo xtask release-gates
