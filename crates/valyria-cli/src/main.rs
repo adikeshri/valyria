@@ -1,23 +1,26 @@
 //! `valyria` — the CLI. A thin protocol client (layer 6, D11): every
-//! command below goes through `valyria_protocol::Client` against an
-//! embedded `valyria_app::Runtime` — this binary contains no state-machine,
-//! journal, or tool-invocation logic of its own, and its `Cargo.toml`
-//! lists only `valyria-app`/`valyria-protocol`/`valyria-types`/
-//! `valyria-util`. Full command surface (a daemon `--connect` mode,
-//! `--json` everywhere, shell completions) lands in Phase 10; this is the
-//! walking skeleton's `run`/`task` surface.
+//! command goes through `valyria_protocol::Client`, either an embedded
+//! `valyria_app::Runtime` (default) or a `SocketClient` against a running
+//! daemon (`--connect <socket>`). This binary contains no state-machine,
+//! journal, or tool-invocation logic of its own; its `Cargo.toml` lists
+//! only `valyria-app` / `valyria-protocol` / `valyria-types` /
+//! `valyria-util` from the runtime, plus a terminal UI toolkit for the
+//! interactive session.
 
 mod args;
+mod render;
+mod tui;
 
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use futures::StreamExt;
-use valyria_app::{load_scenario, EmbeddedClient, Runtime, RuntimeConfig};
+use valyria_app::{load_scenario, serve, EmbeddedClient, Runtime, RuntimeConfig};
 use valyria_protocol::{
-    Client, PermissionResolveRequest, Request, Response, TaskCreateRequest, TaskIdRequest,
-    TaskStatusRequest,
+    Client, Empty, MemoryListRequest, PermissionResolveRequest, Request, Response,
+    StoragePurgeRequest, TaskCreateRequest, TaskIdRequest, TaskRollbackRequest, TaskStatusRequest,
 };
+use valyria_util::CancellationToken;
 
 use args::{parse, resolve_workspace, ParsedArgs};
 
@@ -28,8 +31,21 @@ fn main() -> ExitCode {
             println!("valyria {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
+        Some("--help") | Some("-h") | Some("help") => {
+            print_usage();
+            ExitCode::SUCCESS
+        }
+        None => tokio_main(cmd_tui(vec![])),
+        Some("tui") => tokio_main(cmd_tui(argv[1..].to_vec())),
         Some("run") => tokio_main(cmd_run(argv[1..].to_vec())),
         Some("task") => tokio_main(cmd_task(argv[1..].to_vec())),
+        Some("doctor") => tokio_main(cmd_doctor(argv[1..].to_vec())),
+        Some("clean") => tokio_main(cmd_clean(argv[1..].to_vec())),
+        Some("status") => tokio_main(cmd_status(argv[1..].to_vec())),
+        Some("config") => tokio_main(cmd_config(argv[1..].to_vec())),
+        Some("model") => tokio_main(cmd_model(argv[1..].to_vec())),
+        Some("memory") => tokio_main(cmd_memory(argv[1..].to_vec())),
+        Some("serve") => tokio_main(cmd_serve(argv[1..].to_vec())),
         _ => {
             print_usage();
             ExitCode::from(64) // EX_USAGE
@@ -50,20 +66,36 @@ fn print_usage() {
     );
     eprintln!();
     eprintln!("USAGE:");
+    eprintln!("    valyria                                 open the interactive session (TUI)");
+    eprintln!("    valyria run \"<objective>\" [flags]        start and watch a task");
+    eprintln!("    valyria task <status|list|report|plan|rollback|pause|resume|cancel|permission>");
+    eprintln!("    valyria doctor [--json]                 diagnose the environment");
+    eprintln!("    valyria status [--json]                 workspace / index / task summary");
     eprintln!(
-        "    valyria run \"<objective>\" [--workspace <path>] [--scenario <file.toml>] \
-         [--permission-mode manual|assisted|autonomous] [--plan] [--events]"
+        "    valyria config [--json]                 effective config + where each value came from"
     );
-    eprintln!("    valyria task status <task_id> [--workspace <path>]");
-    eprintln!("    valyria task pause <task_id> [--workspace <path>]");
-    eprintln!("    valyria task resume <task_id> [--workspace <path>]");
-    eprintln!("    valyria task cancel <task_id> [--workspace <path>]");
-    eprintln!(
-        "    valyria task permission resolve <task_id> (--allow|--deny) [--workspace <path>]"
-    );
+    eprintln!("    valyria model list [--json]             catalog, with install state");
+    eprintln!("    valyria memory list [<query>] [--json]  inspect stored memory");
+    eprintln!("    valyria clean --scope <memory|cache|tasks|logs> [--dry-run] [--json]");
+    eprintln!("    valyria serve [--socket <path>]         run the daemon");
+    eprintln!();
+    eprintln!("COMMON FLAGS:");
+    eprintln!("    --workspace <path>     workspace root (default: cwd)");
+    eprintln!("    --connect <socket>     talk to a running daemon instead of an embedded runtime");
+    eprintln!("    --json                 machine-readable output");
+    eprintln!("    --events               (run) also print the raw event stream");
+    eprintln!("    --scenario <file.toml> (run) drive with a fake-model scenario");
+    eprintln!("    --permission-mode <manual|assisted|autonomous>");
+    eprintln!("    --plan                 (run) model-authored, validated plan (Phase 8)");
 }
 
-async fn build_client(parsed: &ParsedArgs) -> Result<EmbeddedClient, String> {
+/// A `Client` plus whatever must stay alive for its lifetime (the embedded
+/// `Runtime`, held inside the `Arc<EmbeddedClient>`). `--connect` swaps in
+/// a `SocketClient` and nothing else changes.
+async fn build_client(parsed: &ParsedArgs) -> Result<Arc<dyn Client>, String> {
+    if let Some(socket) = &parsed.connect {
+        return Ok(Arc::new(valyria_protocol::SocketClient::new(socket)));
+    }
     let workspace_path = resolve_workspace(parsed);
     let mut config = RuntimeConfig::new(workspace_path);
     if let Some(mode) = parsed.permission_mode {
@@ -79,12 +111,197 @@ async fn build_client(parsed: &ParsedArgs) -> Result<EmbeddedClient, String> {
     let runtime = Runtime::open(config)
         .await
         .map_err(|e| format!("failed to open runtime: {e}"))?;
-    Ok(EmbeddedClient::new(Arc::new(runtime)))
+    Ok(Arc::new(EmbeddedClient::new(Arc::new(runtime))))
 }
 
 fn print_error_and_fail(context: &str, message: &str) -> ExitCode {
     eprintln!("error: {context}: {message}");
     ExitCode::FAILURE
+}
+
+/// Shared helper: parse args, build a client, issue one request, render it.
+/// Used by every read-only command (`doctor`, `status`, `config`, ...).
+async fn one_shot(
+    raw: Vec<String>,
+    context: &'static str,
+    make_request: impl FnOnce(&ParsedArgs) -> Request,
+    render_human: impl FnOnce(&Response),
+) -> ExitCode {
+    let parsed = match parse(&raw) {
+        Ok(p) => p,
+        Err(e) => return print_error_and_fail("invalid arguments", &e),
+    };
+    let client = match build_client(&parsed).await {
+        Ok(c) => c,
+        Err(e) => return print_error_and_fail(context, &e),
+    };
+    let response = client.call(make_request(&parsed)).await;
+    if let Response::Error(e) = &response {
+        return print_error_and_fail(context, &e.message);
+    }
+    if parsed.json {
+        println!("{}", render::to_json(&response));
+    } else {
+        render_human(&response);
+    }
+    ExitCode::SUCCESS
+}
+
+async fn cmd_doctor(raw: Vec<String>) -> ExitCode {
+    one_shot(
+        raw,
+        "doctor",
+        |_| Request::DoctorRun(Empty {}),
+        render::doctor,
+    )
+    .await
+}
+
+async fn cmd_status(raw: Vec<String>) -> ExitCode {
+    one_shot(
+        raw,
+        "status",
+        |_| Request::WorkspaceStatus(Empty {}),
+        render::workspace_status,
+    )
+    .await
+}
+
+async fn cmd_config(raw: Vec<String>) -> ExitCode {
+    one_shot(
+        raw,
+        "config",
+        |_| Request::ConfigShow(Empty {}),
+        render::config_show,
+    )
+    .await
+}
+
+async fn cmd_model(raw: Vec<String>) -> ExitCode {
+    // Only subcommand today: `model list`.
+    let rest: Vec<String> = raw
+        .iter()
+        .filter(|a| a.as_str() != "list")
+        .cloned()
+        .collect();
+    one_shot(
+        rest,
+        "model list",
+        |_| Request::ModelList(Empty {}),
+        render::model_list,
+    )
+    .await
+}
+
+async fn cmd_memory(raw: Vec<String>) -> ExitCode {
+    if raw.first().map(String::as_str) != Some("list") {
+        eprintln!("error: usage: valyria memory list [<query>] [--json]");
+        return ExitCode::from(64);
+    }
+    one_shot(
+        raw[1..].to_vec(),
+        "memory list",
+        |p| {
+            Request::MemoryList(MemoryListRequest {
+                query: p.positional.first().cloned(),
+                limit: Some(20),
+            })
+        },
+        render::memory_list,
+    )
+    .await
+}
+
+async fn cmd_clean(raw: Vec<String>) -> ExitCode {
+    let parsed = match parse(&raw) {
+        Ok(p) => p,
+        Err(e) => return print_error_and_fail("invalid arguments", &e),
+    };
+    let Some(scope) = parsed.scope.clone() else {
+        eprintln!("error: `valyria clean` needs --scope <memory|cache|tasks|logs>");
+        return ExitCode::from(64);
+    };
+    let client = match build_client(&parsed).await {
+        Ok(c) => c,
+        Err(e) => return print_error_and_fail("clean", &e),
+    };
+    let response = client
+        .call(Request::StoragePurge(StoragePurgeRequest {
+            scope,
+            dry_run: parsed.dry_run,
+        }))
+        .await;
+    match &response {
+        Response::Error(e) => print_error_and_fail("clean", &e.message),
+        _ if parsed.json => {
+            println!("{}", render::to_json(&response));
+            ExitCode::SUCCESS
+        }
+        _ => {
+            render::purge(&response);
+            ExitCode::SUCCESS
+        }
+    }
+}
+
+async fn cmd_serve(raw: Vec<String>) -> ExitCode {
+    let parsed = match parse(&raw) {
+        Ok(p) => p,
+        Err(e) => return print_error_and_fail("invalid arguments", &e),
+    };
+    if parsed.connect.is_some() {
+        return print_error_and_fail("serve", "--connect makes no sense for `serve`");
+    }
+    let workspace_path = resolve_workspace(&parsed);
+    let mut config = RuntimeConfig::new(workspace_path);
+    if let Some(mode) = parsed.permission_mode {
+        config = config.with_permission_mode(mode);
+    }
+    if parsed.plan {
+        config = config.with_planning_mode(valyria_app::PlanningMode::ModelAuthored);
+    }
+    let runtime = match Runtime::open(config).await {
+        Ok(r) => Arc::new(r),
+        Err(e) => return print_error_and_fail("serve", &format!("failed to open runtime: {e}")),
+    };
+    let socket = parsed
+        .socket
+        .clone()
+        .unwrap_or_else(|| runtime.data_dir().join("valyria.sock"));
+    println!(
+        "valyria daemon: workspace {}",
+        runtime.workspace_path().display()
+    );
+    println!("listening on {}", socket.display());
+    println!("stop with Ctrl-C");
+
+    let shutdown = CancellationToken::new();
+    let sig = shutdown.clone();
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        eprintln!("\nshutting down…");
+        sig.cancel();
+    });
+
+    match serve(runtime, &socket, shutdown).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => print_error_and_fail("serve", &e.to_string()),
+    }
+}
+
+async fn cmd_tui(raw: Vec<String>) -> ExitCode {
+    let parsed = match parse(&raw) {
+        Ok(p) => p,
+        Err(e) => return print_error_and_fail("invalid arguments", &e),
+    };
+    let client = match build_client(&parsed).await {
+        Ok(c) => c,
+        Err(e) => return print_error_and_fail("tui", &e),
+    };
+    match tui::run(client).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => print_error_and_fail("tui", &e.to_string()),
+    }
 }
 
 async fn cmd_run(raw: Vec<String>) -> ExitCode {
@@ -113,29 +330,20 @@ async fn cmd_run(raw: Vec<String>) -> ExitCode {
         }
     };
     println!("task_id: {task_id}");
-    // Explicit flush: stdout is block-buffered (not line-buffered) once
-    // piped rather than attached to a terminal, so without this a reader
-    // waiting on this line — including a test that kills this process
-    // immediately afterward to exercise crash recovery — could otherwise
-    // never see it.
+    // Explicit flush: stdout is block-buffered once piped rather than
+    // attached to a terminal, so without this a reader waiting on this
+    // line — including a test that kills this process immediately
+    // afterward to exercise crash recovery — could otherwise never see it.
     let _ = std::io::Write::flush(&mut std::io::stdout());
-    watch_task_to_terminal(&client, &task_id, parsed.events).await
+    watch_task_to_terminal(client.as_ref(), &task_id, parsed.events).await
 }
 
 /// Streams events from `since: 0` and watches this task's `state_changed`
-/// until it reaches a state worth stopping at, printing a summary and
-/// returning the matching exit code.
-///
-/// Used right after a request that starts a fresh driver in *this*
-/// process (`run`'s `TaskCreate`): without waiting here, a
-/// `tokio::spawn`ed driver would be silently abandoned the moment `main`
-/// returns and the process exits. Safe to start from `since: 0` here
-/// specifically because task creation is this task's very first event —
-/// there is no earlier history to misinterpret as fresh (contrast
-/// `watch_established_task_to_terminal`, used after `resume`/`permission
-/// resolve`, where there is).
+/// until it reaches a state worth stopping at. Safe to start from `since:
+/// 0` here specifically because task creation is this task's very first
+/// event — contrast `watch_established_task_to_terminal`.
 async fn watch_task_to_terminal(
-    client: &EmbeddedClient,
+    client: &dyn Client,
     task_id: &str,
     print_events: bool,
 ) -> ExitCode {
@@ -143,19 +351,13 @@ async fn watch_task_to_terminal(
     watch_stream_to_terminal(client, events, task_id, print_events).await
 }
 
-/// Same as `watch_task_to_terminal`, but for a task that may already have
-/// history *before* the state transition we actually care about (e.g. a
-/// prior `WAITING_FOR_PERMISSION` from an earlier `run`/`resume`
-/// invocation) — subscribing from `since: 0` and reacting to the first
-/// matching `state_changed` naively would immediately "match" that old
-/// event and report stale results. Subscribes first, then drains whatever
-/// is already durably backlogged (bounded by a short per-read timeout,
-/// safe because `Subscription`'s backlog is an already-in-memory `VecDeque`
-/// read once at subscribe time — draining it never blocks on real
-/// work), *then* issues `after_subscribing` (the resume/resolve request
-/// itself), so everything read afterward is guaranteed to be new.
+/// For a task that may already have history *before* the transition we
+/// care about (a prior `WAITING_FOR_PERMISSION` from an earlier
+/// invocation): subscribe, drain the already-backlogged events (bounded by
+/// a short per-read timeout), *then* issue `after_subscribing`, so
+/// everything read afterward is guaranteed new.
 async fn watch_established_task_to_terminal<F>(
-    client: &EmbeddedClient,
+    client: &dyn Client,
     task_id: &str,
     print_events: bool,
     after_subscribing: F,
@@ -177,7 +379,7 @@ where
 }
 
 async fn watch_stream_to_terminal(
-    client: &EmbeddedClient,
+    client: &dyn Client,
     mut events: futures::stream::BoxStream<'static, valyria_protocol::WireEvent>,
     task_id: &str,
     print_events: bool,
@@ -227,16 +429,10 @@ async fn watch_stream_to_terminal(
                 return ExitCode::from(3);
             }
             "PAUSED" => {
-                // `PAUSED` can be transient: `resume_task`'s crash-recovery
-                // step legitimately passes a task through `Paused` for a
-                // moment (stuck-state -> Paused -> the state it resumes
-                // into is the only path the state machine allows — direct
-                // self-transitions are forbidden, so this two-step shape
-                // is structural, not a bug) before immediately continuing
-                // it. Confirm against the *current* live status before
-                // treating this as the task actually being at rest — an
-                // event from history saying "it was paused" is not the
-                // same as "it still is."
+                // `PAUSED` can be transient: crash-recovery legitimately
+                // passes a task through `Paused` for a moment. Confirm
+                // against the *current* live status before treating it as
+                // the task actually being at rest.
                 match client
                     .call(Request::TaskStatus(TaskStatusRequest {
                         task_id: task_id.to_string(),
@@ -249,7 +445,7 @@ async fn watch_stream_to_terminal(
                         );
                         return ExitCode::from(4);
                     }
-                    _ => {} // already moved on — keep watching
+                    _ => {}
                 }
             }
             _ => {}
@@ -264,6 +460,34 @@ async fn cmd_task(raw: Vec<String>) -> ExitCode {
     }
     match raw[0].as_str() {
         "status" => cmd_task_status(raw[1..].to_vec()).await,
+        "list" => {
+            one_shot(
+                raw[1..].to_vec(),
+                "task list",
+                |_| Request::TaskList(Empty {}),
+                render::task_list,
+            )
+            .await
+        }
+        "report" => {
+            cmd_task_one_shot(
+                raw[1..].to_vec(),
+                "task report",
+                |id| Request::TaskReport(TaskIdRequest { task_id: id }),
+                render::task_report,
+            )
+            .await
+        }
+        "plan" => {
+            cmd_task_one_shot(
+                raw[1..].to_vec(),
+                "task plan",
+                |id| Request::TaskPlan(TaskIdRequest { task_id: id }),
+                render::task_plan,
+            )
+            .await
+        }
+        "rollback" => cmd_task_rollback(raw[1..].to_vec()).await,
         "pause" => {
             cmd_task_signal(raw[1..].to_vec(), |id| {
                 Request::TaskPause(TaskIdRequest { task_id: id })
@@ -288,6 +512,76 @@ async fn cmd_task(raw: Vec<String>) -> ExitCode {
     }
 }
 
+/// `valyria task <verb> <task_id> [--json]` for the read-only verbs.
+async fn cmd_task_one_shot(
+    raw: Vec<String>,
+    context: &'static str,
+    build_request: impl FnOnce(String) -> Request,
+    render_human: impl FnOnce(&Response),
+) -> ExitCode {
+    let parsed = match parse(&raw) {
+        Ok(p) => p,
+        Err(e) => return print_error_and_fail("invalid arguments", &e),
+    };
+    let Some(task_id) = parsed.positional.first().cloned() else {
+        eprintln!("error: {context} needs a task id");
+        return ExitCode::from(64);
+    };
+    let client = match build_client(&parsed).await {
+        Ok(c) => c,
+        Err(e) => return print_error_and_fail(context, &e),
+    };
+    let response = client.call(build_request(task_id)).await;
+    if let Response::Error(e) = &response {
+        return print_error_and_fail(context, &e.message);
+    }
+    if parsed.json {
+        println!("{}", render::to_json(&response));
+    } else {
+        render_human(&response);
+    }
+    ExitCode::SUCCESS
+}
+
+async fn cmd_task_rollback(raw: Vec<String>) -> ExitCode {
+    let parsed = match parse(&raw) {
+        Ok(p) => p,
+        Err(e) => return print_error_and_fail("invalid arguments", &e),
+    };
+    let (Some(task_id), Some(checkpoint_id)) = (
+        parsed.positional.first().cloned(),
+        parsed.positional.get(1).cloned(),
+    ) else {
+        eprintln!("error: usage: valyria task rollback <task_id> <checkpoint_id>");
+        return ExitCode::from(64);
+    };
+    let client = match build_client(&parsed).await {
+        Ok(c) => c,
+        Err(e) => return print_error_and_fail("task rollback", &e),
+    };
+    let response = client
+        .call(Request::TaskRollback(TaskRollbackRequest {
+            task_id,
+            checkpoint_id,
+        }))
+        .await;
+    match &response {
+        Response::Error(e) => print_error_and_fail("task rollback", &e.message),
+        _ if parsed.json => {
+            println!("{}", render::to_json(&response));
+            ExitCode::SUCCESS
+        }
+        Response::TaskRollback(r) => {
+            println!("rolled back {} file(s):", r.reverted_entries);
+            for f in &r.restored_files {
+                println!("  {f}");
+            }
+            ExitCode::SUCCESS
+        }
+        other => print_error_and_fail("task rollback", &format!("unexpected response: {other:?}")),
+    }
+}
+
 async fn cmd_task_status(raw: Vec<String>) -> ExitCode {
     let parsed = match parse(&raw) {
         Ok(p) => p,
@@ -301,18 +595,23 @@ async fn cmd_task_status(raw: Vec<String>) -> ExitCode {
         Ok(c) => c,
         Err(e) => return print_error_and_fail("task status", &e),
     };
-    match client
+    let response = client
         .call(Request::TaskStatus(TaskStatusRequest { task_id }))
-        .await
-    {
+        .await;
+    match &response {
+        Response::TaskStatus(status) if parsed.json => {
+            let _ = status;
+            println!("{}", render::to_json(&response));
+            ExitCode::SUCCESS
+        }
         Response::TaskStatus(status) => {
             println!("task_id: {}", status.task_id);
             println!("objective: {}", status.objective);
             println!("state: {}", status.state);
-            if let Some(paused_from) = status.paused_from {
+            if let Some(paused_from) = &status.paused_from {
                 println!("paused_from: {paused_from}");
             }
-            if let Some(note) = status.recovery_note {
+            if let Some(note) = &status.recovery_note {
                 println!("recovery_note: {note}");
             }
             ExitCode::SUCCESS
@@ -345,12 +644,8 @@ async fn cmd_task_signal(
     }
 }
 
-/// Unlike `pause`/`cancel` (durable, fire-and-forget requests another
-/// process's driver will notice), resuming spawns a *new* driver in *this*
-/// process (there is no other process already running one — that's the
-/// point of resuming). So this waits for it to actually progress, the same
-/// way `run` does, rather than returning the moment the resume request is
-/// acked.
+/// Resuming spawns a *new* driver (embedded) or asks the daemon to; either
+/// way this waits for real progress, the same as `run`.
 async fn cmd_task_resume(raw: Vec<String>) -> ExitCode {
     let parsed = match parse(&raw) {
         Ok(p) => p,
@@ -365,8 +660,9 @@ async fn cmd_task_resume(raw: Vec<String>) -> ExitCode {
         Err(e) => return print_error_and_fail("task resume", &e),
     };
     let resume_task_id = task_id.clone();
-    watch_established_task_to_terminal(&client, &task_id, parsed.events, async {
-        match client
+    let client_ref = client.clone();
+    watch_established_task_to_terminal(client.as_ref(), &task_id, parsed.events, async move {
+        match client_ref
             .call(Request::TaskResume(TaskIdRequest {
                 task_id: resume_task_id,
             }))
@@ -402,13 +698,9 @@ async fn cmd_permission_resolve(raw: Vec<String>) -> ExitCode {
     };
     let resolve_task_id = task_id.clone();
     let approve = parsed.allow;
-    // Approving may let the driver run all the way to completion, on a
-    // task `tokio::spawn`ed inside *this* process — wait for it (same
-    // reasoning as `cmd_task_resume`) rather than exiting immediately and
-    // abandoning it. A denial resolves to `Failed` almost instantly, so
-    // this returns quickly either way.
-    watch_established_task_to_terminal(&client, &task_id, parsed.events, async {
-        match client
+    let client_ref = client.clone();
+    watch_established_task_to_terminal(client.as_ref(), &task_id, parsed.events, async move {
+        match client_ref
             .call(Request::PermissionResolve(PermissionResolveRequest {
                 task_id: resolve_task_id,
                 approve,

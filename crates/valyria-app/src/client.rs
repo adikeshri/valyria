@@ -1,19 +1,26 @@
-//! `EmbeddedClient`: the Phase 3 implementation of `valyria_protocol::
-//! Client` — the runtime linked in-process, per D11's default. A future
-//! daemon transport (Phase 10) implements the same trait against a socket;
-//! no `valyria-cli` call site changes when that lands.
+//! `EmbeddedClient`: the in-process implementation of `valyria_protocol::
+//! Client` — the runtime linked directly, per D11's default. The
+//! Unix-socket daemon ([`crate::daemon::serve`]) wraps *this same type*,
+//! so no `valyria-cli` call site changes between the two transports.
 
 use std::sync::Arc;
 
 use futures::stream::{BoxStream, StreamExt};
 use valyria_events::{Delivery, EventEnvelope, Seq};
 use valyria_protocol::{
-    Client, HelloResponse, PermissionResolveRequest, Request, Response, TaskCreateResponse,
-    TaskIdRequest, TaskStatusResponse, WireError, WireEvent, PROTOCOL_VERSION,
+    capability, Client, ConfigEntryWire, ConfigShowResponse, DoctorCheckWire, DoctorRunResponse,
+    HelloResponse, MemoryEntryWire, MemoryListRequest, MemoryListResponse, ModelListResponse,
+    ModelSummaryWire, PermissionResolveRequest, PlanGetResponse, PlanStepSummary, PurgeResponse,
+    Request, Response, StorageEntryWire, StorageInspectResponse, StoragePurgeRequest,
+    TaskCreateResponse, TaskIdRequest, TaskListResponse, TaskReportResponse, TaskRollbackRequest,
+    TaskRollbackResponse, TaskStatusResponse, TaskSummary, VerifiedClaimWire, WireError, WireEvent,
+    WorkspaceStatusResponse, PROTOCOL_VERSION,
 };
-use valyria_types::{ErrorCode, TaskId};
+use valyria_types::{CheckpointId, ErrorCode, TaskId};
 
+use crate::doctor::CheckStatus;
 use crate::runtime::Runtime;
+use crate::storage::PurgeScope;
 
 pub struct EmbeddedClient {
     runtime: Arc<Runtime>,
@@ -51,6 +58,16 @@ fn task_id_from(req: TaskIdRequest) -> Result<TaskId, Response> {
     parse_task_id(&req.task_id)
 }
 
+fn task_summary(t: &valyria_task::Task) -> TaskSummary {
+    TaskSummary {
+        task_id: t.id.to_string(),
+        objective: t.objective.clone(),
+        state: t.state.to_string(),
+        created_at_ms: t.created_at.as_millis() as u64,
+        updated_at_ms: t.updated_at.as_millis() as u64,
+    }
+}
+
 #[async_trait::async_trait]
 impl Client for EmbeddedClient {
     async fn call(&self, req: Request) -> Response {
@@ -58,6 +75,7 @@ impl Client for EmbeddedClient {
             Request::Hello(_) => Response::Hello(HelloResponse {
                 protocol_version: PROTOCOL_VERSION.to_string(),
                 runtime_version: env!("CARGO_PKG_VERSION").to_string(),
+                capabilities: capability::ALL.iter().map(|s| s.to_string()).collect(),
             }),
             Request::TaskCreate(r) => match self.runtime.create_and_start_task(r.objective).await {
                 Ok(task_id) => Response::TaskCreate(TaskCreateResponse {
@@ -79,6 +97,108 @@ impl Client for EmbeddedClient {
                         recovery_note: task.recovery_note,
                     }),
                     Err(e) => error_response(e),
+                }
+            }
+            Request::TaskList(_) => match self.runtime.list_tasks().await {
+                Ok(tasks) => Response::TaskList(TaskListResponse {
+                    tasks: tasks.iter().map(task_summary).collect(),
+                }),
+                Err(e) => error_response(e),
+            },
+            Request::TaskReport(r) => {
+                let task_id = match task_id_from(r) {
+                    Ok(id) => id,
+                    Err(resp) => return resp,
+                };
+                match self.runtime.completion_report(task_id).await {
+                    Ok(report) => Response::TaskReport(TaskReportResponse {
+                        task_id: report.task_id.to_string(),
+                        status: serde_json::to_value(report.status)
+                            .ok()
+                            .and_then(|v| v.as_str().map(str::to_string))
+                            .unwrap_or_else(|| "not_verified".to_string()),
+                        verified: report
+                            .verified
+                            .into_iter()
+                            .map(|v| VerifiedClaimWire {
+                                kind: v.kind,
+                                command: v.command,
+                                outcome: v.outcome,
+                                run_id: v.run_id,
+                            })
+                            .collect(),
+                        unverified: report.unverified,
+                    }),
+                    Err(e) => error_response(e),
+                }
+            }
+            Request::TaskPlan(r) => {
+                let task_id = match task_id_from(r) {
+                    Ok(id) => id,
+                    Err(resp) => return resp,
+                };
+                match self.runtime.plan(task_id).await {
+                    Ok(Some(rev)) => Response::TaskPlan(PlanGetResponse {
+                        revision: Some(rev.revision),
+                        content_hash: Some(rev.plan.content_hash().to_hex()),
+                        steps: rev
+                            .plan
+                            .steps
+                            .iter()
+                            .map(|s| PlanStepSummary {
+                                id: s.id.to_string(),
+                                intent: s.intent.clone(),
+                                targets: s
+                                    .targets
+                                    .iter()
+                                    .map(|p| p.display().to_string())
+                                    .collect(),
+                                depends_on: s.depends_on.iter().map(|d| d.to_string()).collect(),
+                                rollback_boundary: s.rollback_boundary,
+                                checkpoint: s.checkpoint,
+                            })
+                            .collect(),
+                    }),
+                    Ok(None) => Response::TaskPlan(PlanGetResponse {
+                        revision: None,
+                        content_hash: None,
+                        steps: vec![],
+                    }),
+                    Err(e) => error_response(e),
+                }
+            }
+            Request::TaskRollback(TaskRollbackRequest {
+                task_id,
+                checkpoint_id,
+            }) => {
+                let task_id = match parse_task_id(&task_id) {
+                    Ok(id) => id,
+                    Err(resp) => return resp,
+                };
+                let checkpoint_id = match checkpoint_id.parse::<CheckpointId>() {
+                    Ok(id) => id,
+                    Err(_) => {
+                        return error_response_raw(
+                            "app.invalid_checkpoint_id",
+                            format!("not a valid checkpoint id: {checkpoint_id}"),
+                            false,
+                        )
+                    }
+                };
+                match self
+                    .runtime
+                    .rollback_to_checkpoint(task_id, checkpoint_id)
+                    .await
+                {
+                    Ok(report) => Response::TaskRollback(TaskRollbackResponse {
+                        reverted_entries: report.reverted.len() as u64,
+                        restored_files: report
+                            .reverted
+                            .iter()
+                            .map(|p| p.display().to_string())
+                            .collect(),
+                    }),
+                    Err(e) => error_response_raw("app.rollback", e.to_string(), false),
                 }
             }
             Request::TaskPause(r) => {
@@ -121,17 +241,131 @@ impl Client for EmbeddedClient {
                     Err(e) => error_response(e),
                 }
             }
-            Request::EventsSubscribe(_) => {
-                // Handled by `subscribe_events`, not `call` — a client that
-                // routes this through `call` gets a clear error rather than
-                // a silent no-op.
-                error_response_raw(
-                    "protocol.use_subscribe_events",
-                    "events.subscribe must be issued via Client::subscribe_events, not call"
-                        .to_string(),
-                    false,
-                )
+            Request::WorkspaceStatus(_) => {
+                let index_generation = self
+                    .runtime
+                    .current_index_generation()
+                    .await
+                    .unwrap_or(None);
+                let tasks = self.runtime.list_tasks().await.unwrap_or_default();
+                let active = tasks.iter().filter(|t| !t.state.is_terminal()).count() as u32;
+                Response::WorkspaceStatus(WorkspaceStatusResponse {
+                    workspace_id: self.runtime.workspace_id().to_string(),
+                    root: self.runtime.workspace_path().display().to_string(),
+                    data_dir: self.runtime.data_dir().display().to_string(),
+                    index_generation,
+                    active_tasks: active,
+                    total_tasks: tasks.len() as u32,
+                })
             }
+            Request::DoctorRun(_) => {
+                let report = self.runtime.doctor().await;
+                let summary = status_str(report.summary());
+                Response::DoctorRun(DoctorRunResponse {
+                    checks: report
+                        .checks
+                        .into_iter()
+                        .map(|c| DoctorCheckWire {
+                            name: c.name,
+                            status: status_str(c.status).to_string(),
+                            detail: c.detail,
+                            remediation: c.remediation,
+                        })
+                        .collect(),
+                    summary: summary.to_string(),
+                })
+            }
+            Request::StorageInspect(_) => {
+                let report = self.runtime.storage_inspect();
+                Response::StorageInspect(StorageInspectResponse {
+                    total_bytes: report.total_bytes(),
+                    entries: report
+                        .entries
+                        .into_iter()
+                        .map(|e| StorageEntryWire {
+                            name: e.name,
+                            bytes: e.bytes,
+                            detail: e.detail,
+                            purgeable: e.purgeable,
+                        })
+                        .collect(),
+                })
+            }
+            Request::StoragePurge(StoragePurgeRequest { scope, dry_run }) => {
+                let Some(scope) = PurgeScope::parse(&scope) else {
+                    return error_response_raw(
+                        "app.unknown_purge_scope",
+                        format!(
+                            "unknown purge scope `{scope}` (expected: memory, cache, tasks, logs)"
+                        ),
+                        false,
+                    );
+                };
+                match self.runtime.storage_purge(scope, dry_run).await {
+                    Ok(out) => Response::Purge(PurgeResponse {
+                        freed_bytes: out.freed_bytes,
+                        items_removed: out.items_removed,
+                        dry_run: out.dry_run,
+                    }),
+                    Err(e) => error_response(e),
+                }
+            }
+            Request::ConfigShow(_) => match self.runtime.config_show() {
+                Ok(entries) => Response::ConfigShow(ConfigShowResponse {
+                    entries: entries
+                        .into_iter()
+                        .map(|(key, value, origin)| ConfigEntryWire { key, value, origin })
+                        .collect(),
+                }),
+                Err(e) => error_response(e),
+            },
+            Request::MemoryList(MemoryListRequest { query, limit }) => {
+                let limit = limit.unwrap_or(20).min(200) as usize;
+                match self.runtime.memory_list(query.as_deref(), limit).await {
+                    Ok(entries) => Response::MemoryList(MemoryListResponse {
+                        entries: entries
+                            .into_iter()
+                            .map(|e| {
+                                let ec = e.effective_confidence(
+                                    chrono_now_ms(),
+                                    valyria_memory::DEFAULT_HALF_LIFE_MS,
+                                );
+                                MemoryEntryWire {
+                                    id: e.id.to_string(),
+                                    kind: format!("{:?}", e.kind).to_lowercase(),
+                                    scope: memory_scope_str(&e.scope).to_string(),
+                                    author: format!("{:?}", e.author).to_lowercase(),
+                                    text: e.text,
+                                    effective_confidence: ec,
+                                }
+                            })
+                            .collect(),
+                    }),
+                    Err(e) => error_response(e),
+                }
+            }
+            Request::ModelList(_) => match self.runtime.model_list().await {
+                Ok(pairs) => Response::ModelList(ModelListResponse {
+                    models: pairs
+                        .into_iter()
+                        .map(|(c, installed)| ModelSummaryWire {
+                            id: c.id,
+                            family: c.family,
+                            quantization: c.quantization.as_str().to_string(),
+                            size_bytes: c.file_size_bytes,
+                            installed,
+                            license: c.license_name,
+                        })
+                        .collect(),
+                }),
+                Err(e) => error_response(e),
+            },
+            Request::EventsSubscribe(_) => error_response_raw(
+                "protocol.use_subscribe_events",
+                "events.subscribe must be issued via Client::subscribe_events, not call"
+                    .to_string(),
+                false,
+            ),
         }
     }
 
@@ -158,6 +392,27 @@ impl Client for EmbeddedClient {
         })
         .boxed()
     }
+}
+
+fn status_str(s: CheckStatus) -> &'static str {
+    s.as_str()
+}
+
+fn memory_scope_str(scope: &valyria_memory::MemoryScope) -> &'static str {
+    use valyria_memory::MemoryScope;
+    match scope {
+        MemoryScope::Session(_) => "session",
+        MemoryScope::Task(_) => "task",
+        MemoryScope::Repository => "repository",
+        MemoryScope::User => "user",
+    }
+}
+
+fn chrono_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 fn to_wire_event(env: EventEnvelope) -> WireEvent {

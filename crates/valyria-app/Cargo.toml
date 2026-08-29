@@ -15,7 +15,10 @@ valyria-types = { workspace = true }
 valyria-util = { workspace = true }
 valyria-store = { workspace = true }
 valyria-events = { workspace = true }
+valyria-config = { workspace = true }
 valyria-vfs = { workspace = true }
+valyria-hardware = { workspace = true }
+valyria-git = { workspace = true }
 valyria-index = { workspace = true }
 valyria-graph = { workspace = true }
 valyria-embed = { workspace = true }
@@ -25,6 +28,8 @@ valyria-ledger = { workspace = true }
 valyria-tools = { workspace = true }
 valyria-verify = { workspace = true }
 valyria-model = { workspace = true }
+valyria-model-registry = { workspace = true }
+valyria-model-store = { workspace = true }
 valyria-runtime-fake = { workspace = true }
 valyria-orchestrator = { workspace = true }
 valyria-context = { workspace = true }
@@ -39,7 +44,7 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["net"] }
 async-trait = { workspace = true }
 futures = { workspace = true }
 

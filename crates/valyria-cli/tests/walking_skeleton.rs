@@ -15,6 +15,27 @@ fn cli_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_valyria"))
 }
 
+/// One throwaway `~/.valyria` for the whole test binary, so the real
+/// compiled `valyria` never touches the developer's actual global store
+/// (`global.db`, the model index) while these tests run.
+fn test_home() -> &'static Path {
+    use std::sync::OnceLock;
+    static HOME: OnceLock<PathBuf> = OnceLock::new();
+    HOME.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("valyria-it-home-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    })
+    .as_path()
+}
+
+/// `valyria` bin with `VALYRIA_HOME` pinned to [`test_home`].
+fn cli_command() -> Command {
+    let mut cmd = Command::new(cli_bin());
+    cmd.env("VALYRIA_HOME", test_home());
+    cmd
+}
+
 /// A git fixture repo the CLI can be pointed at with `--workspace`.
 fn fixture_repo() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
@@ -52,7 +73,7 @@ fn fixture_content(ws: &Path) -> String {
 }
 
 fn valyria(args: &[&str]) -> std::process::Output {
-    Command::new(cli_bin()).args(args).output().unwrap()
+    cli_command().args(args).output().unwrap()
 }
 
 /// Spawns `valyria run` with stdout piped, reads (and returns) exactly the
@@ -63,7 +84,7 @@ fn spawn_run(
     workspace: &Path,
     extra_args: &[&str],
 ) -> (Child, BufReader<std::process::ChildStdout>, String) {
-    let mut cmd = Command::new(cli_bin());
+    let mut cmd = cli_command();
     cmd.arg("run")
         .arg("add a function")
         .arg("--workspace")

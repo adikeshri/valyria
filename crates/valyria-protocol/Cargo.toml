@@ -16,9 +16,12 @@ valyria-util = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+schemars = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
+tokio = { workspace = true, features = ["net", "io-util", "sync"] }
 
 [dev-dependencies]
 valyria-testkit = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "net", "io-util", "time"] }

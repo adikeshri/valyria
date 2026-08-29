@@ -7,12 +7,15 @@ models that run on your own machine. There is no cloud service, no telemetry,
 and no network dependency at runtime — the offline test job in CI exists to
 keep it that way.
 
-> **Status: early.** The workspace is a ~40-crate skeleton in which phases 0–6
-> of [the build plan](docs/PLAN.md) are implemented and the remaining phases are
-> scaffolded stubs. The end-to-end agent loop runs today against a deterministic
-> **fake** model; real model runtimes (llama.cpp, MLX, OpenAI-compatible
-> servers) land in Phase 9. See [docs/ROADMAP.md](docs/ROADMAP.md) for what is
-> and is not built.
+> **Status: early.** The workspace is a ~40-crate skeleton in which phases 0–10
+> of [the build plan](docs/PLAN.md) are implemented; only Phase 11 (hardening,
+> benchmarking, cross-platform matrix) remains. The end-to-end agent loop runs
+> today against a deterministic **fake** model; the real model runtimes
+> (llama.cpp, MLX) landed as documented scaffolds in Phase 9, behind a working
+> OpenAI-compatible adapter. The runtime is drivable through a frozen v1
+> protocol — embedded, over a Unix-socket daemon, from the full CLI, or from the
+> TUI (`valyria` with no arguments). See [docs/ROADMAP.md](docs/ROADMAP.md) for
+> what is and is not built.
 
 ---
 
@@ -30,6 +33,15 @@ keep it that way.
 That path is covered by an integration test that drives the real compiled
 binary against a real git fixture repo
 ([crates/valyria-cli/tests/walking_skeleton.rs](crates/valyria-cli/tests/walking_skeleton.rs)).
+
+Around it sits the full interface: `valyria task list|status|report|plan|rollback`,
+`valyria doctor` (a ten-check environment diagnosis), `valyria clean` and
+`valyria status` (storage inspection), `valyria config` / `model list` /
+`memory list`, a `valyria serve` daemon that speaks the same frozen v1 protocol
+over a Unix socket (`--connect <socket>` on any command), and an interactive
+TUI (`valyria` with no arguments). The wire contract is exported as JSON Schema
+under [docs/protocol/](docs/protocol/) and a CI gate fails any unversioned
+change to it.
 
 Underneath it, the repository-intelligence layer understands the code rather
 than just its bytes:

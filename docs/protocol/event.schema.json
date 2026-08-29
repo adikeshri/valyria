@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "WireEvent",
+  "description": "A projected event (§43), independent of transport. `kind`/`payload` mirror `valyria_events::EventEnvelope` — deliberately loose-typed (`kind` as a string, `payload` as raw JSON) since new event kinds and payload shapes are added by many crates over the life of the project, and the wire schema shouldn't need a breaking change every time one is.",
+  "type": "object",
+  "required": [
+    "kind",
+    "payload",
+    "seq",
+    "ts_ms"
+  ],
+  "properties": {
+    "kind": {
+      "type": "string"
+    },
+    "payload": true,
+    "seq": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "task_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "ts_ms": {
+      "type": "integer",
+      "format": "uint128",
+      "minimum": 0.0
+    }
+  }
+}
