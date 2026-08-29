@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish = false
 description = "ProcessLauncher/FsGuard traits + platform impls, confinement reporting (§21)."
 
 [package.metadata.valyria]

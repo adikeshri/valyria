@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish = false
 description = "Tool trait, JSON-Schema registry, first-class tools, invocation records (§17, §18)."
 
 [package.metadata.valyria]

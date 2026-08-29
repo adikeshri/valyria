@@ -1,0 +1,6 @@
+# Force LF on checkout for every platform. Without this, a Windows CI
+# runner with core.autocrlf=true checks the tree out with CRLF endings,
+# which breaks byte-exact comparisons against generated artifacts — e.g.
+# `cargo xtask check-protocol` diffing docs/protocol/ against the
+# LF-serialized wire schema.
+* text=auto eol=lf

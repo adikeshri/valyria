@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish = false
 description = "OS/CPU/RAM/GPU/VRAM/unified-memory/accelerator/disk probing, capability scoring (§39, §41)."
 
 [package.metadata.valyria]

@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish = false
 description = "gix-backed status/diff/log/blame/show/branches/renames/merge state; writes behind permission (§24)."
 
 [package.metadata.valyria]

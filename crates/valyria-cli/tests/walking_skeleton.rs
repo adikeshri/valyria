@@ -15,18 +15,21 @@ fn cli_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_valyria"))
 }
 
-/// One throwaway `~/.valyria` for the whole test binary, so the real
-/// compiled `valyria` never touches the developer's actual global store
-/// (`global.db`, the model index) while these tests run.
-fn test_home() -> &'static Path {
-    use std::sync::OnceLock;
-    static HOME: OnceLock<PathBuf> = OnceLock::new();
-    HOME.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("valyria-it-home-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    })
-    .as_path()
+/// A throwaway `~/.valyria` *per test*, so the real compiled `valyria`
+/// never touches the developer's actual global store (`global.db`, the
+/// model index) — and so tests running in parallel never share one
+/// `global.db` (which would race migrations and lock the file). Keyed by
+/// the libtest thread name, which is the test function's path and is
+/// stable for the life of the test, so every `valyria` invocation a
+/// single test makes lands in the same home.
+fn test_home() -> PathBuf {
+    let key = std::thread::current()
+        .name()
+        .unwrap_or("unnamed")
+        .replace([':', '/'], "_");
+    let dir = std::env::temp_dir().join(format!("valyria-it-home-{}-{key}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
 }
 
 /// `valyria` bin with `VALYRIA_HOME` pinned to [`test_home`].

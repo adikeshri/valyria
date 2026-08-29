@@ -237,6 +237,10 @@ async fn list_directory_reports_entries() {
     }
 }
 
+// Uses `/bin/echo` — a real spawned process, so Unix-only. The
+// `run_command` tool's stdout capture is covered platform-independently
+// by unit tests in `valyria-tools` and `valyria-process`.
+#[cfg(unix)]
 #[tokio::test]
 async fn run_command_executes_and_captures_output() {
     let h = harness(PermissionMode::Autonomous);

@@ -16,7 +16,7 @@ use std::thread::JoinHandle;
 use rusqlite::Connection;
 
 use crate::error::{Result, StoreError};
-use crate::migrations::{run_migrations, Migration};
+use crate::migrations::{run_migrations, Migration, BUSY_TIMEOUT};
 
 type Job = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
 
@@ -42,6 +42,12 @@ impl Store {
         }
 
         let mut conn = Connection::open(path)?;
+        // Set the busy timeout before the first lock-taking statement:
+        // sibling `valyria` processes (CLI, daemon, TUI) can be opening the
+        // same shared DB concurrently, and switching to WAL / running
+        // migrations briefly needs an exclusive lock. Without this the
+        // losing opener fails immediately with "database is locked".
+        conn.busy_timeout(BUSY_TIMEOUT)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
