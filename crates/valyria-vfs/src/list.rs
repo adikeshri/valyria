@@ -45,7 +45,7 @@ mod tests {
                 p.strip_prefix(ws.path())
                     .unwrap()
                     .to_string_lossy()
-                    .into_owned()
+                    .replace('\\', "/")
             })
             .collect();
 
@@ -69,7 +69,7 @@ mod tests {
                 p.strip_prefix(ws.path())
                     .unwrap()
                     .to_string_lossy()
-                    .into_owned()
+                    .replace('\\', "/")
             })
             .collect();
 
