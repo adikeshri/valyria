@@ -3,7 +3,10 @@
 //! *and* over the daemon socket), and `doctor` diagnoses the environment.
 
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
+#[cfg(unix)]
+use std::process::Stdio;
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 fn cli_bin() -> PathBuf {
@@ -219,6 +222,10 @@ fn clean_dry_run_reports_without_deleting() {
     assert!(cache.join("blob").exists(), "dry run must not delete");
 }
 
+// The daemon transport is a Unix-domain socket (`valyria_app::daemon`),
+// so this end-to-end test is Unix-only; on other platforms `valyria
+// serve` exits with `Unsupported` and never binds a socket.
+#[cfg(unix)]
 #[test]
 fn daemon_serves_the_same_protocol_over_a_unix_socket() {
     let env = setup();
