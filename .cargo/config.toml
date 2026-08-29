@@ -1,0 +1,5 @@
+[alias]
+# `cargo xtask …` runs the workspace's task runner (crate `xtask/`).
+# Referenced by docs/BENCHMARKS.md and the `bench` / `release-gates`
+# CI jobs in .github/workflows/ci.yml.
+xtask = "run --quiet --package xtask --"

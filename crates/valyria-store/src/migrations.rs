@@ -3,7 +3,9 @@
 //! version is recorded in `schema_migrations` so re-running `migrate` is
 //! idempotent.
 
-use rusqlite::Connection;
+use std::time::Duration;
+
+use rusqlite::{Connection, TransactionBehavior};
 
 use crate::error::{Result, StoreError};
 
@@ -14,7 +16,18 @@ pub struct Migration {
     pub sql: &'static str,
 }
 
+/// How long an opener waits for a competing writer before giving up.
+/// Several `valyria` processes (CLI, daemon, TUI) can race to open the
+/// shared `~/.valyria/global.db` at once; without a busy timeout the
+/// losers fail immediately with "database is locked".
+pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub fn run_migrations(conn: &mut Connection, migrations: &[Migration]) -> Result<()> {
+    conn.busy_timeout(BUSY_TIMEOUT)?;
+
+    // Created in autocommit so it survives a later migration failure (the
+    // per-migration work below runs in a transaction that rolls back on
+    // error). `IF NOT EXISTS` keeps concurrent openers from colliding here.
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_migrations (
             version INTEGER PRIMARY KEY,
@@ -26,8 +39,16 @@ pub fn run_migrations(conn: &mut Connection, migrations: &[Migration]) -> Result
     let mut sorted: Vec<&Migration> = migrations.iter().collect();
     sorted.sort_by_key(|m| m.version);
 
+    // One IMMEDIATE transaction for the whole run: it takes the write lock
+    // up front, so a second process reaching this point blocks (up to the
+    // busy timeout) and then sees every migration already recorded, rather
+    // than re-running a `CREATE TABLE` and hitting "table ... already
+    // exists". SQLite DDL is transactional, so a failure part-way through
+    // rolls the batch back cleanly.
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
     for migration in sorted {
-        let already_applied: bool = conn.query_row(
+        let already_applied: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)",
             [migration.version],
             |row| row.get(0),
@@ -36,7 +57,6 @@ pub fn run_migrations(conn: &mut Connection, migrations: &[Migration]) -> Result
             continue;
         }
 
-        let tx = conn.transaction()?;
         tx.execute_batch(migration.sql)
             .map_err(|e| StoreError::Migration {
                 version: migration.version,
@@ -54,13 +74,14 @@ pub fn run_migrations(conn: &mut Connection, migrations: &[Migration]) -> Result
             version: migration.version,
             source: e,
         })?;
-        tx.commit()?;
         tracing::info!(
             version = migration.version,
             description = migration.description,
             "applied migration"
         );
     }
+
+    tx.commit()?;
 
     Ok(())
 }

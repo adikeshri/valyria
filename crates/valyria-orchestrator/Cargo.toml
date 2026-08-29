@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish = false
 description = "Role routing, model pool + admission control, tool-call transport ladder (D5), structured output, retry/repair."
 
 [package.metadata.valyria]

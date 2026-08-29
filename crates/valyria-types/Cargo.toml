@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish = false
 description = "IDs, domain enums, Trust/Provenance/Evidence, and the error taxonomy. No I/O."
 
 [package.metadata.valyria]

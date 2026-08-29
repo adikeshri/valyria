@@ -14,7 +14,9 @@ use std::sync::Arc;
 
 use futures::stream::{BoxStream, StreamExt};
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 
@@ -84,6 +86,7 @@ impl SocketClient {
         &self.path
     }
 
+    #[cfg(unix)]
     async fn call_inner(&self, req: Request) -> std::io::Result<Response> {
         let _guard = self.connect_lock.lock().await;
         let stream = UnixStream::connect(&self.path).await?;
@@ -116,6 +119,22 @@ fn transport_error(message: impl std::fmt::Display) -> Response {
     })
 }
 
+#[cfg(not(unix))]
+#[async_trait::async_trait]
+impl Client for SocketClient {
+    async fn call(&self, _req: Request) -> Response {
+        let _guard = self.connect_lock.lock().await;
+        transport_error(
+            "the valyria daemon transport requires a Unix platform (Unix-domain socket)",
+        )
+    }
+
+    async fn subscribe_events(&self, _since: u64) -> BoxStream<'static, WireEvent> {
+        futures::stream::empty().boxed()
+    }
+}
+
+#[cfg(unix)]
 #[async_trait::async_trait]
 impl Client for SocketClient {
     async fn call(&self, req: Request) -> Response {

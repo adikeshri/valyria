@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish = false
 description = "Modes, categories, rule evaluation, Authorization minting, approval flow (§22, D2)."
 
 [package.metadata.valyria]

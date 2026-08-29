@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish = false
 description = "Deterministic scripted model (D12) used across the agent test suite."
 
 [package.metadata.valyria]

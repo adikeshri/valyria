@@ -14,7 +14,25 @@ targets = [
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+    # gitoxide (via valyria-git, gix 0.66) transitively pulls these in.
+    # Both are inherent to gitoxide's current design, not fixed by any
+    # release we can reach without a major gix bump, and neither is
+    # reachable in a way that affects valyria:
+    #   - RUSTSEC-2025-0021: gix-features hashes objects with plain SHA-1
+    #     and does not detect deliberate collision attacks. valyria only
+    #     ever reads its own freshly-written objects in a local repo.
+    #   - RUSTSEC-2025-0140: gix-date `TimeBuf::as_str` can construct a
+    #     non-UTF8 &str; valyria does not call it.
+    "RUSTSEC-2025-0021",
+    "RUSTSEC-2025-0140",
+    # `instant` (unmaintained) and `paste` (unmaintained, archived) are
+    # transitive-only: `instant` via a dependency's wasm path we never
+    # build, `paste` via ratatui 0.29 (macro-only, no runtime code).
+    # No advisory of a vulnerability, just maintenance status.
+    "RUSTSEC-2024-0384",
+    "RUSTSEC-2024-0436",
+]
 
 [licenses]
 version = 2
@@ -35,6 +53,10 @@ confidence-threshold = 0.8
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# The workspace's own `valyria-*` crates depend on each other by `path`
+# with no version req, which cargo-deny sees as a wildcard. That is the
+# normal shape of an unpublished workspace, not a real wildcard dep.
+allow-wildcard-paths = true
 deny = []
 
 [sources]
