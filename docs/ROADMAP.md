@@ -12,7 +12,7 @@ Status vocabulary:
 - **scaffolded** — the crate compiles, declares its layer and phase, and is
   wired into the layering check. No implementation yet.
 
-Last updated: 2026-08-29 (after Phase 10).
+Last updated: 2026-08-29 (after Phase 11).
 
 ---
 
@@ -31,10 +31,82 @@ Last updated: 2026-08-29 (after Phase 10).
 | 8 | Planning and multi-agent: `plan`, checkpoints, rollback boundaries, sub-tasks | **partial** — the plan model, validator (nine structured error codes), dependency/wave scheduler, checkpoint capture + ledger-backed rollback, the five multi-agent roles + typed artifacts, and the `PlanStore` (migration block 800-899) are implemented and tested; the driver runs `Planning` as a model-authored, validated, bounded-repair plan and executes it step by step with a checkpoint at each rollback boundary. Deferred: spawning a role as its own child task (sub-agents), real parallel step execution, index-backed target resolution, and verification interleaved *between* steps (the mandatory full `Verifying` run is the backstop) |
 | 9 | Real models: `runtime-llamacpp`, `runtime-mlx`, `runtime-openai-compat`, registry, store, model pool | **partial** — the embedded `ModelCard` catalog + hardware-fit selection, the verified resumable download store (migration block 900-999), the `OpenAiCompatRuntime` adapter (behind an `HttpTransport` seam), and the orchestrator's tool-call transport ladder + memory-aware model pool + fallback-chain router are all implemented and tested offline. Deferred (open decision 5, solo build): the concrete `reqwest` transport, the real GGUF-loading probe, the `runtime-llamacpp` / `runtime-mlx` adapters, and wiring the ladder/pool/router into the live agent loop |
 | 10 | Interface completion: protocol v1 freeze, schema export + compat gate, full CLI, TUI, `doctor`, `clean`, `global.db`, daemon | **partial** — the frozen v1 protocol (all workflow operations), the schema-export + `xtask check-protocol` CI gate, the `SocketClient`/`serve` daemon transport, `GlobalStore` (`~/.valyria/global.db`), `Doctor` (ten checks), `StorageInspector` (`inspect`/`purge`), the full CLI subcommand tree with `--json`/`--connect`, and the ratatui TUI session are all implemented and tested. Deferred: a multi-workspace daemon, length-prefixed framing, TypeScript type export, and `doctor`'s live sandbox self-test |
-| 11 | Hardening and evaluation: `bench`, fuzzing, perf work, cross-platform matrix, release gates | not started |
+| 11 | Hardening and evaluation: `bench`, fuzzing, perf work, cross-platform matrix, release gates | **partial** — the `valyria-bench` harness (executable-oracle task model, seven-category offline fixture suite driving the real runtime, metrics, `compare`, recorded baseline), the `bench` / `property` / `release-gates` CI jobs, `cargo xtask bench [--bless]` + `cargo xtask release-gates`, property/fuzz suites for the patch/diff parser, protocol frame decoder and tool-input canonicaliser, a §9 perf-budget smoke check, and the machine-checked §6 acceptance mapping (`docs/ACCEPTANCE.md` + `crates/valyria-bench/tests/acceptance.rs`) all shipped. Deferred: a run of the suite against a *real* local model (needs a live `llama-server`), the pinned-real-repo corpus for the scale perf budgets (100k-file index, incremental p95, search at scale), a SWE-bench-style external adapter, `cargo-fuzz` nightly targets, and the full cross-platform sandbox-confinement matrix (still Phase 1) |
 
 Phase 9 can start early against the OpenAI-compatible adapter (a locally running
 `llama-server`) without waiting for any FFI work.
+
+---
+
+## What Phase 11 delivered
+
+The runtime now **grades itself**. `valyria-bench` turns "did the agent
+actually do the job?" into an executable check, a fixture suite of those
+checks is a CI regression gate, and the parser surfaces that fuzz badly
+are fuzzed.
+
+**A benchmark task is `{ repo, objective, setup, oracle }` — and the
+oracle is code, not a model's word.** `valyria_bench::BenchTask` carries
+a `RepoSpec` (files laid into a temp dir), the objective string a user
+would type, a fake-model `Scenario` (D12) for the "setup", and a boxed
+`Oracle`. The oracle types are `CommandSucceeds { program, args }` (runs a
+real command in the finished workspace, passes on exit 0 — "the tests
+pass"), `ReportVerified` (the completion report's status, built only from
+durable verification runs — D4), `TaskCompleted`, `FileContains` /
+`FileLacks` / `FileExists`, `MaxFilesChanged`, `PathsUntouched`, and
+`All(...)`. `BenchRunner::run` materializes the repo, opens a **real**
+`valyria_app::Runtime` bound to the scenario, drives the task to a
+terminal state, diffs the on-disk tree for the changed-file set, projects
+the journal into `BenchMetrics`, and grades. Fully hermetic — throwaway
+workspace *and* throwaway `~/.valyria` — so it runs anywhere, offline.
+
+**The offline fixture suite is the orchestration regression gate.**
+`fixture_suite()` is one task per §4.30 category — feature add, verified
+bug fix, a `debugging_repair_loop` that fails verification and must go
+Diagnosing → Repairing → Verifying before `COMPLETED`, a symbol rename, a
+new test file, dependency-manifest editing, and a read-only exploration
+that must change **zero** files. All seven drive the real runtime + fake
+model with the network down and pass. `BenchReport` is a serializable,
+diffable artifact; `compare(baseline, current)` reports task-level
+regressions (was passing, now fails / newly missing) and cost-metric
+blow-ups (a big jump in model calls / tool calls / verification runs on a
+task that still passes). `docs/bench/baseline.json` is the committed
+baseline, wall-clock fields zeroed so it stays byte-stable.
+
+**Three new CI jobs, one aggregate gate.** `cargo xtask bench` runs the
+suite and fails on any regression against the committed baseline (`bench`
+job); `--bless` re-records it. A `property` job runs the proptest suites
+at a raised case count. `cargo xtask release-gates` (`release-gates` job)
+runs layering + protocol-compat + the benchmark baseline + the
+acceptance-doc check in one pass with a summary table.
+
+**The parsers §7 calls out are now fuzzed.** `proptest` suites:
+`valyria-edit/tests/fuzz_edit.rs` (the exact-replacement and unified-diff
+/ `diffy` parsers are total functions — arbitrary input is `Ok` or a
+typed `Err`, never a panic — plus a real single-hunk patch round-trips);
+`valyria-protocol/tests/fuzz_protocol.rs` (arbitrary bytes never panic the
+frame decoder; every constructible `Request` survives `encode_line` →
+`from_str`); `valyria-tools/tests/fuzz_tool_inputs.rs` (the D2
+`canonical_input_hash` is total, deterministic, and key-order-independent
+— the property the TOCTOU guarantee rests on — and a changed value always
+changes the hash).
+
+**Acceptance is machine-checked.** `docs/ACCEPTANCE.md` is the PLAN §6
+mapping with the concrete proving test for each of the 18 criteria;
+`crates/valyria-bench/tests/acceptance.rs` walks that table, runs the
+fixture suite as the end-to-end demonstration, and asserts every criterion
+is either demonstrated there or has a named test elsewhere — with exactly
+one documented deferral (the same suite against a real local model).
+
+**Performance budgets that need only a runtime are checked.**
+`valyria_bench::perf` measures task open / resume latency against the §9
+budgets, wired as an `#[ignore]`d test so a noisy runner never fails a
+build on a timing wobble (`cargo test -p valyria-bench --test perf --
+--ignored`). The scale budgets (100k-file cold index, incremental p95,
+search at scale) still need a pinned-real-repo corpus and a criterion
+setup — the documented follow-up.
+
+29 new tests; **1087 pass** across the workspace, up from 1058.
 
 ---
 
@@ -541,12 +613,16 @@ clear "not implemented in this phase" error rather than pretending:
 | The `--connect` daemon owns a single workspace (one `Runtime` behind the socket); a multi-workspace daemon with `workspace.open/close` routing is a follow-up | Phase 10 follow-up |
 | `xtask schema` exports JSON Schema only; the TypeScript type export §4.27 also mentions, `agent.events` length-prefixed framing, and `doctor`'s live sandbox self-test are follow-ups | Phase 10 follow-up |
 | `valyria memory list` needs a query — a browse-all memory surface over the protocol is a follow-up | Phase 10 follow-up |
+| `valyria-bench` runs offline fixture tasks against the fake model only; a run of the suite against a *real* local model, a pinned-real-repo corpus for the scale perf budgets, a SWE-bench-style external adapter, and `cargo-fuzz` nightly targets are not built | Phase 11 follow-up |
+| `valyria-bench` is its own binary + `cargo xtask bench`, not a `valyria benchmark` subcommand — kept out of `valyria-cli` so D11 ("the CLI cannot grow orchestration") stays literally true; a `bench.run` protocol op is a follow-up | Phase 11 follow-up |
+| Cross-platform matrix: the `test` job runs on macOS / Linux / Windows, but Linux/Windows sandbox *confinement* is still `PermissiveSandbox`, and LSP is still only exercised against a scripted server | Phase 1 completion |
 
 ### Phase 4 exit criteria not yet met
 
 The crates are built and tested; two of the phase's stated exit criteria are
-performance claims that need a measurement harness (`valyria-bench`, Phase 11)
-before they can honestly be asserted:
+performance claims that still need a large-repo run. Phase 11 built the
+`valyria-bench` harness and a `perf` module for the runtime-only budgets, but
+the pinned 100k-file corpus these two need is still a follow-up:
 
 - **Index a 100k-file repo within target; incremental update p95 < 200ms.** The
   design is built for it — parallel scan, one write transaction, a staged
@@ -567,6 +643,42 @@ Two further gaps are deliberate scope choices rather than unfinished work:
 - **LSP servers are configured but unexercised against real ones.** The client
   is fully tested against a scripted server; behaviour against a real
   rust-analyzer or gopls is untested, and belongs in the Phase 11 matrix.
+
+### Phase 11 exit criteria: status
+
+- **§52 gates enforced in CI.** Done — the machine-checkable gates each
+  have a job in `.github/workflows/ci.yml`: `fmt`, `clippy` (`-D
+  warnings`), `layering` (`xtask check-layering`), `protocol` (`xtask
+  check-protocol`, the §4.27 compat gate), `deny` (licenses +
+  advisories), `offline` (`cargo test --workspace --offline`), the
+  three-OS `test` matrix, `msrv`, and now `bench` (`xtask bench` — the
+  fixture suite + baseline diff), `property` (the proptest suites at a
+  raised case count), and `release-gates` (`xtask release-gates` — every
+  gate in one summarised pass). The injection red-team suite
+  (`valyria-context/tests/injection.rs`) and the D2 canonical-hash fuzz
+  keep the security-regression gates green.
+- **Benchmark baseline recorded.** Done —
+  `docs/bench/baseline.json` is a committed `BenchReport` (timing zeroed
+  for a stable diff); `cargo xtask bench` fails on any task-level
+  regression or cost-metric blow-up against it, and
+  `crates/valyria-bench/tests/suite.rs::a_fresh_run_is_clean_against_the_committed_baseline`
+  runs the same check inside `cargo test`. Re-record with `cargo xtask
+  bench --bless`.
+- **§53 acceptance criteria demonstrated end-to-end.** Done for the
+  offline slice — `docs/ACCEPTANCE.md` maps all 18 PLAN §6 criteria to a
+  concrete proving test, and
+  `crates/valyria-bench/tests/acceptance.rs` asserts each is either
+  demonstrated by the fixture suite (which drives the real
+  `valyria_app::Runtime` end to end, offline, graded by executable
+  oracles) or proven by a named test elsewhere.
+- **Deliberate scope choices:** the suite runs against the deterministic
+  fake model, not a real local one (needs a live `llama-server` — the
+  Phase 9/10 follow-up; every subsystem the real path depends on is
+  proven independently). The scale perf budgets (100k-file cold index,
+  incremental p95, search at scale) need a pinned-real-repo corpus and a
+  criterion setup; `valyria_bench::perf` covers only the runtime-only
+  budgets today. A SWE-bench-style external adapter, `cargo-fuzz` nightly
+  targets, and real Linux/Windows sandbox confinement are follow-ups.
 
 ### Phase 10 exit criteria: status
 

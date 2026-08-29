@@ -15,6 +15,55 @@ Work toward the first release. Phases refer to
 
 ### Added
 
+- **Phase 11 — hardening and evaluation.** The runtime now grades itself:
+  an executable-oracle benchmark harness, an offline fixture suite that is
+  a CI regression gate, property/fuzz suites for the parser surfaces, and
+  a machine-checked acceptance mapping.
+  - `valyria-bench` (was a scaffold, now implemented): `BenchTask =
+    { repo: RepoSpec, objective, scenario, oracle }`. `Oracle` is an
+    **executable** check — `CommandSucceeds { program, args }` (runs a
+    real command in the finished workspace, "the tests pass"),
+    `ReportVerified` (completion-report status, from durable runs only —
+    D4), `TaskCompleted`, `FileContains` / `FileLacks` / `FileExists`,
+    `MaxFilesChanged`, `PathsUntouched`, `All(...)`. `BenchRunner::run`
+    materializes the repo, opens a real `valyria_app::Runtime` bound to
+    the fake-model `Scenario`, drives the task to a terminal state, diffs
+    the on-disk tree for the changed-file set, projects the journal into
+    `BenchMetrics`, and grades — fully hermetic (throwaway workspace *and*
+    `~/.valyria`), offline. `fixture_suite()` is one task per §4.30
+    category (feature, verified bug fix, a Diagnosing→Repairing
+    `debugging_repair_loop`, refactor rename, test creation, dependency
+    edit, zero-change exploration); all seven pass against the real
+    runtime with the network down. `BenchReport` is serializable;
+    `compare(baseline, current)` flags task regressions and cost-metric
+    blow-ups. New `valyria-bench` binary (`run` / `baseline`) and a
+    `perf` module for the §9 runtime-only budgets (`#[ignore]`d).
+  - `xtask`: `bench [--bless]` (run the suite, diff against
+    `docs/bench/baseline.json`, fail on regression; `--bless` re-records)
+    and `release-gates` (layering + protocol compat + benchmark baseline
+    + the acceptance doc, one summarised pass). New CI jobs `bench`,
+    `property` (proptest suites at `PROPTEST_CASES=2048`) and
+    `release-gates` in `ci.yml`.
+  - Property / fuzz suites (§7): `valyria-edit/tests/fuzz_edit.rs` (the
+    exact-replacement and unified-diff / `diffy` parsers are total — any
+    input is `Ok` or a typed `Err`, never a panic — plus a real
+    single-hunk patch round-trips); `valyria-protocol/tests/fuzz_protocol.rs`
+    (arbitrary bytes never panic the frame decoder; every constructible
+    `Request` survives `encode_line` → `from_str`);
+    `valyria-tools/tests/fuzz_tool_inputs.rs` (D2 `canonical_input_hash`
+    is total, deterministic and key-order-independent — the property the
+    TOCTOU guarantee rests on).
+  - `docs/ACCEPTANCE.md` maps all 18 PLAN §6 criteria to a proving test;
+    `crates/valyria-bench/tests/acceptance.rs` asserts each is
+    demonstrated by the fixture suite or proven elsewhere, with one
+    documented deferral (the suite against a *real* local model).
+    `docs/BENCHMARKS.md` documents the harness.
+  - Deliberate scope: the suite runs against the deterministic fake model
+    (a real-`llama-server` run, a pinned-real-repo corpus for the scale
+    perf budgets, a SWE-bench adapter, `cargo-fuzz` nightly targets, and
+    real Linux/Windows sandbox confinement are follow-ups). 29 new tests;
+    1087 pass across the workspace.
+
 - **Phase 10 — interface completion.** The runtime is now drivable end to end
   through one frozen protocol — embedded, over a Unix-socket daemon, from a full
   CLI, or from an interactive TUI — plus `doctor`, `clean`, and the `global.db`

@@ -7,9 +7,12 @@ models that run on your own machine. There is no cloud service, no telemetry,
 and no network dependency at runtime — the offline test job in CI exists to
 keep it that way.
 
-> **Status: early.** The workspace is a ~40-crate skeleton in which phases 0–10
-> of [the build plan](docs/PLAN.md) are implemented; only Phase 11 (hardening,
-> benchmarking, cross-platform matrix) remains. The end-to-end agent loop runs
+> **Status: early.** The workspace is a ~40-crate skeleton in which phases 0–11
+> of [the build plan](docs/PLAN.md) are implemented (Phase 11 as an offline
+> slice: the `valyria-bench` evaluation harness, an executable-oracle fixture
+> suite that is a CI regression gate, property/fuzz suites, and a machine-checked
+> [acceptance mapping](docs/ACCEPTANCE.md) — a run against a *real* local model
+> and the large-repo performance corpus remain). The end-to-end agent loop runs
 > today against a deterministic **fake** model; the real model runtimes
 > (llama.cpp, MLX) landed as documented scaffolds in Phase 9, behind a working
 > OpenAI-compatible adapter. The runtime is drivable through a frozen v1
@@ -169,10 +172,12 @@ docs/ROADMAP.md    per-phase status
 ## Development
 
 ```bash
-cargo test --workspace              # 896 tests as of Phase 7
+cargo test --workspace              # 1087 tests as of Phase 11
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p xtask -- check-layering
+cargo run -p xtask -- bench          # offline evaluation suite vs. the recorded baseline
+cargo run -p xtask -- release-gates  # every machine-checkable gate, one summary
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for conventions, the layering rule, and
@@ -185,6 +190,8 @@ what CI enforces.
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Crate topology, the load-bearing design decisions, task lifecycle |
 | [docs/PLAN.md](docs/PLAN.md) | The full build plan: subsystem designs, phases, acceptance mapping, risks |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Phase-by-phase status |
+| [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | The `valyria-bench` evaluation harness, the fixture suite, the CI gate |
+| [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md) | The PLAN §6 acceptance criteria and the test that proves each |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Setup, conventions, review expectations |
 | [SECURITY.md](SECURITY.md) | Threat model, current confinement guarantees, reporting |
 
