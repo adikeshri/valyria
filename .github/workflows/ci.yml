@@ -53,7 +53,10 @@ jobs:
 
   deny:
     name: cargo-deny (licenses + advisories)
-    runs-on: macos-latest
+    # Linux-only: EmbarkStudios/cargo-deny-action is a container action.
+    # The check itself is host-independent — deny.toml pins the target
+    # triples it evaluates (macOS, Linux, Windows) explicitly.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
