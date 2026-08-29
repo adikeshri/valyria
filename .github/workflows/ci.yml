@@ -87,7 +87,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace
-      - run: cargo test --workspace
+      # --no-fail-fast: report every failing test target, not just the
+      # first — one red run then tells the whole story.
+      - run: cargo test --workspace --no-fail-fast
 
   msrv:
     name: MSRV build
