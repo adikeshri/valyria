@@ -12,7 +12,7 @@
 //!   field (backward compatible: old clients ignore it);
 //! - **major** — a removed/renamed variant or field, or a changed type
 //!   (breaking: old clients misparse).
-pub const PROTOCOL_VERSION: &str = "1.3.0";
+pub const PROTOCOL_VERSION: &str = "1.4.0";
 
 /// Capability tokens a `HelloResponse` advertises (§4.27). A client
 /// negotiates against these, not the version string — a runtime built
@@ -44,6 +44,14 @@ pub mod capability {
     /// `model_install` (with `model_install_progress` events),
     /// `model_remove`, `model_activate`, `model_inspect` (§20, §21).
     pub const MODEL_MANAGE: &str = "model_manage";
+    /// Context provenance is emitted: a `context_retrieved` event per
+    /// Discovery step, carrying the retrieved items with reason / trust /
+    /// tokens and the budget used (§34). The Context Inspector lights up.
+    pub const CONTEXT: &str = "context";
+    /// `ledger_changes { task_id }` is served — `valyria-ledger`'s
+    /// agent-authored / pre-existing / concurrent-user classification for
+    /// the diff viewer's ownership column (§15, §16).
+    pub const LEDGER: &str = "ledger";
 
     /// The full set an embedded runtime supports.
     pub const ALL: &[&str] = &[
@@ -59,5 +67,7 @@ pub mod capability {
         REPO,
         HARDWARE,
         MODEL_MANAGE,
+        CONTEXT,
+        LEDGER,
     ];
 }

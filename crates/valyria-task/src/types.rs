@@ -20,6 +20,11 @@ use valyria_types::{AgentState, EffectId, Generation, StepId, TaskId, Timestamp,
 pub mod kinds {
     pub const MODEL_CALL: &str = "model_call";
     pub const MODEL_COMPLETION: &str = "model_completion";
+    /// The context assembler produced a working set for a step (§34). The
+    /// completion payload carries `{ items: [{ path, reason, trust_level,
+    /// tokens }], budget_used, budget_total }` and projects to a
+    /// `context_retrieved` event.
+    pub const CONTEXT_RETRIEVED: &str = "context_retrieved";
     pub const TOOL: &str = "tool";
     pub const TOOL_RESULT: &str = "tool_result";
     pub const TOOL_DENIED: &str = "tool_denied";

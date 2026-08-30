@@ -24,7 +24,7 @@ use valyria_store::Store;
 use valyria_task::{Budget, Task, TaskManager};
 use valyria_tools::ToolRuntime;
 use valyria_types::{AgentState, CheckpointId, ErrorCode, PermissionMode, TaskId, WorkspaceId};
-use valyria_util::{CancellationToken, Clock, SystemClock};
+use valyria_util::{CancellationToken, Clock, ContentHash, SystemClock};
 use valyria_verify::{CompletionReport, VerificationLog};
 use valyria_vfs::WorkspaceRoot;
 
@@ -61,6 +61,21 @@ pub struct GitStatusView {
     pub detached: bool,
     pub head_commit: Option<String>,
     pub files: Vec<valyria_git::FileStatus>,
+}
+
+/// One agent-touched file and how it is currently classified, as
+/// [`Runtime::ledger_changes`] returns it (§15, §16, G8).
+#[derive(Debug, Clone)]
+pub struct LedgerChangeView {
+    pub path: String,
+    /// `agent_authored` | `pre_existing` | `concurrent_user_modification`
+    /// | `unknown`.
+    pub classification: &'static str,
+    /// `write` | `delete` — the agent's most recent action on the path.
+    pub kind: &'static str,
+    pub task_id: String,
+    pub step_id: String,
+    pub tool_invocation_id: Option<String>,
 }
 
 /// Model detail as [`Runtime::model_inspect`] returns it.
@@ -152,6 +167,7 @@ pub struct Runtime {
     tasks: Arc<TaskManager>,
     driver: Arc<AgentDriver>,
     plan_store: Arc<PlanStore>,
+    ledger: Arc<Ledger>,
     workspace_id: WorkspaceId,
     workspace_path: PathBuf,
     data_dir: PathBuf,
@@ -246,7 +262,7 @@ impl Runtime {
                 tool_runtime,
                 orchestrator,
                 context,
-                ledger,
+                ledger.clone(),
                 engine,
                 verification_log.clone(),
                 plan_store.clone(),
@@ -264,6 +280,7 @@ impl Runtime {
             tasks,
             driver,
             plan_store,
+            ledger,
             workspace_id,
             workspace_path: config.workspace_path.clone(),
             data_dir: config.data_dir.clone(),
@@ -579,6 +596,51 @@ impl Runtime {
 
     pub fn git_branches(&self) -> Result<Vec<valyria_git::BranchInfo>> {
         Ok(self.git_repo()?.branches()?)
+    }
+
+    /// Agent-touched files for `task_id`, each with the ledger's current
+    /// classification (agent-authored / pre-existing / concurrent user
+    /// modification) computed against the file's on-disk state now
+    /// (§15, §16, G8). One row per path — the agent's most recent entry
+    /// for it.
+    pub fn ledger_changes(&self, task_id: TaskId) -> Vec<LedgerChangeView> {
+        use std::collections::BTreeMap;
+        use valyria_ledger::ChangeClassification;
+
+        // Most recent ledger entry per path (entries are append-order).
+        let mut latest: BTreeMap<std::path::PathBuf, valyria_ledger::LedgerEntry> = BTreeMap::new();
+        for entry in self.ledger.entries_for_task(task_id) {
+            latest.insert(entry.path.clone(), entry);
+        }
+
+        latest
+            .into_values()
+            .map(|entry| {
+                let abs = self.workspace_path.join(&entry.path);
+                let observed = std::fs::read(&abs).ok().map(|b| ContentHash::of_bytes(&b));
+                let classification = match self.ledger.classify(&entry.path, observed) {
+                    ChangeClassification::AgentAuthored => "agent_authored",
+                    ChangeClassification::PreExisting => "pre_existing",
+                    ChangeClassification::ConcurrentUserModification => {
+                        "concurrent_user_modification"
+                    }
+                    ChangeClassification::Unknown => "unknown",
+                };
+                let kind = if entry.after_hash.is_none() {
+                    "delete"
+                } else {
+                    "write"
+                };
+                LedgerChangeView {
+                    path: entry.path.display().to_string(),
+                    classification,
+                    kind,
+                    task_id: entry.task_id.to_string(),
+                    step_id: entry.step_id.to_string(),
+                    tool_invocation_id: entry.tool_invocation_id.map(|t| t.to_string()),
+                }
+            })
+            .collect()
     }
 
     /// The newest published index generation, if any (§4.30).

@@ -563,6 +563,37 @@ pub struct ModelInspectResponse {
     pub active_roles: Vec<String>,
 }
 
+// --- change ownership (§15, §16; capability `ledger`) ---
+//
+// Additive as of protocol 1.4.0. Surfaces `valyria-ledger`'s
+// agent-authored / pre-existing / concurrent-user classification for the
+// diff viewer's ownership column. Context provenance (G7) has no request
+// — it is the `context_retrieved` *event*, emitted per Discovery step.
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct LedgerChangesRequest {
+    pub task_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct LedgerChangeWire {
+    pub path: String,
+    /// `agent_authored` | `pre_existing` | `concurrent_user_modification`
+    /// | `unknown` — computed against the file's on-disk state now.
+    pub classification: String,
+    /// `write` | `delete` — the agent's most recent action on the path.
+    pub kind: String,
+    pub task_id: String,
+    pub step_id: String,
+    pub tool_invocation_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct LedgerChangesResponse {
+    /// One row per agent-touched path, path-ordered.
+    pub changes: Vec<LedgerChangeWire>,
+}
+
 // --- workspace ---
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

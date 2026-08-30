@@ -435,6 +435,24 @@
       }
     },
     {
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "ledger_changes"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/LedgerChangesResponse"
+        }
+      }
+    },
+    {
       "description": "A request that succeeded with nothing to return (`task.pause`, `task.resume`, `task.cancel`, `permission.resolve`, `model.install`, `model.activate`).",
       "type": "object",
       "required": [
@@ -896,6 +914,56 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0.0
+        }
+      }
+    },
+    "LedgerChangeWire": {
+      "type": "object",
+      "required": [
+        "classification",
+        "kind",
+        "path",
+        "step_id",
+        "task_id"
+      ],
+      "properties": {
+        "classification": {
+          "description": "`agent_authored` | `pre_existing` | `concurrent_user_modification` | `unknown` — computed against the file's on-disk state now.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "`write` | `delete` — the agent's most recent action on the path.",
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "step_id": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "tool_invocation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "LedgerChangesResponse": {
+      "type": "object",
+      "required": [
+        "changes"
+      ],
+      "properties": {
+        "changes": {
+          "description": "One row per agent-touched path, path-ordered.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/LedgerChangeWire"
+          }
         }
       }
     },

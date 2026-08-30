@@ -577,6 +577,24 @@
           "$ref": "#/definitions/ModelIdRequest"
         }
       }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "ledger_changes"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/LedgerChangesRequest"
+        }
+      }
     }
   ],
   "definitions": {
@@ -658,6 +676,17 @@
       ],
       "properties": {
         "client_name": {
+          "type": "string"
+        }
+      }
+    },
+    "LedgerChangesRequest": {
+      "type": "object",
+      "required": [
+        "task_id"
+      ],
+      "properties": {
+        "task_id": {
           "type": "string"
         }
       }
