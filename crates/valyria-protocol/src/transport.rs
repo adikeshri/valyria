@@ -39,6 +39,13 @@ pub enum ClientFrame {
     /// Open an event stream from `since`; the connection then carries
     /// [`ServerFrame::Event`] frames until the client hangs up.
     Subscribe { since: u64 },
+    /// [`Self::Call`] with a per-daemon auth token (protocol 1.6.0, G10).
+    /// A daemon started with a token **requires** this variant and rejects
+    /// bare [`Self::Call`] with `auth.required`; a daemon without one
+    /// accepts either.
+    AuthCall { token: String, request: Request },
+    /// [`Self::Subscribe`] with the auth token — see [`Self::AuthCall`].
+    AuthSubscribe { token: String, since: u64 },
 }
 
 /// A frame sent by the daemon to a client. Externally tagged — see
@@ -68,6 +75,11 @@ pub fn encode_line<T: Serialize>(frame: &T) -> String {
 /// that just went away should print a clean error, not unwind.
 pub struct SocketClient {
     path: PathBuf,
+    /// Per-daemon auth token (G10). When set, frames go out as
+    /// [`ClientFrame::AuthCall`] / [`ClientFrame::AuthSubscribe`]. Only the
+    /// unix transport reads it; the non-unix stub is a hard error.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    token: Option<String>,
     /// Serializes concurrent `call`s that would otherwise race to open
     /// their own connections — harmless, but this keeps the socket's
     /// accept rate sane and makes tests deterministic.
@@ -78,6 +90,16 @@ impl SocketClient {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
+            token: None,
+            connect_lock: Mutex::new(()),
+        }
+    }
+
+    /// A client that authenticates every frame with `token` (G10).
+    pub fn with_token(path: impl Into<PathBuf>, token: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            token: Some(token.into()),
             connect_lock: Mutex::new(()),
         }
     }
@@ -86,13 +108,35 @@ impl SocketClient {
         &self.path
     }
 
+    #[cfg_attr(not(unix), allow(dead_code))]
+    fn call_frame(&self, request: Request) -> ClientFrame {
+        match &self.token {
+            Some(token) => ClientFrame::AuthCall {
+                token: token.clone(),
+                request,
+            },
+            None => ClientFrame::Call(request),
+        }
+    }
+
+    #[cfg_attr(not(unix), allow(dead_code))]
+    fn subscribe_frame(&self, since: u64) -> ClientFrame {
+        match &self.token {
+            Some(token) => ClientFrame::AuthSubscribe {
+                token: token.clone(),
+                since,
+            },
+            None => ClientFrame::Subscribe { since },
+        }
+    }
+
     #[cfg(unix)]
     async fn call_inner(&self, req: Request) -> std::io::Result<Response> {
         let _guard = self.connect_lock.lock().await;
         let stream = UnixStream::connect(&self.path).await?;
         let (read_half, mut write_half) = stream.into_split();
         write_half
-            .write_all(encode_line(&ClientFrame::Call(req)).as_bytes())
+            .write_all(encode_line(&self.call_frame(req)).as_bytes())
             .await?;
         write_half.flush().await?;
 
@@ -151,7 +195,7 @@ impl Client for SocketClient {
         };
         let (read_half, mut write_half) = stream.into_split();
         if write_half
-            .write_all(encode_line(&ClientFrame::Subscribe { since }).as_bytes())
+            .write_all(encode_line(&self.subscribe_frame(since)).as_bytes())
             .await
             .is_err()
         {

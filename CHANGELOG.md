@@ -15,6 +15,21 @@ Work toward the first release. Phases refer to
 
 ### Added
 
+- **Protocol 1.6.0 — local client authentication** (desktop-client gap
+  closure G10; additive; capability `client_auth`).
+  - Every daemon connection is now **peer-uid checked**: only the OS user
+    that started the daemon may connect (`UnixStream::peer_cred`), else
+    `auth.peer_uid`. Needs no wire change and applies to every frame.
+  - `daemon::serve` gains an `auth_token: Option<String>` parameter. When
+    set, clients must send the new `ClientFrame::AuthCall` /
+    `AuthSubscribe` variants carrying the token; a bare `Call` / `Subscribe`
+    is refused with `auth.required`, a wrong token with
+    `auth.token_mismatch`. `SocketClient::with_token` produces an
+    authenticating client. `valyria serve` / the CLI gain
+    `--auth-token-file <path>`.
+  - `EmbeddedClient` (in-process) is unaffected — it is already inside the
+    trust boundary.
+
 - **Protocol 1.5.0 — diagnostics granularity** (desktop-client gap closure
   G13, G14, G15; additive, backward compatible; capability
   `diagnostics_v2`).
