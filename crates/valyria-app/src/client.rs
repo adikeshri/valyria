@@ -9,9 +9,12 @@ use futures::stream::{BoxStream, StreamExt};
 use valyria_events::{Delivery, EventEnvelope, Seq};
 use valyria_protocol::{
     capability, Client, ConfigEntryWire, ConfigShowResponse, DoctorCheckWire, DoctorRunResponse,
-    HelloResponse, MemoryEntryWire, MemoryListRequest, MemoryListResponse, ModelListResponse,
-    ModelSummaryWire, PermissionResolveRequest, PlanGetResponse, PlanStepSummary, PurgeResponse,
-    Request, Response, StorageEntryWire, StorageInspectResponse, StoragePurgeRequest,
+    GitBranchWire, GitBranchesResponse, GitCommitWire, GitDiffResponse, GitFileStatusWire,
+    GitLogResponse, GitStatusResponse, HelloResponse, IndexStatusResponse, MemoryEntryWire,
+    MemoryListRequest, MemoryListResponse, ModelListResponse, ModelSummaryWire,
+    PermissionResolveRequest, PlanGetResponse, PlanStepSummary, PurgeResponse, Request, Response,
+    ScoreExplanationWire, SearchFeatureWire, SearchHitWire, SearchQueryResponse,
+    SearchStageScoreWire, StorageEntryWire, StorageInspectResponse, StoragePurgeRequest,
     TaskCreateResponse, TaskIdRequest, TaskListResponse, TaskReportResponse, TaskRollbackRequest,
     TaskRollbackResponse, TaskStatusResponse, TaskSummary, VerifiedClaimWire, WireError, WireEvent,
     WorkspaceStatusResponse, PROTOCOL_VERSION,
@@ -78,6 +81,64 @@ fn task_summary(t: &valyria_task::Task) -> TaskSummary {
         state: t.state.to_string(),
         created_at_ms: t.created_at.as_millis() as u64,
         updated_at_ms: t.updated_at.as_millis() as u64,
+    }
+}
+
+fn git_file_status_wire(f: &valyria_git::FileStatus) -> GitFileStatusWire {
+    use valyria_git::StatusKind;
+    let kind = match f.kind {
+        StatusKind::Added => "added",
+        StatusKind::Modified => "modified",
+        StatusKind::Deleted => "deleted",
+        StatusKind::Untracked => "untracked",
+        StatusKind::Conflicted => "conflicted",
+    };
+    GitFileStatusWire {
+        path: f.path.clone(),
+        kind: kind.to_string(),
+        staged: f.staged,
+    }
+}
+
+fn search_results_wire(r: valyria_search::SearchResults) -> SearchQueryResponse {
+    SearchQueryResponse {
+        hits: r.hits.into_iter().map(search_hit_wire).collect(),
+        modes_run: r.modes_run.iter().map(|m| m.as_str().to_string()).collect(),
+        degraded: r.degraded,
+    }
+}
+
+fn search_hit_wire(h: valyria_search::SearchHit) -> SearchHitWire {
+    SearchHitWire {
+        path: h.path,
+        symbol_path: h.symbol_path,
+        line: h.line,
+        snippet: h.snippet,
+        score: h.score,
+        explanation: ScoreExplanationWire {
+            stage_scores: h
+                .explanation
+                .stage_scores
+                .into_iter()
+                .map(|s| SearchStageScoreWire {
+                    mode: s.mode.as_str().to_string(),
+                    rank: s.rank as u32,
+                    raw_score: s.raw_score,
+                })
+                .collect(),
+            features: h
+                .explanation
+                .features
+                .into_iter()
+                .map(|f| SearchFeatureWire {
+                    name: f.name,
+                    value: f.value,
+                    weight: f.weight,
+                    contribution: f.contribution,
+                })
+                .collect(),
+            retrieval_paths: h.explanation.retrieval_paths,
+        },
     }
 }
 
@@ -402,6 +463,97 @@ impl Client for EmbeddedClient {
                             license: c.license_name,
                         })
                         .collect(),
+                }),
+                Err(e) => error_response(e),
+            },
+            Request::GitStatus(_) => match self.runtime.git_status() {
+                Ok(v) => Response::GitStatus(GitStatusResponse {
+                    branch: v.branch,
+                    detached: v.detached,
+                    head_commit: v.head_commit,
+                    files: v.files.iter().map(git_file_status_wire).collect(),
+                }),
+                Err(e) => error_response(e),
+            },
+            Request::GitDiff(r) => match self.runtime.git_diff(r.path.as_deref(), r.staged) {
+                Ok(d) => Response::GitDiff(GitDiffResponse {
+                    unified: d.unified,
+                    truncated: d.truncated,
+                }),
+                Err(e) => error_response(e),
+            },
+            Request::GitLog(r) => {
+                let limit = r.limit.unwrap_or(50) as usize;
+                match self.runtime.git_log(limit) {
+                    Ok(commits) => Response::GitLog(GitLogResponse {
+                        commits: commits
+                            .into_iter()
+                            .map(|c| GitCommitWire {
+                                sha: c.sha,
+                                author_name: c.author_name,
+                                author_email: c.author_email,
+                                message: c.message,
+                                time_unix: c.time,
+                                parents: c.parents,
+                            })
+                            .collect(),
+                    }),
+                    Err(e) => error_response(e),
+                }
+            }
+            Request::GitBranches(_) => match self.runtime.git_branches() {
+                Ok(branches) => Response::GitBranches(GitBranchesResponse {
+                    branches: branches
+                        .into_iter()
+                        .map(|b| GitBranchWire {
+                            name: b.name,
+                            commit: b.commit,
+                            is_head: b.is_head,
+                        })
+                        .collect(),
+                }),
+                Err(e) => error_response(e),
+            },
+            Request::SearchQuery(r) => {
+                let mut modes = Vec::with_capacity(r.modes.len());
+                for m in &r.modes {
+                    match valyria_search::SearchMode::parse(m) {
+                        Some(mode) => modes.push(mode),
+                        None => {
+                            return error_response_raw(
+                                "search.unknown_mode",
+                                format!(
+                                    "unknown search mode `{m}` (expected: lexical, regex, symbol, \
+                                     semantic, ast, dependency, git)"
+                                ),
+                                false,
+                            )
+                        }
+                    }
+                }
+                let mut query = valyria_search::SearchQuery::new(r.query);
+                query.modes = modes;
+                query.anchors = r.anchors;
+                query.limit = r.limit.unwrap_or(20).min(200) as usize;
+                match self.runtime.search(&query) {
+                    Ok(results) => Response::SearchQuery(search_results_wire(results)),
+                    Err(e) => error_response(e),
+                }
+            }
+            Request::IndexStatus(_) => match self.runtime.index_status().await {
+                Ok(Some(g)) => Response::IndexStatus(IndexStatusResponse {
+                    generation: Some(g.generation.0),
+                    stage: Some(format!("{:?}", g.stage).to_lowercase()),
+                    file_count: g.file_count,
+                    symbol_count: g.symbol_count,
+                    created_at_ms: Some(g.created_at_ms),
+                }),
+                Ok(None) => Response::IndexStatus(IndexStatusResponse {
+                    generation: None,
+                    stage: None,
+                    file_count: 0,
+                    symbol_count: 0,
+                    created_at_ms: None,
                 }),
                 Err(e) => error_response(e),
             },

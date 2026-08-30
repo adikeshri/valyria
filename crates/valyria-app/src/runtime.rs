@@ -53,6 +53,15 @@ impl ConfigWriteScope {
     }
 }
 
+/// Working-tree status as [`Runtime::git_status`] returns it.
+#[derive(Debug, Clone)]
+pub struct GitStatusView {
+    pub branch: Option<String>,
+    pub detached: bool,
+    pub head_commit: Option<String>,
+    pub files: Vec<valyria_git::FileStatus>,
+}
+
 /// Loads a scenario TOML file into a `Scenario` `RuntimeConfig` can be
 /// built with, without the caller needing to depend on
 /// `valyria-runtime-fake` directly — kept here specifically so
@@ -135,6 +144,7 @@ pub struct Runtime {
     workspace_id: WorkspaceId,
     workspace_path: PathBuf,
     data_dir: PathBuf,
+    store: Arc<Store>,
     index: Arc<IndexStore>,
     verification_log: Arc<VerificationLog>,
     memory: Arc<MemoryStore>,
@@ -246,6 +256,7 @@ impl Runtime {
             workspace_id,
             workspace_path: config.workspace_path.clone(),
             data_dir: config.data_dir.clone(),
+            store,
             index,
             verification_log,
             memory,
@@ -512,6 +523,122 @@ impl Runtime {
         };
         valyria_config::write_key(&path, key, value).map_err(AppError::ConfigWrite)?;
         self.config_show()
+    }
+
+    // --- repository read surface (§7, §14, §17, §33; capability `repo`) ---
+
+    /// Largest `git_diff` payload Core will return before truncating.
+    const GIT_DIFF_CAP: usize = 512 * 1024;
+
+    fn git_repo(&self) -> Result<valyria_git::Repo> {
+        Ok(valyria_git::Repo::open(&self.workspace_path)?)
+    }
+
+    /// Working-tree status: branch/HEAD plus per-file staged/unstaged
+    /// changes. Read-only — git *writes* stay Core-internal (§17).
+    pub fn git_status(&self) -> Result<GitStatusView> {
+        let repo = self.git_repo()?;
+        let head = repo.head_info()?;
+        Ok(GitStatusView {
+            branch: head.branch,
+            detached: head.detached,
+            head_commit: head.commit,
+            files: repo.status()?.files,
+        })
+    }
+
+    /// Unified-diff text for the working tree. `staged == false` is
+    /// worktree-vs-index; `staged == true` is index-vs-HEAD. `path`
+    /// restricts to one repo-relative file.
+    pub fn git_diff(&self, path: Option<&str>, staged: bool) -> Result<valyria_git::WorktreeDiff> {
+        Ok(self
+            .git_repo()?
+            .worktree_diff(path, staged, Self::GIT_DIFF_CAP)?)
+    }
+
+    /// Newest-first commits from HEAD (at most `limit`, capped at 500).
+    /// An unborn HEAD yields an empty list rather than an error.
+    pub fn git_log(&self, limit: usize) -> Result<Vec<valyria_git::CommitInfo>> {
+        match self.git_repo()?.log(limit.min(500)) {
+            Ok(commits) => Ok(commits),
+            Err(valyria_git::GitError::UnbornHead) => Ok(Vec::new()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn git_branches(&self) -> Result<Vec<valyria_git::BranchInfo>> {
+        Ok(self.git_repo()?.branches()?)
+    }
+
+    /// The newest published index generation, if any (§4.30).
+    pub async fn index_status(&self) -> Result<Option<valyria_index::GenerationInfo>> {
+        Ok(self.index.current().await?)
+    }
+
+    /// Index the whole workspace as one generation and build the
+    /// import/call graph over it, so `search_query` and `index_status`
+    /// have something to serve. Returns the new generation's info.
+    ///
+    /// Indexing is otherwise an internal, task-driven concern; this is the
+    /// explicit entry point the desktop client's "build index" action and
+    /// the first-run flow call.
+    pub async fn reindex(&self) -> Result<valyria_index::GenerationInfo> {
+        let registry = valyria_lang::LanguageRegistry::with_builtin_languages()
+            .map_err(|e| AppError::Repo(format!("language registry: {e}")))?;
+        let pipeline = valyria_index::IndexPipeline::new(
+            self.workspace_path.clone(),
+            registry,
+            (*self.index).clone(),
+        );
+        let delta = pipeline.bootstrap_unstaged(&|_| {}).await?;
+        valyria_graph::GraphStore::new(self.store.clone())
+            .build_for(&self.index, delta.generation)
+            .await
+            .map_err(|e| AppError::Repo(format!("graph build: {e}")))?;
+        self.index
+            .current()
+            .await?
+            .ok_or_else(|| AppError::Repo("index generation vanished after publish".into()))
+    }
+
+    /// Run the fused code search (§4.16) and return the ranked, explained
+    /// hits verbatim.
+    ///
+    /// `SearchEngine::search` returns a `!Send` future (it holds a `gix`
+    /// handle across `.await`), so it cannot be awaited inside the `Send`
+    /// `Client::call`. It runs on a dedicated current-thread runtime on a
+    /// scoped OS thread; only the plain-data `SearchResults` crosses back.
+    /// This mirrors `valyria_context::retrieve::SearchRetriever`.
+    pub fn search(
+        &self,
+        query: &valyria_search::SearchQuery,
+    ) -> Result<valyria_search::SearchResults> {
+        let root = self.workspace_path.clone();
+        let index = (*self.index).clone();
+        let store = self.store.clone();
+
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|e| AppError::Repo(format!("search runtime: {e}")))?;
+                    let registry = valyria_lang::LanguageRegistry::with_builtin_languages()
+                        .map_err(|e| AppError::Repo(format!("language registry: {e}")))?;
+                    let engine = valyria_search::SearchEngine::new(
+                        root,
+                        index,
+                        valyria_graph::GraphStore::new(store.clone()),
+                        valyria_embed::EmbedStore::new(store),
+                        std::sync::Arc::new(valyria_embed::HashingEmbedder::default()),
+                        registry,
+                    );
+                    rt.block_on(engine.search(query)).map_err(AppError::Search)
+                })
+                .join()
+                .map_err(|_| AppError::Repo("search thread panicked".into()))?
+        })
     }
 
     /// Relevance-ranked memory entries for `query` (§4.19). With no query,

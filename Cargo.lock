@@ -2999,6 +2999,7 @@ dependencies = [
  "valyria-hardware",
  "valyria-index",
  "valyria-instructions",
+ "valyria-lang",
  "valyria-ledger",
  "valyria-memory",
  "valyria-model",
@@ -3010,6 +3011,7 @@ dependencies = [
  "valyria-protocol",
  "valyria-runtime-fake",
  "valyria-sandbox",
+ "valyria-search",
  "valyria-store",
  "valyria-task",
  "valyria-testkit",
@@ -3161,6 +3163,7 @@ name = "valyria-git"
 version = "0.1.0"
 dependencies = [
  "gix",
+ "imara-diff",
  "serde",
  "tempfile",
  "thiserror 2.0.20",

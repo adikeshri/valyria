@@ -8,8 +8,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::messages::{
     ConfigSetRequest, ConfigShowResponse, DoctorRunResponse, Empty, EventsSubscribeRequest,
-    HelloRequest, HelloResponse, MemoryListRequest, MemoryListResponse, ModelListResponse,
-    PermissionResolveRequest, PlanGetResponse, PurgeResponse, StorageInspectResponse,
+    GitBranchesResponse, GitDiffRequest, GitDiffResponse, GitLogRequest, GitLogResponse,
+    GitStatusResponse, HelloRequest, HelloResponse, IndexStatusResponse, MemoryListRequest,
+    MemoryListResponse, ModelListResponse, PermissionResolveRequest, PlanGetResponse,
+    PurgeResponse, SearchQueryRequest, SearchQueryResponse, StorageInspectResponse,
     StoragePurgeRequest, TaskCreateRequest, TaskCreateResponse, TaskIdRequest, TaskListResponse,
     TaskReportResponse, TaskRollbackRequest, TaskRollbackResponse, TaskStatusRequest,
     TaskStatusResponse, WireError, WorkspaceStatusResponse,
@@ -38,6 +40,12 @@ pub enum Request {
     ConfigSet(ConfigSetRequest),
     MemoryList(MemoryListRequest),
     ModelList(Empty),
+    GitStatus(Empty),
+    GitDiff(GitDiffRequest),
+    GitLog(GitLogRequest),
+    GitBranches(Empty),
+    SearchQuery(SearchQueryRequest),
+    IndexStatus(Empty),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -57,6 +65,12 @@ pub enum Response {
     ConfigShow(ConfigShowResponse),
     MemoryList(MemoryListResponse),
     ModelList(ModelListResponse),
+    GitStatus(GitStatusResponse),
+    GitDiff(GitDiffResponse),
+    GitLog(GitLogResponse),
+    GitBranches(GitBranchesResponse),
+    SearchQuery(SearchQueryResponse),
+    IndexStatus(IndexStatusResponse),
     /// A request that succeeded with nothing to return (`task.pause`,
     /// `task.resume`, `task.cancel`, `permission.resolve`).
     Ack,
