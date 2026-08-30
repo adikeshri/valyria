@@ -181,6 +181,7 @@ mod imp {
             let created = client
                 .call(Request::TaskCreate(valyria_protocol::TaskCreateRequest {
                     objective: "add a function".into(),
+                    permission_mode: None,
                 }))
                 .await;
             let task_id = match created {
@@ -221,6 +222,7 @@ mod imp {
             let task_id = match client
                 .call(Request::TaskCreate(valyria_protocol::TaskCreateRequest {
                     objective: "add a function".into(),
+                    permission_mode: None,
                 }))
                 .await
             {

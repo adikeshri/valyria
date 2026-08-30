@@ -318,6 +318,24 @@
         "method": {
           "type": "string",
           "enum": [
+            "config_set"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/ConfigSetRequest"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
             "memory_list"
           ]
         },
@@ -346,6 +364,29 @@
     }
   ],
   "definitions": {
+    "ConfigSetRequest": {
+      "description": "Write one dotted config leaf to a Core-owned config file, then report the re-resolved effective view (§24). Additive as of protocol 1.1.0.\n\nThe write is validated against the policy floor (`valyria_config::validate_floor`) *before* it touches disk: a value that would loosen access past the compiled-in ceiling is rejected with `config.policy_floor_violation` and nothing is written.",
+      "type": "object",
+      "required": [
+        "key",
+        "scope",
+        "value"
+      ],
+      "properties": {
+        "key": {
+          "description": "Dotted key, e.g. `permission.mode`, `log.format`, `network.internet`. Must be a key `config_show` already reports.",
+          "type": "string"
+        },
+        "scope": {
+          "description": "`workspace` writes `<repo>/.valyria/config.toml`; `user` writes `~/.valyria/config.toml`. Anything else is `config.invalid_scope`.",
+          "type": "string"
+        },
+        "value": {
+          "description": "The new value, as the string form `config_show` would display.",
+          "type": "string"
+        }
+      }
+    },
     "Empty": {
       "description": "An empty request payload. Kept as a named unit struct (rather than `()`) so it has a stable schema name and a place to grow fields.",
       "type": "object"
@@ -434,6 +475,13 @@
       "properties": {
         "objective": {
           "type": "string"
+        },
+        "permission_mode": {
+          "description": "Optional per-task autonomy override (§25). One of `manual` | `assisted` | `autonomous`. When absent, the task inherits the daemon's start-time mode. Additive as of protocol 1.1.0 — an older client omits it and gets the daemon default, unchanged.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     },

@@ -22,6 +22,12 @@ pub enum AppError {
     Verify(#[from] valyria_verify::VerifyError),
     #[error("config error: {0}")]
     Config(#[from] valyria_config::ConfigError),
+    /// A `config_set` write failure. Kept distinct from [`Self::Config`]
+    /// (which is `#[from]`, so it cannot also carry the specific code) so
+    /// the wire error preserves `config.policy_floor_violation` /
+    /// `config.unknown_key` / … rather than flattening to `app.config`.
+    #[error("config write error: {0}")]
+    ConfigWrite(valyria_config::ConfigError),
     #[error("model store error: {0}")]
     ModelStore(#[from] valyria_model_store::ModelStoreError),
     #[error("invalid task id `{0}`")]
@@ -51,6 +57,7 @@ impl ErrorCode for AppError {
             AppError::Memory(_) => "app.memory",
             AppError::Verify(_) => "app.verify",
             AppError::Config(_) => "app.config",
+            AppError::ConfigWrite(e) => e.code(),
             AppError::ModelStore(_) => "app.model_store",
             AppError::InvalidTaskId(_) => "app.invalid_task_id",
             AppError::UnknownPurgeScope(_) => "app.unknown_purge_scope",
@@ -73,6 +80,7 @@ impl ErrorCode for AppError {
             AppError::Memory(_) => false,
             AppError::Verify(_) => false,
             AppError::Config(_) => false,
+            AppError::ConfigWrite(_) => false,
             AppError::ModelStore(_) => false,
             AppError::InvalidTaskId(_) => false,
             AppError::UnknownPurgeScope(_) => false,

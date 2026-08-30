@@ -18,7 +18,10 @@ use valyria_protocol::Request;
 fn arb_request() -> impl Strategy<Value = Request> {
     prop_oneof![
         "[a-zA-Z0-9 _-]{0,40}".prop_map(|client_name| Request::Hello(HelloRequest { client_name })),
-        ".{0,120}".prop_map(|objective| Request::TaskCreate(TaskCreateRequest { objective })),
+        ".{0,120}".prop_map(|objective| Request::TaskCreate(TaskCreateRequest {
+            objective,
+            permission_mode: None
+        })),
         "[a-z0-9_]{0,30}".prop_map(|id| Request::TaskStatus(TaskStatusRequest { task_id: id })),
         "[a-z0-9_]{0,30}".prop_map(|id| Request::TaskReport(TaskIdRequest { task_id: id })),
         "[a-z0-9_]{0,30}".prop_map(|id| Request::TaskCancel(TaskIdRequest { task_id: id })),

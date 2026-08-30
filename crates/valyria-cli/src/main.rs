@@ -320,7 +320,10 @@ async fn cmd_run(raw: Vec<String>) -> ExitCode {
     };
 
     let response = client
-        .call(Request::TaskCreate(TaskCreateRequest { objective }))
+        .call(Request::TaskCreate(TaskCreateRequest {
+            objective,
+            permission_mode: None,
+        }))
         .await;
     let task_id = match response {
         Response::TaskCreate(r) => r.task_id,

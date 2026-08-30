@@ -11,6 +11,7 @@ use crate::settings::Settings;
 /// The maximum permissiveness any config layer may configure for a given
 /// axis. `Access` is ordered least -> most permissive, so "at or under the
 /// floor" is a plain `<=`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PolicyFloor {
     pub max_credentials_access: Access,
 }

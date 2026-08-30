@@ -97,7 +97,10 @@ impl App {
         }
         match self
             .client
-            .call(Request::TaskCreate(TaskCreateRequest { objective }))
+            .call(Request::TaskCreate(TaskCreateRequest {
+                objective,
+                permission_mode: None,
+            }))
             .await
         {
             Response::TaskCreate(r) => {

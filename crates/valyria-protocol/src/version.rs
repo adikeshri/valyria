@@ -12,7 +12,7 @@
 //!   field (backward compatible: old clients ignore it);
 //! - **major** — a removed/renamed variant or field, or a changed type
 //!   (breaking: old clients misparse).
-pub const PROTOCOL_VERSION: &str = "1.0.0";
+pub const PROTOCOL_VERSION: &str = "1.1.0";
 
 /// Capability tokens a `HelloResponse` advertises (§4.27). A client
 /// negotiates against these, not the version string — a runtime built
@@ -25,8 +25,14 @@ pub mod capability {
     pub const MODELS: &str = "models";
     pub const ROLLBACK: &str = "rollback";
     pub const EVENTS_RESUME: &str = "events_resume";
+    /// `config_set` is served: a client may write Core-owned config leaves
+    /// (policy-floor validated) rather than editing `config.toml` itself.
+    pub const CONFIG_WRITE: &str = "config_write";
+    /// `task_create` accepts a per-task `permission_mode` override, so the
+    /// autonomy control need not restart the daemon (§25).
+    pub const TASK_PERMISSION_MODE: &str = "task_permission_mode";
 
-    /// The full set an embedded Phase 10 runtime supports.
+    /// The full set an embedded runtime supports.
     pub const ALL: &[&str] = &[
         PLAN,
         DOCTOR,
@@ -35,5 +41,7 @@ pub mod capability {
         MODELS,
         ROLLBACK,
         EVENTS_RESUME,
+        CONFIG_WRITE,
+        TASK_PERMISSION_MODE,
     ];
 }
