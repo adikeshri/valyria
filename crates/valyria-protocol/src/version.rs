@@ -12,7 +12,7 @@
 //!   field (backward compatible: old clients ignore it);
 //! - **major** — a removed/renamed variant or field, or a changed type
 //!   (breaking: old clients misparse).
-pub const PROTOCOL_VERSION: &str = "1.7.1";
+pub const PROTOCOL_VERSION: &str = "1.9.0";
 
 /// Capability tokens a `HelloResponse` advertises (§4.27). A client
 /// negotiates against these, not the version string — a runtime built
@@ -68,6 +68,19 @@ pub mod capability {
     /// subscribe frame): it then carries that task's events plus
     /// workspace-global ones only (G11).
     pub const STREAM_FILTER: &str = "stream_filter";
+    /// Approvals carry a stable `request_id` and `permission_resolve`
+    /// takes `{ request_id?, decision: once|task|deny }` — a stale prompt
+    /// is refused with `approval.superseded`, and `task` is "Allow for
+    /// Task" (§13, G2).
+    pub const APPROVAL_SCOPE: &str = "approval_scope";
+    /// The daemon IPC transport is available on this platform (a
+    /// Unix-domain socket or, since protocol 1.9.0, a Windows named
+    /// pipe). Advertised at runtime by [`crate::HelloResponse`], not part
+    /// of [`ALL`], because it is platform-conditional.
+    pub const DAEMON: &str = "daemon";
+    /// This build serves the daemon over a **Windows named pipe** (G9).
+    /// Runtime-advertised on Windows only.
+    pub const WINDOWS: &str = "windows";
 
     /// The full set an embedded runtime supports.
     pub const ALL: &[&str] = &[
@@ -88,5 +101,6 @@ pub mod capability {
         DIAGNOSTICS_V2,
         CLIENT_AUTH,
         STREAM_FILTER,
+        APPROVAL_SCOPE,
     ];
 }

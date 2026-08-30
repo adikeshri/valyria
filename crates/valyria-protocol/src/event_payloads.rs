@@ -83,6 +83,8 @@ pub struct ToolCompletedPayload {
 /// `approval_requested` — the agent is blocked on a permission decision.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ApprovalRequestedPayload {
+    /// Stable identity to pass back to `permission_resolve` (G2).
+    pub request_id: String,
     pub prompt: String,
     pub tool: String,
     pub category: String,

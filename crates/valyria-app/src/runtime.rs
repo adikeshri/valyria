@@ -369,7 +369,27 @@ impl Runtime {
     /// resolve_permission` only performs the one resolution step, it does
     /// not itself loop.
     pub async fn resolve_permission(&self, task_id: TaskId, approve: bool) -> Result<()> {
-        self.driver.resolve_permission(task_id, approve).await?;
+        let decision = if approve {
+            valyria_agent::ApprovalDecision::Once
+        } else {
+            valyria_agent::ApprovalDecision::Deny
+        };
+        self.resolve_permission_scoped(task_id, None, decision)
+            .await
+    }
+
+    /// [`Self::resolve_permission`] with an optional `request_id` to assert
+    /// against the current pending request (returns `approval.superseded`
+    /// on a mismatch) and a `decision` of once / task / deny (§13, G2).
+    pub async fn resolve_permission_scoped(
+        &self,
+        task_id: TaskId,
+        request_id: Option<String>,
+        decision: valyria_agent::ApprovalDecision,
+    ) -> Result<()> {
+        self.driver
+            .resolve_permission_scoped(task_id, request_id, decision)
+            .await?;
         let task = self.tasks.get(task_id).await?;
         if !task.state.is_terminal()
             && task.state != AgentState::WaitingForPermission

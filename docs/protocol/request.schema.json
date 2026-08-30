@@ -765,7 +765,22 @@
       ],
       "properties": {
         "approve": {
+          "description": "Legacy approve/deny (protocol 1.0). Ignored when `decision` is set.",
           "type": "boolean"
+        },
+        "decision": {
+          "description": "`once` (approve this call), `task` (approve and grant for the rest of the task — \"Allow for Task\"), or `deny`. Overrides `approve` when set. Additive as of protocol 1.8.0.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "request_id": {
+          "description": "The `request_id` from the `approval_requested` payload (G2). When present it is asserted against the daemon's current pending request; a stale id is rejected with `approval.superseded` rather than resolving the wrong prompt.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "task_id": {
           "type": "string"

@@ -240,11 +240,23 @@ fn model_inspect_wire(v: crate::runtime::ModelInspectView) -> ModelInspectRespon
 impl Client for EmbeddedClient {
     async fn call(&self, req: Request) -> Response {
         match req {
-            Request::Hello(_) => Response::Hello(HelloResponse {
-                protocol_version: PROTOCOL_VERSION.to_string(),
-                runtime_version: env!("CARGO_PKG_VERSION").to_string(),
-                capabilities: capability::ALL.iter().map(|s| s.to_string()).collect(),
-            }),
+            Request::Hello(_) => {
+                let mut capabilities: Vec<String> =
+                    capability::ALL.iter().map(|s| s.to_string()).collect();
+                // Advertised only where the daemon can actually serve on
+                // this platform's IPC transport (G9).
+                if cfg!(any(unix, windows)) {
+                    capabilities.push(capability::DAEMON.to_string());
+                }
+                if cfg!(windows) {
+                    capabilities.push(capability::WINDOWS.to_string());
+                }
+                Response::Hello(HelloResponse {
+                    protocol_version: PROTOCOL_VERSION.to_string(),
+                    runtime_version: env!("CARGO_PKG_VERSION").to_string(),
+                    capabilities,
+                })
+            }
             Request::TaskCreate(r) => {
                 let mode = match r.permission_mode.as_deref().map(parse_permission_mode) {
                     Some(Ok(m)) => Some(m),
@@ -426,12 +438,40 @@ impl Client for EmbeddedClient {
                     Err(e) => error_response(e),
                 }
             }
-            Request::PermissionResolve(PermissionResolveRequest { task_id, approve }) => {
+            Request::PermissionResolve(PermissionResolveRequest {
+                task_id,
+                approve,
+                request_id,
+                decision,
+            }) => {
                 let task_id = match parse_task_id(&task_id) {
                     Ok(id) => id,
                     Err(resp) => return resp,
                 };
-                match self.runtime.resolve_permission(task_id, approve).await {
+                let decision = match decision.as_deref() {
+                    None => {
+                        if approve {
+                            valyria_agent::ApprovalDecision::Once
+                        } else {
+                            valyria_agent::ApprovalDecision::Deny
+                        }
+                    }
+                    Some("once") => valyria_agent::ApprovalDecision::Once,
+                    Some("task") => valyria_agent::ApprovalDecision::Task,
+                    Some("deny") => valyria_agent::ApprovalDecision::Deny,
+                    Some(other) => {
+                        return error_response_raw(
+                            "approval.unknown_decision",
+                            format!("unknown decision `{other}` (expected: once, task, deny)"),
+                            false,
+                        )
+                    }
+                };
+                match self
+                    .runtime
+                    .resolve_permission_scoped(task_id, request_id, decision)
+                    .await
+                {
                     Ok(()) => Response::Ack,
                     Err(e) => error_response(e),
                 }

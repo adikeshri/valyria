@@ -6,6 +6,7 @@
   "required": [
     "category",
     "prompt",
+    "request_id",
     "risk",
     "target",
     "tool"
@@ -15,6 +16,10 @@
       "type": "string"
     },
     "prompt": {
+      "type": "string"
+    },
+    "request_id": {
+      "description": "Stable identity to pass back to `permission_resolve` (G2).",
       "type": "string"
     },
     "risk": {
