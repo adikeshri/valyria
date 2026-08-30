@@ -15,6 +15,19 @@ Work toward the first release. Phases refer to
 
 ### Added
 
+- **Protocol 1.7.0 — per-task event filter** (desktop-client gap closure
+  G11; additive, backward compatible; capability `stream_filter`).
+  - The subscribe frame (`ClientFrame::Subscribe` / `AuthSubscribe` and
+    `EventsSubscribeRequest`) gains an optional `task_id`. When set the
+    stream carries that task's events plus workspace-global (task-less)
+    ones only, so a per-task subscriber is not fed every other task's
+    activity. Omitted = the full stream, unchanged.
+  - New `Client::subscribe_events_for_task(since, task_id)` with a
+    filter-ignoring default; the embedded and socket transports override
+    it. `subscribe_events` is unchanged.
+  - The async-method half of G11 (long operations return immediately and
+    report via events) already shipped with `model_install` in 1.3.0.
+
 - **Protocol 1.6.0 — local client authentication** (desktop-client gap
   closure G10; additive; capability `client_auth`).
   - Every daemon connection is now **peer-uid checked**: only the OS user

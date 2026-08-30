@@ -142,9 +142,13 @@ pub struct PermissionResolveRequest {
     pub approve: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct EventsSubscribeRequest {
     pub since: u64,
+    /// Restrict the stream to this task's events plus workspace-global
+    /// (task-less) events (protocol 1.7.0, G11). Absent = the full stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
 }
 
 // --- doctor (§4.28) ---
