@@ -1,0 +1,22 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ModelInstallFailedPayload",
+  "description": "`model_install_failed`.",
+  "type": "object",
+  "required": [
+    "code",
+    "id",
+    "message"
+  ],
+  "properties": {
+    "code": {
+      "type": "string"
+    },
+    "id": {
+      "type": "string"
+    },
+    "message": {
+      "type": "string"
+    }
+  }
+}

@@ -17,4 +17,5 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }
 valyria-protocol = { workspace = true }
+valyria-events = { workspace = true }
 valyria-bench = { workspace = true }

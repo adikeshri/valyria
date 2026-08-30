@@ -1,0 +1,66 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ContextRetrievedPayload",
+  "description": "`context_retrieved` — the working set the assembler produced for a step.",
+  "type": "object",
+  "required": [
+    "budget_total",
+    "budget_used",
+    "items"
+  ],
+  "properties": {
+    "budget_total": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "budget_used": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ContextItemPayload"
+      }
+    }
+  },
+  "definitions": {
+    "ContextItemPayload": {
+      "description": "One retrieved context item (§34, G7).",
+      "type": "object",
+      "required": [
+        "path",
+        "reason",
+        "tokens",
+        "trust_level"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "reason": {
+          "description": "The ordered retrieval path, joined with ` -> `, or `explicit`.",
+          "type": "string"
+        },
+        "score": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "trust_level": {
+          "description": "`policy` | `instruction` | `evidence` | `repo_data` | `model_output`.",
+          "type": "string"
+        }
+      }
+    }
+  }
+}

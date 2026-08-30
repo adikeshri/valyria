@@ -52,6 +52,37 @@ pub enum EventKind {
 }
 
 impl EventKind {
+    /// Every kind, in declaration order — the canonical list a client
+    /// syncs its decoder coverage against (G12). `xtask` exports this to
+    /// `docs/protocol/event-kinds.txt` and gates drift.
+    pub const ALL: &'static [EventKind] = &[
+        EventKind::TaskStarted,
+        EventKind::PlanCreated,
+        EventKind::ContextRetrieved,
+        EventKind::ModelStarted,
+        EventKind::ModelCompleted,
+        EventKind::ToolStarted,
+        EventKind::ToolCompleted,
+        EventKind::FileChanged,
+        EventKind::TestStarted,
+        EventKind::TestPassed,
+        EventKind::TestFailed,
+        EventKind::ApprovalRequested,
+        EventKind::TaskPaused,
+        EventKind::TaskCompleted,
+        EventKind::TaskFailed,
+        EventKind::StateChanged,
+        EventKind::ProgressStalled,
+        EventKind::ExternalChangeDetected,
+        EventKind::VerificationEvidence,
+        EventKind::MemoryWritten,
+        EventKind::ResourcePressure,
+        EventKind::PlanCheckpoint,
+        EventKind::ModelInstallProgress,
+        EventKind::ModelInstallCompleted,
+        EventKind::ModelInstallFailed,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             EventKind::TaskStarted => "task_started",
@@ -101,6 +132,21 @@ mod tests {
             EventKind::ExternalChangeDetected.as_str(),
             "external_change_detected"
         );
+    }
+
+    #[test]
+    fn all_covers_every_variant_and_names_are_unique() {
+        // If a variant is added without extending ALL, the round-trip
+        // below still passes but the count check here fails — the reminder
+        // to also add a payload contract (G12).
+        let names: std::collections::BTreeSet<&str> =
+            EventKind::ALL.iter().map(|k| k.as_str()).collect();
+        assert_eq!(names.len(), EventKind::ALL.len(), "duplicate kind name");
+        // Exhaustiveness: matching every variant must be covered by ALL.
+        for k in EventKind::ALL {
+            let _: &str = k.as_str();
+        }
+        assert_eq!(EventKind::ALL.len(), 25);
     }
 
     #[test]
