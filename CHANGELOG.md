@@ -15,6 +15,35 @@ Work toward the first release. Phases refer to
 
 ### Added
 
+- **Protocol 1.3.0 — hardware probe & model management** (desktop-client
+  gap closure G4, G5; additive, backward compatible; capabilities
+  `hardware`, `model_manage`).
+  - `hardware_probe` — the full `valyria_hardware::HardwareReport` (CPU,
+    RAM, GPUs, unified-memory / accelerator flags, disk) on the wire, so
+    the first-run wizard has a structured source instead of prose.
+  - `model_recommend { role }` — every catalog candidate scored against
+    measured hardware with Core's `fit()` (`valyria_model_registry::
+    score_card_for_role`): `fit_kind` (comfortable / tight / will_not_fit),
+    `fit_detail`, `suitability`, `adjusted_score`, `installed`. The
+    recommendation is Core's, not an app heuristic (§41). Non-fitting
+    candidates are still listed, sorted last.
+  - `model_install { id }` — returns immediately; the resumable, verified
+    download runs on a background task and reports
+    `model_install_progress { id, phase, downloaded_bytes, total_bytes }`
+    then `model_install_completed { id, size_bytes }` or
+    `model_install_failed { id, code, message }` on the event stream (three
+    new `EventKind`s). `model_remove { id }` → freed bytes;
+    `model_activate { id, role }` binds a role in `global.db`;
+    `model_inspect { id }` → card + manifest + active roles.
+  - New `valyria-model-store` surface: `ModelStore::install_with_progress`
+    (progress callback), `InstalledModelStore` role-binding table
+    (migration 901), and `HttpFetcher` — a `reqwest` + `rustls` `Fetcher`
+    implementation behind the default `http` feature (the first HTTP
+    client in the workspace; `--no-default-features` drops the TLS stack).
+    `deny.toml` gains `CDLA-Permissive-2.0` for `webpki-roots`.
+  - The post-install probe is still `NullProber` — a real GGUF load probe
+    needs a linked inference runtime (tracked separately).
+
 - **Protocol 1.2.0 — repository read surface** (desktop-client gap closure
   G3; additive, backward compatible; capability `repo`).
   - `git_status` — branch / detached / HEAD SHA plus per-file

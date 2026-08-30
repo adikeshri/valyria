@@ -3,20 +3,28 @@
 //! Unix-socket daemon ([`crate::daemon::serve`]) wraps *this same type*,
 //! so no `valyria-cli` call site changes between the two transports.
 
+// The internal parse helpers here return `Result<_, Response>` — the `Err`
+// side is a ready-made wire `Response`, not an error type, and `Response`
+// is legitimately large (it is the whole protocol response union). Moving
+// one on the rare failure path is fine.
+#![allow(clippy::result_large_err)]
+
 use std::sync::Arc;
 
 use futures::stream::{BoxStream, StreamExt};
 use valyria_events::{Delivery, EventEnvelope, Seq};
 use valyria_protocol::{
-    capability, Client, ConfigEntryWire, ConfigShowResponse, DoctorCheckWire, DoctorRunResponse,
-    GitBranchWire, GitBranchesResponse, GitCommitWire, GitDiffResponse, GitFileStatusWire,
-    GitLogResponse, GitStatusResponse, HelloResponse, IndexStatusResponse, MemoryEntryWire,
-    MemoryListRequest, MemoryListResponse, ModelListResponse, ModelSummaryWire,
-    PermissionResolveRequest, PlanGetResponse, PlanStepSummary, PurgeResponse, Request, Response,
-    ScoreExplanationWire, SearchFeatureWire, SearchHitWire, SearchQueryResponse,
-    SearchStageScoreWire, StorageEntryWire, StorageInspectResponse, StoragePurgeRequest,
-    TaskCreateResponse, TaskIdRequest, TaskListResponse, TaskReportResponse, TaskRollbackRequest,
-    TaskRollbackResponse, TaskStatusResponse, TaskSummary, VerifiedClaimWire, WireError, WireEvent,
+    capability, Client, ConfigEntryWire, ConfigShowResponse, CpuInfoWire, DoctorCheckWire,
+    DoctorRunResponse, GitBranchWire, GitBranchesResponse, GitCommitWire, GitDiffResponse,
+    GitFileStatusWire, GitLogResponse, GitStatusResponse, GpuInfoWire, HardwareProbeResponse,
+    HelloResponse, IndexStatusResponse, MemoryEntryWire, MemoryListRequest, MemoryListResponse,
+    ModelCandidateWire, ModelInspectResponse, ModelListResponse, ModelRecommendResponse,
+    ModelRemoveResponse, ModelSummaryWire, PermissionResolveRequest, PlanGetResponse,
+    PlanStepSummary, PurgeResponse, Request, Response, ScoreExplanationWire, SearchFeatureWire,
+    SearchHitWire, SearchQueryResponse, SearchStageScoreWire, StorageEntryWire,
+    StorageInspectResponse, StoragePurgeRequest, TaskCreateResponse, TaskIdRequest,
+    TaskListResponse, TaskReportResponse, TaskRollbackRequest, TaskRollbackResponse,
+    TaskStatusResponse, TaskSummary, VerifiedClaimWire, WireError, WireEvent,
     WorkspaceStatusResponse, PROTOCOL_VERSION,
 };
 use valyria_types::{CheckpointId, ErrorCode, PermissionMode, TaskId};
@@ -139,6 +147,92 @@ fn search_hit_wire(h: valyria_search::SearchHit) -> SearchHitWire {
                 .collect(),
             retrieval_paths: h.explanation.retrieval_paths,
         },
+    }
+}
+
+fn hardware_probe_wire(h: valyria_hardware::HardwareReport) -> HardwareProbeResponse {
+    HardwareProbeResponse {
+        os: h.os,
+        os_version: h.os_version,
+        arch: h.arch,
+        cpu: CpuInfoWire {
+            brand: h.cpu.brand,
+            physical_cores: h.cpu.physical_cores as u32,
+            logical_cores: h.cpu.logical_cores as u32,
+            arch: h.cpu.arch,
+        },
+        ram_total_bytes: h.ram_total_bytes,
+        ram_available_bytes: h.ram_available_bytes,
+        gpus: h
+            .gpus
+            .into_iter()
+            .map(|g| GpuInfoWire {
+                name: g.name,
+                vendor: g.vendor,
+                core_count: g.core_count,
+                vram_bytes: g.vram_bytes,
+            })
+            .collect(),
+        unified_memory: h.unified_memory,
+        accelerator_present: h.accelerator_present,
+        disk_total_bytes: h.disk.total_bytes,
+        disk_available_bytes: h.disk.available_bytes,
+    }
+}
+
+fn model_candidate_wire(
+    card: &valyria_model_registry::ModelCard,
+    score: Option<valyria_model_registry::CardScore>,
+    installed: bool,
+) -> ModelCandidateWire {
+    use valyria_hardware::{Fit, WillNotFitReason};
+    // `score_card_for_role` returns `None` for a non-fitting card, so a
+    // `Some` score is always Comfortable or Tight; the WillNotFit arm is
+    // defensive.
+    let (fit_kind, fit_detail, adjusted_score) = match score {
+        None => ("will_not_fit", None, None),
+        Some(s) => match s.fit {
+            Fit::Comfortable => ("comfortable", None, Some(s.adjusted)),
+            Fit::Tight { est_util } => ("tight", Some(format!("{est_util:.3}")), Some(s.adjusted)),
+            Fit::WillNotFit { reason } => {
+                let d = match reason {
+                    WillNotFitReason::InsufficientRam => "insufficient_ram",
+                    WillNotFitReason::InsufficientVram => "insufficient_vram",
+                };
+                ("will_not_fit", Some(d.to_string()), None)
+            }
+        },
+    };
+    ModelCandidateWire {
+        id: card.id.clone(),
+        display_name: card.display_name.clone(),
+        family: card.family.clone(),
+        size_bytes: card.file_size_bytes,
+        license_name: card.license_name.clone(),
+        installed,
+        suitability: score.map(|s| s.suitability as u32).unwrap_or(0),
+        fit_kind: fit_kind.to_string(),
+        fit_detail,
+        adjusted_score,
+    }
+}
+
+fn model_inspect_wire(v: crate::runtime::ModelInspectView) -> ModelInspectResponse {
+    ModelInspectResponse {
+        id: v.card.id.clone(),
+        display_name: v.card.display_name.clone(),
+        family: v.card.family.clone(),
+        parameters_b: v.card.parameters_b as f64,
+        quantization: v.card.quantization.as_str().to_string(),
+        context_length: v.card.context_length,
+        size_bytes: v.card.file_size_bytes,
+        license_name: v.card.license_name.clone(),
+        license_url: v.card.license_url.clone(),
+        source_url: v.card.source_url.clone(),
+        installed: v.installed,
+        installed_at_ms: v.installed_at_ms,
+        probe_tokens_per_sec: v.probe_tokens_per_sec,
+        active_roles: v.active_roles,
     }
 }
 
@@ -540,6 +634,59 @@ impl Client for EmbeddedClient {
                     Err(e) => error_response(e),
                 }
             }
+            Request::HardwareProbe(_) => {
+                Response::HardwareProbe(hardware_probe_wire(self.runtime.hardware_probe()))
+            }
+            Request::ModelRecommend(r) => {
+                let Ok(role) = r.role.parse::<valyria_model_registry::ModelRole>() else {
+                    return error_response_raw(
+                        "model.unknown_role",
+                        format!("unknown model role `{}`", r.role),
+                        false,
+                    );
+                };
+                match self.runtime.model_recommend(role).await {
+                    Ok((recommended, candidates)) => {
+                        let candidates: Vec<ModelCandidateWire> = candidates
+                            .iter()
+                            .map(|(c, s, installed)| model_candidate_wire(c, *s, *installed))
+                            .collect();
+                        let recommended = recommended
+                            .and_then(|(c, _)| candidates.iter().find(|w| w.id == c.id).cloned());
+                        Response::ModelRecommend(ModelRecommendResponse {
+                            role: role.as_str().to_string(),
+                            recommended,
+                            candidates,
+                        })
+                    }
+                    Err(e) => error_response(e),
+                }
+            }
+            Request::ModelInstall(r) => match self.runtime.model_install(&r.id).await {
+                Ok(()) => Response::Ack,
+                Err(e) => error_response(e),
+            },
+            Request::ModelRemove(r) => match self.runtime.model_remove(&r.id).await {
+                Ok(freed_bytes) => Response::ModelRemove(ModelRemoveResponse { freed_bytes }),
+                Err(e) => error_response(e),
+            },
+            Request::ModelActivate(r) => {
+                let Ok(role) = r.role.parse::<valyria_model_registry::ModelRole>() else {
+                    return error_response_raw(
+                        "model.unknown_role",
+                        format!("unknown model role `{}`", r.role),
+                        false,
+                    );
+                };
+                match self.runtime.model_activate(&r.id, role).await {
+                    Ok(()) => Response::Ack,
+                    Err(e) => error_response(e),
+                }
+            }
+            Request::ModelInspect(r) => match self.runtime.model_inspect(&r.id).await {
+                Ok(v) => Response::ModelInspect(model_inspect_wire(v)),
+                Err(e) => error_response(e),
+            },
             Request::IndexStatus(_) => match self.runtime.index_status().await {
                 Ok(Some(g)) => Response::IndexStatus(IndexStatusResponse {
                     generation: Some(g.generation.0),

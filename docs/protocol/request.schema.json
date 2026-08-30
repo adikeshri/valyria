@@ -469,6 +469,114 @@
           "$ref": "#/definitions/Empty"
         }
       }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "hardware_probe"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/Empty"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "model_recommend"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/ModelRecommendRequest"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "model_install"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/ModelIdRequest"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "model_remove"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/ModelIdRequest"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "model_activate"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/ModelActivateRequest"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "model_inspect"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/ModelIdRequest"
+        }
+      }
     }
   ],
   "definitions": {
@@ -571,6 +679,45 @@
             "string",
             "null"
           ]
+        }
+      }
+    },
+    "ModelActivateRequest": {
+      "type": "object",
+      "required": [
+        "id",
+        "role"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "role": {
+          "description": "The role to bind `id` to (a `ModelRole` name).",
+          "type": "string"
+        }
+      }
+    },
+    "ModelIdRequest": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      }
+    },
+    "ModelRecommendRequest": {
+      "type": "object",
+      "required": [
+        "role"
+      ],
+      "properties": {
+        "role": {
+          "description": "A `ModelRole` name: `primary_coder`, `fast_coder`, `planner`, `reviewer`, `embedder`, `reranker`, `autocomplete`, `summarizer`.",
+          "type": "string"
         }
       }
     },

@@ -9,12 +9,14 @@ use serde::{Deserialize, Serialize};
 use crate::messages::{
     ConfigSetRequest, ConfigShowResponse, DoctorRunResponse, Empty, EventsSubscribeRequest,
     GitBranchesResponse, GitDiffRequest, GitDiffResponse, GitLogRequest, GitLogResponse,
-    GitStatusResponse, HelloRequest, HelloResponse, IndexStatusResponse, MemoryListRequest,
-    MemoryListResponse, ModelListResponse, PermissionResolveRequest, PlanGetResponse,
-    PurgeResponse, SearchQueryRequest, SearchQueryResponse, StorageInspectResponse,
-    StoragePurgeRequest, TaskCreateRequest, TaskCreateResponse, TaskIdRequest, TaskListResponse,
-    TaskReportResponse, TaskRollbackRequest, TaskRollbackResponse, TaskStatusRequest,
-    TaskStatusResponse, WireError, WorkspaceStatusResponse,
+    GitStatusResponse, HardwareProbeResponse, HelloRequest, HelloResponse, IndexStatusResponse,
+    MemoryListRequest, MemoryListResponse, ModelActivateRequest, ModelIdRequest,
+    ModelInspectResponse, ModelListResponse, ModelRecommendRequest, ModelRecommendResponse,
+    ModelRemoveResponse, PermissionResolveRequest, PlanGetResponse, PurgeResponse,
+    SearchQueryRequest, SearchQueryResponse, StorageInspectResponse, StoragePurgeRequest,
+    TaskCreateRequest, TaskCreateResponse, TaskIdRequest, TaskListResponse, TaskReportResponse,
+    TaskRollbackRequest, TaskRollbackResponse, TaskStatusRequest, TaskStatusResponse, WireError,
+    WorkspaceStatusResponse,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -46,6 +48,12 @@ pub enum Request {
     GitBranches(Empty),
     SearchQuery(SearchQueryRequest),
     IndexStatus(Empty),
+    HardwareProbe(Empty),
+    ModelRecommend(ModelRecommendRequest),
+    ModelInstall(ModelIdRequest),
+    ModelRemove(ModelIdRequest),
+    ModelActivate(ModelActivateRequest),
+    ModelInspect(ModelIdRequest),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -71,8 +79,13 @@ pub enum Response {
     GitBranches(GitBranchesResponse),
     SearchQuery(SearchQueryResponse),
     IndexStatus(IndexStatusResponse),
+    HardwareProbe(HardwareProbeResponse),
+    ModelRecommend(ModelRecommendResponse),
+    ModelRemove(ModelRemoveResponse),
+    ModelInspect(ModelInspectResponse),
     /// A request that succeeded with nothing to return (`task.pause`,
-    /// `task.resume`, `task.cancel`, `permission.resolve`).
+    /// `task.resume`, `task.cancel`, `permission.resolve`,
+    /// `model.install`, `model.activate`).
     Ack,
     Error(WireError),
 }

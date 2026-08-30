@@ -9,11 +9,12 @@ use std::sync::Arc;
 use rusqlite::OptionalExtension;
 use valyria_agent::{AgentDriver, PlanningMode};
 use valyria_context::ContextAssembler;
-use valyria_events::EventBus;
+use valyria_events::{EventBus, EventKind, NewEvent};
 use valyria_index::IndexStore;
 use valyria_ledger::Ledger;
 use valyria_memory::{MemoryStore, RetrievalRequest};
-use valyria_model_registry::Catalog;
+use valyria_model_registry::{score_card_for_role, CardScore, Catalog, ModelCard, ModelRole};
+use valyria_model_store::{HttpFetcher, ModelStore, NullProber};
 use valyria_orchestrator::{Orchestrator, Role};
 use valyria_permissions::PermissionEngine;
 use valyria_plan::{PlanRevision, PlanStore, RollbackError, RollbackReport};
@@ -22,7 +23,7 @@ use valyria_sandbox::{detect_platform_launcher, ProcessLauncher, SandboxProfile}
 use valyria_store::Store;
 use valyria_task::{Budget, Task, TaskManager};
 use valyria_tools::ToolRuntime;
-use valyria_types::{AgentState, CheckpointId, PermissionMode, TaskId, WorkspaceId};
+use valyria_types::{AgentState, CheckpointId, ErrorCode, PermissionMode, TaskId, WorkspaceId};
 use valyria_util::{CancellationToken, Clock, SystemClock};
 use valyria_verify::{CompletionReport, VerificationLog};
 use valyria_vfs::WorkspaceRoot;
@@ -60,6 +61,16 @@ pub struct GitStatusView {
     pub detached: bool,
     pub head_commit: Option<String>,
     pub files: Vec<valyria_git::FileStatus>,
+}
+
+/// Model detail as [`Runtime::model_inspect`] returns it.
+#[derive(Debug, Clone)]
+pub struct ModelInspectView {
+    pub card: ModelCard,
+    pub installed: bool,
+    pub installed_at_ms: Option<i64>,
+    pub probe_tokens_per_sec: Option<f64>,
+    pub active_roles: Vec<String>,
 }
 
 /// Loads a scenario TOML file into a `Scenario` `RuntimeConfig` can be
@@ -684,6 +695,224 @@ impl Runtime {
                 (c, is_installed)
             })
             .collect())
+    }
+
+    // --- hardware & model management (§20, §21, §22, §37;
+    // capabilities `hardware`, `model_manage`) ---
+
+    fn model_store(&self) -> ModelStore {
+        ModelStore::new(self.global.root())
+    }
+
+    /// A structured hardware report (§37) — the source the first-run
+    /// wizard's Hardware View and model recommendation are built on.
+    pub fn hardware_probe(&self) -> valyria_hardware::HardwareReport {
+        valyria_hardware::probe()
+    }
+
+    /// Score every catalog candidate for `role` against measured hardware
+    /// (§22, §41). Returns `(recommended, all_candidates_best_first)`.
+    /// A non-fitting card is still listed, with `score: None`. The
+    /// recommendation is Core's `fit()` scoring, not an app heuristic.
+    pub async fn model_recommend(
+        &self,
+        role: ModelRole,
+    ) -> Result<(
+        Option<(ModelCard, CardScore)>,
+        Vec<(ModelCard, Option<CardScore>, bool)>,
+    )> {
+        let catalog = Catalog::embedded().map_err(|e| AppError::Plan(e.to_string()))?;
+        let hw = self.hardware_probe();
+        let installed: std::collections::BTreeSet<String> = self
+            .global
+            .models()
+            .list()
+            .await?
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+
+        let mut scored: Vec<(ModelCard, Option<CardScore>, bool)> = catalog
+            .candidates_for_role(role)
+            .into_iter()
+            .map(|card| {
+                let score = score_card_for_role(card, role, &hw);
+                (card.clone(), score, installed.contains(&card.id))
+            })
+            .collect();
+        // Fitting candidates first, best adjusted score first; non-fitting last.
+        scored.sort_by(|a, b| match (&a.1, &b.1) {
+            (Some(x), Some(y)) => y
+                .adjusted
+                .partial_cmp(&x.adjusted)
+                .unwrap_or(std::cmp::Ordering::Equal),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.0.id.cmp(&b.0.id),
+        });
+
+        let recommended = scored
+            .iter()
+            .find_map(|(c, s, _)| s.map(|s| (c.clone(), s)));
+        Ok((recommended, scored))
+    }
+
+    /// Begin installing catalog model `id`. Returns immediately; the
+    /// download runs on a background task and reports
+    /// `model_install_progress` / `_completed` / `_failed` on the event
+    /// stream (§20, §21). The weights land in `~/.valyria/models/<id>/`,
+    /// Core-owned; nothing else fetches them.
+    pub async fn model_install(&self, id: &str) -> Result<()> {
+        self.model_install_with(id, HttpFetcher::new()?).await
+    }
+
+    /// [`Self::model_install`] with an injected [`Fetcher`](valyria_model_store::Fetcher)
+    /// — production passes an `HttpFetcher`; tests pass an in-memory one.
+    pub async fn model_install_with<F>(&self, id: &str, fetcher: F) -> Result<()>
+    where
+        F: valyria_model_store::Fetcher + Send + Sync + 'static,
+    {
+        let catalog = Catalog::embedded().map_err(|e| AppError::Plan(e.to_string()))?;
+        let card = catalog
+            .get(id)
+            .ok_or_else(|| AppError::Repo(format!("no catalog model `{id}`")))?
+            .clone();
+        let store = self.model_store();
+        if store.is_installed(id) {
+            return Err(AppError::ModelStore(
+                valyria_model_store::ModelStoreError::AlreadyInstalled { id: id.to_string() },
+            ));
+        }
+        let hw = self.hardware_probe();
+        let plan = store.plan_install(&card, &hw).confirm();
+
+        let events = self.events.clone();
+        let installed_index = self.global.models().clone();
+        let id_owned = id.to_string();
+
+        tokio::spawn(async move {
+            let cancel = CancellationToken::new();
+
+            // The progress callback is synchronous; funnel its updates
+            // through a channel that a concurrent task turns into events.
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let pid = id_owned.clone();
+            let progress = move |p: valyria_model_store::InstallProgress| {
+                let _ = tx.send(p);
+            };
+
+            let drain_events = events.clone();
+            let drain_id = id_owned.clone();
+            let drainer = tokio::spawn(async move {
+                while let Some(p) = rx.recv().await {
+                    let _ = drain_events
+                        .append(NewEvent::new(
+                            EventKind::ModelInstallProgress,
+                            serde_json::json!({
+                                "id": drain_id,
+                                "phase": p.phase.as_str(),
+                                "downloaded_bytes": p.downloaded_bytes,
+                                "total_bytes": p.total_bytes,
+                            }),
+                        ))
+                        .await;
+                }
+            });
+
+            let outcome = store
+                .install_with_progress(&plan, &fetcher, &NullProber, &cancel, &progress)
+                .await;
+            drop(progress); // close tx so the drainer finishes
+            let _ = drainer.await;
+
+            match outcome {
+                Ok(manifest) => {
+                    let _ = installed_index.record(&manifest).await;
+                    let _ = events
+                        .append(NewEvent::new(
+                            EventKind::ModelInstallCompleted,
+                            serde_json::json!({
+                                "id": pid,
+                                "size_bytes": manifest.size_bytes,
+                            }),
+                        ))
+                        .await;
+                }
+                Err(e) => {
+                    let _ = events
+                        .append(NewEvent::new(
+                            EventKind::ModelInstallFailed,
+                            serde_json::json!({
+                                "id": pid,
+                                "code": ErrorCode::code(&e),
+                                "message": e.to_string(),
+                            }),
+                        ))
+                        .await;
+                }
+            }
+        });
+        Ok(())
+    }
+
+    /// Remove installed model `id`, dropping any role bindings that named
+    /// it. Returns bytes reclaimed.
+    pub async fn model_remove(&self, id: &str) -> Result<u64> {
+        let freed = self.model_store().remove(id)?;
+        let _ = self.global.models().delete(id).await;
+        let _ = self.global.models().clear_bindings_for(id).await;
+        Ok(freed)
+    }
+
+    /// Bind installed model `id` to `role` (§38). Persisted in `global.db`.
+    pub async fn model_activate(&self, id: &str, role: ModelRole) -> Result<()> {
+        if !self.model_store().is_installed(id) {
+            return Err(AppError::ModelStore(
+                valyria_model_store::ModelStoreError::NotInstalled { id: id.to_string() },
+            ));
+        }
+        let now = SystemClock.now().as_millis() as i64;
+        self.global
+            .models()
+            .set_role_binding(role.as_str(), id, now)
+            .await?;
+        Ok(())
+    }
+
+    /// Full detail for model `id`: its catalog card, its manifest when
+    /// installed, and the roles it is bound to.
+    pub async fn model_inspect(&self, id: &str) -> Result<ModelInspectView> {
+        let catalog = Catalog::embedded().map_err(|e| AppError::Plan(e.to_string()))?;
+        let card = catalog
+            .get(id)
+            .ok_or_else(|| AppError::Repo(format!("no catalog model `{id}`")))?
+            .clone();
+        let store = self.model_store();
+        let installed = store.is_installed(id);
+        let manifest = if installed {
+            store.manifest(id).ok()
+        } else {
+            None
+        };
+        let active_roles: Vec<String> = self
+            .global
+            .models()
+            .role_bindings()
+            .await?
+            .into_iter()
+            .filter(|(_, m)| m == id)
+            .map(|(role, _)| role)
+            .collect();
+        Ok(ModelInspectView {
+            card,
+            installed,
+            installed_at_ms: manifest.as_ref().map(|m| m.installed_at_ms),
+            probe_tokens_per_sec: manifest
+                .as_ref()
+                .and_then(|m| m.probe.as_ref())
+                .map(|p| p.tokens_per_sec as f64),
+            active_roles,
+        })
     }
 
     fn spawn_driver(&self, task_id: TaskId) {

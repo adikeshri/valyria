@@ -97,6 +97,9 @@ gix = { version = "0.66", default-features = false, features = ["max-performance
 # Unified-diff generation (already in the tree transitively via gix's blob-diff).
 imara-diff = "0.1"
 
+# --- http (model-weight downloads only; behind valyria-model-store's `http` feature) ---
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
+
 # --- concurrency helpers ---
 parking_lot = "0.12"
 crossbeam-channel = "0.5"

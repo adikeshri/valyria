@@ -17,15 +17,18 @@
 //! ```
 //!
 //! HTTP itself is behind the [`Fetcher`] trait so every path above is
-//! exercised offline against [`InMemoryFetcher`]; a real `reqwest`-backed
-//! fetcher is a small isolated addition and is not part of this crate's
-//! default build (Phase 9 scope note).
+//! exercised offline against [`InMemoryFetcher`]. The real `reqwest` +
+//! `rustls` implementation ([`HttpFetcher`]) is compiled by the default
+//! `http` feature; turn it off (`--no-default-features`) for a build with
+//! no TLS stack at all.
 
 #![forbid(unsafe_code)]
 
 pub mod db;
 pub mod error;
 pub mod fetch;
+#[cfg(feature = "http")]
+pub mod http;
 pub mod manifest;
 pub mod probe;
 pub mod store;
@@ -33,9 +36,11 @@ pub mod store;
 pub use db::{InstalledModelRow, InstalledModelStore, MIGRATIONS};
 pub use error::{ModelStoreError, Result};
 pub use fetch::{Fetcher, InMemoryFetcher, RemoteObject};
+#[cfg(feature = "http")]
+pub use http::HttpFetcher;
 pub use manifest::{Manifest, MANIFEST_FILENAME};
 pub use probe::{NullProber, ProbeResult, Prober};
-pub use store::{GcReport, InstallPlan, ModelStore, StorageReport};
+pub use store::{GcReport, InstallPhase, InstallPlan, InstallProgress, ModelStore, StorageReport};
 
 /// Kept for backwards compatibility with the scaffold; the crate is now
 /// implemented.

@@ -13,10 +13,11 @@ use valyria_store::{Migration, Store};
 use crate::error::Result;
 use crate::manifest::Manifest;
 
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    version: 900,
-    description: "create installed_model table",
-    sql: "CREATE TABLE installed_model (
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 900,
+        description: "create installed_model table",
+        sql: "CREATE TABLE installed_model (
         id TEXT PRIMARY KEY,
         weights_file TEXT NOT NULL,
         content_hash TEXT NOT NULL,
@@ -25,7 +26,17 @@ pub const MIGRATIONS: &[Migration] = &[Migration {
         installed_at_ms INTEGER NOT NULL,
         probe_json TEXT
     );",
-}];
+    },
+    Migration {
+        version: 901,
+        description: "create model_role_binding table",
+        sql: "CREATE TABLE model_role_binding (
+        role TEXT PRIMARY KEY,
+        model_id TEXT NOT NULL,
+        bound_at_ms INTEGER NOT NULL
+    );",
+    },
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstalledModelRow {
@@ -134,6 +145,76 @@ impl InstalledModelStore {
             .await?;
         Ok(())
     }
+
+    // --- role bindings (§38: which installed model serves which role) ---
+
+    /// Bind `role` (a `ModelRole` display string, e.g. `primary_coder`) to
+    /// installed model `model_id`. Replaces any existing binding.
+    pub async fn set_role_binding(&self, role: &str, model_id: &str, at_ms: i64) -> Result<()> {
+        let (role, model_id) = (role.to_string(), model_id.to_string());
+        self.store
+            .call(move |conn| {
+                conn.execute(
+                    "INSERT OR REPLACE INTO model_role_binding (role, model_id, bound_at_ms)
+                     VALUES (?1, ?2, ?3)",
+                    params![role, model_id, at_ms],
+                )?;
+                Ok(())
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// The model bound to `role`, if any.
+    pub async fn role_binding(&self, role: &str) -> Result<Option<String>> {
+        let role = role.to_string();
+        let id = self
+            .store
+            .call(move |conn| {
+                let id = conn
+                    .query_row(
+                        "SELECT model_id FROM model_role_binding WHERE role = ?1",
+                        params![role],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .optional()?;
+                Ok(id)
+            })
+            .await?;
+        Ok(id)
+    }
+
+    /// Every `(role, model_id)` binding, ordered by role.
+    pub async fn role_bindings(&self) -> Result<Vec<(String, String)>> {
+        let rows = self
+            .store
+            .call(move |conn| {
+                let mut stmt =
+                    conn.prepare("SELECT role, model_id FROM model_role_binding ORDER BY role")?;
+                let rows = stmt
+                    .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            })
+            .await?;
+        Ok(rows)
+    }
+
+    /// Drop every binding that points at `model_id` (called when it is
+    /// removed).
+    pub async fn clear_bindings_for(&self, model_id: &str) -> Result<()> {
+        let model_id = model_id.to_string();
+        self.store
+            .call(move |conn| {
+                conn.execute(
+                    "DELETE FROM model_role_binding WHERE model_id = ?1",
+                    params![model_id],
+                )?;
+                Ok(())
+            })
+            .await?;
+        Ok(())
+    }
 }
 
 fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<InstalledModelRow> {
@@ -161,8 +242,42 @@ mod tests {
     fn applies_cleanly() {
         let mut conn = rusqlite::Connection::open_in_memory().unwrap();
         valyria_store::run_migrations(&mut conn, MIGRATIONS).unwrap();
-        assert!(valyria_store::applied_versions(&conn)
-            .unwrap()
-            .contains(&900));
+        let applied = valyria_store::applied_versions(&conn).unwrap();
+        assert!(applied.contains(&900));
+        assert!(applied.contains(&901));
+    }
+
+    #[tokio::test]
+    async fn role_bindings_round_trip_and_clear() {
+        let store = Arc::new(Store::open_in_memory(MIGRATIONS).unwrap());
+        let db = InstalledModelStore::new(store);
+
+        assert_eq!(db.role_binding("primary_coder").await.unwrap(), None);
+        db.set_role_binding("primary_coder", "qwen-x", 10)
+            .await
+            .unwrap();
+        db.set_role_binding("planner", "qwen-x", 11).await.unwrap();
+        assert_eq!(
+            db.role_binding("primary_coder").await.unwrap().as_deref(),
+            Some("qwen-x")
+        );
+        assert_eq!(db.role_bindings().await.unwrap().len(), 2);
+
+        // Rebinding replaces.
+        db.set_role_binding("primary_coder", "llama-y", 12)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.role_binding("primary_coder").await.unwrap().as_deref(),
+            Some("llama-y")
+        );
+
+        // Removing a model clears every binding that named it.
+        db.clear_bindings_for("qwen-x").await.unwrap();
+        assert_eq!(db.role_binding("planner").await.unwrap(), None);
+        assert_eq!(
+            db.role_binding("primary_coder").await.unwrap().as_deref(),
+            Some("llama-y")
+        );
     }
 }

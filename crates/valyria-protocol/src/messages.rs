@@ -432,6 +432,137 @@ pub struct IndexStatusResponse {
     pub created_at_ms: Option<i64>,
 }
 
+// --- hardware & models (§20, §21, §22, §37; capabilities `hardware`,
+// `models`) ---
+//
+// Additive as of protocol 1.3.0. `hardware_probe` and `model_recommend`
+// give the first-run wizard a structured source and let it *explain* a
+// recommendation from Core's `fit()` scoring rather than a heuristic
+// (§41). `model_install` / `_remove` / `_activate` / `_inspect` drive
+// `valyria-model-store`; install returns immediately and reports progress
+// on the event stream (`model_install_progress` / `_completed` /
+// `_failed`).
+
+/// Mirrors `valyria_hardware::CpuInfo`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CpuInfoWire {
+    pub brand: String,
+    pub physical_cores: u32,
+    pub logical_cores: u32,
+    pub arch: String,
+}
+
+/// Mirrors `valyria_hardware::GpuInfo`. `vram_bytes` is `None` on a
+/// unified-memory system — meaningful, not missing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct GpuInfoWire {
+    pub name: String,
+    pub vendor: Option<String>,
+    pub core_count: Option<u32>,
+    pub vram_bytes: Option<u64>,
+}
+
+/// Mirrors `valyria_hardware::HardwareReport` (§37, §39).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct HardwareProbeResponse {
+    pub os: String,
+    pub os_version: Option<String>,
+    pub arch: String,
+    pub cpu: CpuInfoWire,
+    pub ram_total_bytes: u64,
+    pub ram_available_bytes: u64,
+    pub gpus: Vec<GpuInfoWire>,
+    /// CPU and GPU share one memory pool (Apple Silicon today).
+    pub unified_memory: bool,
+    /// `Some(false)` = probed and absent; `None` = not probed on this
+    /// platform yet.
+    pub accelerator_present: Option<bool>,
+    pub disk_total_bytes: u64,
+    pub disk_available_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelRecommendRequest {
+    /// A `ModelRole` name: `primary_coder`, `fast_coder`, `planner`,
+    /// `reviewer`, `embedder`, `reranker`, `autocomplete`, `summarizer`.
+    pub role: String,
+}
+
+/// One scored candidate for a role on this machine — mirrors
+/// `valyria_model_registry::CardScore` joined with its card. A card that
+/// will not fit is still listed, with `fit_kind = "will_not_fit"` and no
+/// `adjusted_score`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelCandidateWire {
+    pub id: String,
+    pub display_name: String,
+    pub family: String,
+    pub size_bytes: u64,
+    pub license_name: String,
+    pub installed: bool,
+    /// Catalog role suitability, 0..=100.
+    pub suitability: u32,
+    /// `comfortable` | `tight` | `will_not_fit`.
+    pub fit_kind: String,
+    /// For `tight`, the estimated resource utilisation (0.0..~1.0); for
+    /// `will_not_fit`, the reason (`insufficient_ram` | `insufficient_vram`).
+    pub fit_detail: Option<String>,
+    /// `suitability` minus the tight-fit penalty — the value Core ranks
+    /// on. `None` when the card will not fit.
+    pub adjusted_score: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelRecommendResponse {
+    pub role: String,
+    /// The best-scoring fitting candidate, if any.
+    pub recommended: Option<ModelCandidateWire>,
+    /// Every candidate for the role, best first (non-fitting ones sorted
+    /// last).
+    pub candidates: Vec<ModelCandidateWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelIdRequest {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelActivateRequest {
+    pub id: String,
+    /// The role to bind `id` to (a `ModelRole` name).
+    pub role: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelRemoveResponse {
+    pub freed_bytes: u64,
+}
+
+/// Full detail for one model — mirrors the `ModelCard` plus, when
+/// installed, its `manifest.json` (§4.21). `license_text` is the license
+/// body when Core has it locally, for the acceptance prompt.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelInspectResponse {
+    pub id: String,
+    pub display_name: String,
+    pub family: String,
+    pub parameters_b: f64,
+    pub quantization: String,
+    pub context_length: u32,
+    pub size_bytes: u64,
+    pub license_name: String,
+    pub license_url: Option<String>,
+    pub source_url: String,
+    pub installed: bool,
+    /// Present only when installed.
+    pub installed_at_ms: Option<i64>,
+    /// Measured decode throughput from the post-install probe, if recorded.
+    pub probe_tokens_per_sec: Option<f64>,
+    /// The roles this model is currently bound to.
+    pub active_roles: Vec<String>,
+}
+
 // --- workspace ---
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
