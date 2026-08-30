@@ -14,6 +14,7 @@
 
 pub mod client;
 pub mod envelope;
+pub mod event_payloads;
 pub mod messages;
 pub mod schema;
 pub mod transport;

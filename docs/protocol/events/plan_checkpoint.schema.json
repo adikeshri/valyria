@@ -1,0 +1,18 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PlanCheckpointPayload",
+  "description": "`plan_checkpoint` — a rollback point was taken (§16, G13).",
+  "type": "object",
+  "required": [
+    "checkpoint_id",
+    "step_id"
+  ],
+  "properties": {
+    "checkpoint_id": {
+      "type": "string"
+    },
+    "step_id": {
+      "type": "string"
+    }
+  }
+}

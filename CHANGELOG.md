@@ -15,6 +15,20 @@ Work toward the first release. Phases refer to
 
 ### Added
 
+- **Protocol 1.7.1 — event payload contracts** (desktop-client gap closure
+  G12; docs/gate only, patch bump).
+  - `docs/protocol/event-kinds.txt` — the canonical event-`kind` list,
+    exported from `valyria_events::EventKind` and gated against drift by
+    `xtask check-protocol` (a new kind without a contract fails CI).
+  - `docs/protocol/events/<kind>.schema.json` — a JSON Schema per kind
+    with a pinned payload shape (`state_changed`, `tool_started`,
+    `tool_completed`, `approval_requested`, `context_retrieved`,
+    `plan_checkpoint`, `model_install_*`, `verification_evidence` /
+    `test_failed`), from new mirror structs in
+    `valyria_protocol::event_payloads`. Kinds without a struct keep an
+    intentionally open payload. Regenerated and gated with the request /
+    response schemas.
+
 - **Protocol 1.7.0 — per-task event filter** (desktop-client gap closure
   G11; additive, backward compatible; capability `stream_filter`).
   - The subscribe frame (`ClientFrame::Subscribe` / `AuthSubscribe` and

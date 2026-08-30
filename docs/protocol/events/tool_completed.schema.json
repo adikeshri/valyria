@@ -1,0 +1,53 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ToolCompletedPayload",
+  "description": "`tool_completed` — a tool invocation finished (G14).",
+  "type": "object",
+  "required": [
+    "duration_ms",
+    "rendered",
+    "success",
+    "tool_invocation_id",
+    "tool_record_id"
+  ],
+  "properties": {
+    "duration_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "exit_code": {
+      "description": "Shell tools only; `null` otherwise.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "rendered": {
+      "description": "The pre-formatted human blob (`exit=… \\n--- stdout ---\\n…`).",
+      "type": "string"
+    },
+    "stderr": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "stdout": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "success": {
+      "type": "boolean"
+    },
+    "tool_invocation_id": {
+      "type": "string"
+    },
+    "tool_record_id": {
+      "type": "string"
+    }
+  }
+}

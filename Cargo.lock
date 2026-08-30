@@ -4535,6 +4535,7 @@ dependencies = [
  "tokio",
  "toml",
  "valyria-bench",
+ "valyria-events",
  "valyria-protocol",
 ]
 
