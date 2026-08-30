@@ -732,6 +732,8 @@ async fn cmd_permission_resolve(raw: Vec<String>) -> ExitCode {
             .call(Request::PermissionResolve(PermissionResolveRequest {
                 task_id: resolve_task_id,
                 approve,
+                request_id: None,
+                decision: None,
             }))
             .await
         {

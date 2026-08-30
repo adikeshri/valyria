@@ -72,6 +72,18 @@ pub(crate) const MAX_STEP_TURNS: usize = 3;
 /// tool — `step_planning` intercepts it before `ToolRuntime` ever sees it.
 pub const SUBMIT_PLAN_ACTION: &str = "submit_plan";
 
+/// How a client resolved an outstanding approval (§13, G2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalDecision {
+    /// Approve just this one tool call.
+    Once,
+    /// Approve, and grant the same class of request for the rest of the
+    /// task (`GrantScope::Task`).
+    Task,
+    /// Deny — the task fails.
+    Deny,
+}
+
 /// Whether the `Planning` state asks the model for a plan or is the
 /// Phase 3 pass-through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -874,6 +886,8 @@ impl AgentDriver {
                             step_id,
                             outcome_kind: kinds::PERMISSION_ASK.into(),
                             payload: serde_json::json!({
+                                // Stable request identity for permission_resolve (G2).
+                                "request_id": effect_id.to_string(),
                                 "prompt": prompt,
                                 "tool": request.tool,
                                 "category": format!("{:?}", request.category),
@@ -920,6 +934,26 @@ impl AgentDriver {
     }
 
     pub async fn resolve_permission(&self, task_id: TaskId, approve: bool) -> Result<()> {
+        let decision = if approve {
+            ApprovalDecision::Once
+        } else {
+            ApprovalDecision::Deny
+        };
+        self.resolve_permission_scoped(task_id, None, decision)
+            .await
+    }
+
+    /// Resolve an outstanding approval, optionally asserting `request_id`
+    /// (the pending call's effect id) so a client cannot resolve a prompt
+    /// a newer request has superseded (G2). `decision` is `Once` (approve
+    /// this call), `Task` (approve and grant for the rest of the task), or
+    /// `Deny`.
+    pub async fn resolve_permission_scoped(
+        &self,
+        task_id: TaskId,
+        request_id: Option<String>,
+        decision: ApprovalDecision,
+    ) -> Result<()> {
         let task = self.tasks.get(task_id).await?;
         if task.state != AgentState::WaitingForPermission {
             return Err(AgentError::NotWaitingForPermission(task_id));
@@ -929,6 +963,17 @@ impl AgentDriver {
             .pending_tool_call(task_id)
             .await?
             .ok_or(AgentError::NoPendingToolCall(task_id))?;
+
+        if let Some(want) = &request_id {
+            let current = pending.effect_id.to_string();
+            if *want != current {
+                return Err(AgentError::ApprovalSuperseded {
+                    got: want.clone(),
+                    current,
+                });
+            }
+        }
+
         let tool = self
             .tools
             .get_tool(&pending.tool)
@@ -937,7 +982,7 @@ impl AgentDriver {
         let ctx = self.build_ctx(task_id, pending.step_id, CancellationToken::new());
         let effect_id = pending.effect_id;
 
-        if !approve {
+        if decision == ApprovalDecision::Deny {
             self.tasks
                 .append_journal(
                     task_id,
@@ -958,7 +1003,11 @@ impl AgentDriver {
                 .map_err(|e| AgentError::MalformedCompletion {
                     detail: e.to_string(),
                 })?;
-        let auth = self.permissions.approve(request, GrantScope::OneShot, None);
+        let scope = match decision {
+            ApprovalDecision::Task => GrantScope::Task(task_id),
+            _ => GrantScope::OneShot,
+        };
+        let auth = self.permissions.approve(request, scope, None);
         let result = self
             .tools
             .invoke_with_authorization(&ctx, &pending.tool, pending.input, auth)

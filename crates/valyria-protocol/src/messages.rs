@@ -139,7 +139,19 @@ pub struct PlanGetResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct PermissionResolveRequest {
     pub task_id: String,
+    /// Legacy approve/deny (protocol 1.0). Ignored when `decision` is set.
     pub approve: bool,
+    /// The `request_id` from the `approval_requested` payload (G2). When
+    /// present it is asserted against the daemon's current pending
+    /// request; a stale id is rejected with `approval.superseded` rather
+    /// than resolving the wrong prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// `once` (approve this call), `task` (approve and grant for the rest
+    /// of the task — "Allow for Task"), or `deny`. Overrides `approve`
+    /// when set. Additive as of protocol 1.8.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -662,12 +674,20 @@ mod tests {
 
     #[test]
     fn permission_resolve_request_round_trip() {
+        // Legacy shape (no request_id / decision) still parses.
+        let legacy: PermissionResolveRequest =
+            serde_json::from_str(r#"{"task_id":"task_01H","approve":true}"#).unwrap();
+        assert_eq!(legacy.request_id, None);
+        assert_eq!(legacy.decision, None);
+
         let req = PermissionResolveRequest {
             task_id: "task_01H".into(),
             approve: true,
+            request_id: Some("eff_01H".into()),
+            decision: Some("task".into()),
         };
-        let json = serde_json::to_string(&req).unwrap();
-        let back: PermissionResolveRequest = serde_json::from_str(&json).unwrap();
+        let back: PermissionResolveRequest =
+            serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
         assert_eq!(req, back);
     }
 

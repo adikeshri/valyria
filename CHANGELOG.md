@@ -15,6 +15,22 @@ Work toward the first release. Phases refer to
 
 ### Added
 
+- **Protocol 1.8.0 — approval identity & scope** (desktop-client gap
+  closure G2; additive, backward compatible; capability `approval_scope`).
+  - `approval_requested` now carries a stable `request_id` (the pending
+    tool call's effect id).
+  - `permission_resolve` gains `request_id?` and `decision`
+    (`once` | `task` | `deny`). When `request_id` is set it is asserted
+    against the daemon's current pending request — a stale prompt is
+    refused with `approval.superseded` rather than resolving the wrong
+    call. `task` is "Allow for Task" (`GrantScope::Task`), so the same
+    class of request auto-allows for the rest of that task. `approve` is
+    kept for 1.0 clients and used only when `decision` is absent.
+  - New `AgentDriver::resolve_permission_scoped` /
+    `Runtime::resolve_permission_scoped` /
+    `valyria_agent::ApprovalDecision`. `AppError::Agent` now reports the
+    inner code, so `approval.superseded` reaches the wire.
+
 - **Protocol 1.7.1 — event payload contracts** (desktop-client gap closure
   G12; docs/gate only, patch bump).
   - `docs/protocol/event-kinds.txt` — the canonical event-`kind` list,

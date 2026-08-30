@@ -58,7 +58,7 @@ impl ErrorCode for AppError {
             AppError::Store(_) => "app.store",
             AppError::Events(_) => "app.events",
             AppError::Task(_) => "app.task",
-            AppError::Agent(_) => "app.agent",
+            AppError::Agent(e) => e.code(),
             AppError::Vfs(_) => "app.vfs",
             AppError::Ledger(_) => "app.ledger",
             AppError::Scenario(_) => "app.scenario",

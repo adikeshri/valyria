@@ -16,6 +16,8 @@ pub enum AgentError {
     NotWaitingForPermission(TaskId),
     #[error("task {0} has no pending tool call to resolve")]
     NoPendingToolCall(TaskId),
+    #[error("approval request `{got}` is stale; the current pending request is `{current}`")]
+    ApprovalSuperseded { got: String, current: String },
     #[error("plan error: {0}")]
     Plan(String),
     #[error("checkpoint rollback failed: {0}")]
@@ -32,6 +34,7 @@ impl ErrorCode for AgentError {
             AgentError::UnknownTool(_) => "agent.unknown_tool",
             AgentError::NotWaitingForPermission(_) => "agent.not_waiting_for_permission",
             AgentError::NoPendingToolCall(_) => "agent.no_pending_tool_call",
+            AgentError::ApprovalSuperseded { .. } => "approval.superseded",
             AgentError::Plan(_) => "agent.plan",
             AgentError::Rollback(_) => "agent.rollback",
         }

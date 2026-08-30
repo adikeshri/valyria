@@ -426,12 +426,40 @@ impl Client for EmbeddedClient {
                     Err(e) => error_response(e),
                 }
             }
-            Request::PermissionResolve(PermissionResolveRequest { task_id, approve }) => {
+            Request::PermissionResolve(PermissionResolveRequest {
+                task_id,
+                approve,
+                request_id,
+                decision,
+            }) => {
                 let task_id = match parse_task_id(&task_id) {
                     Ok(id) => id,
                     Err(resp) => return resp,
                 };
-                match self.runtime.resolve_permission(task_id, approve).await {
+                let decision = match decision.as_deref() {
+                    None => {
+                        if approve {
+                            valyria_agent::ApprovalDecision::Once
+                        } else {
+                            valyria_agent::ApprovalDecision::Deny
+                        }
+                    }
+                    Some("once") => valyria_agent::ApprovalDecision::Once,
+                    Some("task") => valyria_agent::ApprovalDecision::Task,
+                    Some("deny") => valyria_agent::ApprovalDecision::Deny,
+                    Some(other) => {
+                        return error_response_raw(
+                            "approval.unknown_decision",
+                            format!("unknown decision `{other}` (expected: once, task, deny)"),
+                            false,
+                        )
+                    }
+                };
+                match self
+                    .runtime
+                    .resolve_permission_scoped(task_id, request_id, decision)
+                    .await
+                {
                     Ok(()) => Response::Ack,
                     Err(e) => error_response(e),
                 }

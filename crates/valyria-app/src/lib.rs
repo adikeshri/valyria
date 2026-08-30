@@ -35,5 +35,5 @@ pub use runtime::{
 };
 pub use storage::{PurgeOutcome, PurgeScope, StorageEntry, StorageInspector, StorageReport};
 
-pub use valyria_agent::PlanningMode;
+pub use valyria_agent::{ApprovalDecision, PlanningMode};
 pub use valyria_plan::{RollbackError, RollbackReport};
