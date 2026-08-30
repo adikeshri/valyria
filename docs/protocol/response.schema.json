@@ -363,7 +363,79 @@
       }
     },
     {
-      "description": "A request that succeeded with nothing to return (`task.pause`, `task.resume`, `task.cancel`, `permission.resolve`).",
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "hardware_probe"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/HardwareProbeResponse"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "model_recommend"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/ModelRecommendResponse"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "model_remove"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/ModelRemoveResponse"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "model_inspect"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/ModelInspectResponse"
+        }
+      }
+    },
+    {
+      "description": "A request that succeeded with nothing to return (`task.pause`, `task.resume`, `task.cancel`, `permission.resolve`, `model.install`, `model.activate`).",
       "type": "object",
       "required": [
         "result"
@@ -428,6 +500,34 @@
           "items": {
             "$ref": "#/definitions/ConfigEntryWire"
           }
+        }
+      }
+    },
+    "CpuInfoWire": {
+      "description": "Mirrors `valyria_hardware::CpuInfo`.",
+      "type": "object",
+      "required": [
+        "arch",
+        "brand",
+        "logical_cores",
+        "physical_cores"
+      ],
+      "properties": {
+        "arch": {
+          "type": "string"
+        },
+        "brand": {
+          "type": "string"
+        },
+        "logical_cores": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "physical_cores": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
         }
       }
     },
@@ -630,6 +730,109 @@
         }
       }
     },
+    "GpuInfoWire": {
+      "description": "Mirrors `valyria_hardware::GpuInfo`. `vram_bytes` is `None` on a unified-memory system — meaningful, not missing.",
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "core_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "name": {
+          "type": "string"
+        },
+        "vendor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "vram_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "HardwareProbeResponse": {
+      "description": "Mirrors `valyria_hardware::HardwareReport` (§37, §39).",
+      "type": "object",
+      "required": [
+        "arch",
+        "cpu",
+        "disk_available_bytes",
+        "disk_total_bytes",
+        "gpus",
+        "os",
+        "ram_available_bytes",
+        "ram_total_bytes",
+        "unified_memory"
+      ],
+      "properties": {
+        "accelerator_present": {
+          "description": "`Some(false)` = probed and absent; `None` = not probed on this platform yet.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "arch": {
+          "type": "string"
+        },
+        "cpu": {
+          "$ref": "#/definitions/CpuInfoWire"
+        },
+        "disk_available_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "disk_total_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "gpus": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/GpuInfoWire"
+          }
+        },
+        "os": {
+          "type": "string"
+        },
+        "os_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ram_available_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "ram_total_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "unified_memory": {
+          "description": "CPU and GPU share one memory pool (Apple Silicon today).",
+          "type": "boolean"
+        }
+      }
+    },
     "HelloResponse": {
       "type": "object",
       "required": [
@@ -742,6 +945,150 @@
         }
       }
     },
+    "ModelCandidateWire": {
+      "description": "One scored candidate for a role on this machine — mirrors `valyria_model_registry::CardScore` joined with its card. A card that will not fit is still listed, with `fit_kind = \"will_not_fit\"` and no `adjusted_score`.",
+      "type": "object",
+      "required": [
+        "display_name",
+        "family",
+        "fit_kind",
+        "id",
+        "installed",
+        "license_name",
+        "size_bytes",
+        "suitability"
+      ],
+      "properties": {
+        "adjusted_score": {
+          "description": "`suitability` minus the tight-fit penalty — the value Core ranks on. `None` when the card will not fit.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "family": {
+          "type": "string"
+        },
+        "fit_detail": {
+          "description": "For `tight`, the estimated resource utilisation (0.0..~1.0); for `will_not_fit`, the reason (`insufficient_ram` | `insufficient_vram`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fit_kind": {
+          "description": "`comfortable` | `tight` | `will_not_fit`.",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "installed": {
+          "type": "boolean"
+        },
+        "license_name": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "suitability": {
+          "description": "Catalog role suitability, 0..=100.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "ModelInspectResponse": {
+      "description": "Full detail for one model — mirrors the `ModelCard` plus, when installed, its `manifest.json` (§4.21). `license_text` is the license body when Core has it locally, for the acceptance prompt.",
+      "type": "object",
+      "required": [
+        "active_roles",
+        "context_length",
+        "display_name",
+        "family",
+        "id",
+        "installed",
+        "license_name",
+        "parameters_b",
+        "quantization",
+        "size_bytes",
+        "source_url"
+      ],
+      "properties": {
+        "active_roles": {
+          "description": "The roles this model is currently bound to.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "context_length": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "family": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "installed": {
+          "type": "boolean"
+        },
+        "installed_at_ms": {
+          "description": "Present only when installed.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "license_name": {
+          "type": "string"
+        },
+        "license_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parameters_b": {
+          "type": "number",
+          "format": "double"
+        },
+        "probe_tokens_per_sec": {
+          "description": "Measured decode throughput from the post-install probe, if recorded.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "quantization": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "source_url": {
+          "type": "string"
+        }
+      }
+    },
     "ModelListResponse": {
       "type": "object",
       "required": [
@@ -753,6 +1100,49 @@
           "items": {
             "$ref": "#/definitions/ModelSummaryWire"
           }
+        }
+      }
+    },
+    "ModelRecommendResponse": {
+      "type": "object",
+      "required": [
+        "candidates",
+        "role"
+      ],
+      "properties": {
+        "candidates": {
+          "description": "Every candidate for the role, best first (non-fitting ones sorted last).",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ModelCandidateWire"
+          }
+        },
+        "recommended": {
+          "description": "The best-scoring fitting candidate, if any.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelCandidateWire"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "role": {
+          "type": "string"
+        }
+      }
+    },
+    "ModelRemoveResponse": {
+      "type": "object",
+      "required": [
+        "freed_bytes"
+      ],
+      "properties": {
+        "freed_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
         }
       }
     },

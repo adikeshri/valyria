@@ -22,12 +22,14 @@ pub mod version;
 pub use client::Client;
 pub use envelope::{Request, Response};
 pub use messages::{
-    ConfigEntryWire, ConfigSetRequest, ConfigShowResponse, DoctorCheckWire, DoctorRunResponse,
-    Empty, EventsSubscribeRequest, GitBranchWire, GitBranchesResponse, GitCommitWire,
-    GitDiffRequest, GitDiffResponse, GitFileStatusWire, GitLogRequest, GitLogResponse,
-    GitStatusResponse, HelloRequest, HelloResponse, IndexStatusResponse, MemoryEntryWire,
-    MemoryListRequest, MemoryListResponse, ModelListResponse, ModelSummaryWire,
-    PermissionResolveRequest, PlanGetResponse, PlanStepSummary, PurgeResponse,
+    ConfigEntryWire, ConfigSetRequest, ConfigShowResponse, CpuInfoWire, DoctorCheckWire,
+    DoctorRunResponse, Empty, EventsSubscribeRequest, GitBranchWire, GitBranchesResponse,
+    GitCommitWire, GitDiffRequest, GitDiffResponse, GitFileStatusWire, GitLogRequest,
+    GitLogResponse, GitStatusResponse, GpuInfoWire, HardwareProbeResponse, HelloRequest,
+    HelloResponse, IndexStatusResponse, MemoryEntryWire, MemoryListRequest, MemoryListResponse,
+    ModelActivateRequest, ModelCandidateWire, ModelIdRequest, ModelInspectResponse,
+    ModelListResponse, ModelRecommendRequest, ModelRecommendResponse, ModelRemoveResponse,
+    ModelSummaryWire, PermissionResolveRequest, PlanGetResponse, PlanStepSummary, PurgeResponse,
     ScoreExplanationWire, SearchFeatureWire, SearchHitWire, SearchQueryRequest,
     SearchQueryResponse, SearchStageScoreWire, StorageEntryWire, StorageInspectResponse,
     StoragePurgeRequest, TaskCreateRequest, TaskCreateResponse, TaskIdRequest, TaskListResponse,

@@ -335,3 +335,44 @@ async fn installed_model_db_index_records_and_lists() {
     db.delete(&card.id).await.unwrap();
     assert!(db.get(&card.id).await.unwrap().is_none());
 }
+
+#[tokio::test]
+async fn install_with_progress_reports_download_then_verify_then_probe() {
+    use std::sync::Mutex;
+    use valyria_model_store::{InstallPhase, InstallProgress};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = ModelStore::new(dir.path());
+    let card = good_card();
+    let fetcher = InMemoryFetcher::new().with_object(URL, weights_bytes());
+    let plan = store.plan_install(&card, &hw(64_000_000_000)).confirm();
+
+    let seen: Mutex<Vec<InstallProgress>> = Mutex::new(Vec::new());
+    let record = |p: InstallProgress| seen.lock().unwrap().push(p);
+
+    store
+        .install_with_progress(
+            &plan,
+            &fetcher,
+            &NullProber,
+            &CancellationToken::new(),
+            &record,
+        )
+        .await
+        .unwrap();
+
+    let seen = seen.into_inner().unwrap();
+    let phases: Vec<InstallPhase> = seen.iter().map(|p| p.phase).collect();
+    assert!(phases.contains(&InstallPhase::Downloading));
+    assert_eq!(phases.iter().rev().nth(1), Some(&InstallPhase::Verifying));
+    assert_eq!(phases.last(), Some(&InstallPhase::Probing));
+
+    // Download updates are monotonic and reach the full size.
+    let dl: Vec<u64> = seen
+        .iter()
+        .filter(|p| p.phase == InstallPhase::Downloading)
+        .map(|p| p.downloaded_bytes)
+        .collect();
+    assert!(dl.windows(2).all(|w| w[0] <= w[1]));
+    assert_eq!(dl.last().copied(), Some(weights_bytes().len() as u64));
+}

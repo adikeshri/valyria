@@ -36,6 +36,15 @@ pub enum EventKind {
     VerificationEvidence,
     MemoryWritten,
     ResourcePressure,
+    /// Progress of an in-flight `model_install` — payload `{ id, phase,
+    /// downloaded_bytes, total_bytes }` (`valyria-app` owns the shape).
+    ModelInstallProgress,
+    /// A `model_install` finished successfully — payload `{ id,
+    /// size_bytes }`.
+    ModelInstallCompleted,
+    /// A `model_install` failed or was cancelled — payload `{ id, code,
+    /// message }`.
+    ModelInstallFailed,
 }
 
 impl EventKind {
@@ -62,6 +71,9 @@ impl EventKind {
             EventKind::VerificationEvidence => "verification_evidence",
             EventKind::MemoryWritten => "memory_written",
             EventKind::ResourcePressure => "resource_pressure",
+            EventKind::ModelInstallProgress => "model_install_progress",
+            EventKind::ModelInstallCompleted => "model_install_completed",
+            EventKind::ModelInstallFailed => "model_install_failed",
         }
     }
 }
