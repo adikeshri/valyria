@@ -12,7 +12,7 @@
 //!   field (backward compatible: old clients ignore it);
 //! - **major** — a removed/renamed variant or field, or a changed type
 //!   (breaking: old clients misparse).
-pub const PROTOCOL_VERSION: &str = "1.4.0";
+pub const PROTOCOL_VERSION: &str = "1.5.0";
 
 /// Capability tokens a `HelloResponse` advertises (§4.27). A client
 /// negotiates against these, not the version string — a runtime built
@@ -52,6 +52,13 @@ pub mod capability {
     /// agent-authored / pre-existing / concurrent-user classification for
     /// the diff viewer's ownership column (§15, §16).
     pub const LEDGER: &str = "ledger";
+    /// Fine-grained diagnostics are present: a discoverable
+    /// `checkpoint_id` on `PlanStepSummary` plus a `plan_checkpoint`
+    /// event (G13); a `tool_invocation_id` pairing `tool_started` with
+    /// `tool_completed` and structured `{exit_code, stdout, stderr,
+    /// duration_ms}` on the latter (G14); a parsed `location[]` on
+    /// `test_failed` / `verification_evidence` (G15).
+    pub const DIAGNOSTICS_V2: &str = "diagnostics_v2";
 
     /// The full set an embedded runtime supports.
     pub const ALL: &[&str] = &[
@@ -69,5 +76,6 @@ pub mod capability {
         MODEL_MANAGE,
         CONTEXT,
         LEDGER,
+        DIAGNOSTICS_V2,
     ];
 }

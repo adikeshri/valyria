@@ -393,6 +393,19 @@ impl Runtime {
             .map_err(|e| AppError::Plan(e.to_string()))
     }
 
+    /// `(plan_step_id, checkpoint_id)` for every checkpoint recorded for a
+    /// task — the ids `task_rollback` expects (§16, G13).
+    pub async fn plan_checkpoints(&self, task_id: TaskId) -> Result<Vec<(String, String)>> {
+        Ok(self
+            .plan_store
+            .checkpoints_for_task(task_id)
+            .await
+            .map_err(|e| AppError::Plan(e.to_string()))?
+            .into_iter()
+            .map(|c| (c.step_id.to_string(), c.id.to_string()))
+            .collect())
+    }
+
     /// Roll a task's workspace back to a checkpoint taken at a plan step
     /// boundary. Restores the checkpointed files exactly; refuses on any
     /// file touched since (§4.25).

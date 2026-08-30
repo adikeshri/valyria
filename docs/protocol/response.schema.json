@@ -1290,6 +1290,13 @@
         "checkpoint": {
           "type": "boolean"
         },
+        "checkpoint_id": {
+          "description": "The `checkpoint_id` a checkpoint at this step was recorded under, when one exists — the id `task_rollback` expects (§16, G13). Additive as of protocol 1.5.0; also emitted live as a `plan_checkpoint` event.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "depends_on": {
           "type": "array",
           "items": {

@@ -474,6 +474,8 @@ impl AgentDriver {
                         "failure_count": run.failures.len(),
                         "run_id": run.id.to_string(),
                         "digest": run.digest(3),
+                        // Parsed failure locations, when a parser matched (G15).
+                        "failures": run.failures.iter().map(failure_payload).collect::<Vec<_>>(),
                     }),
                 },
             )
@@ -804,7 +806,12 @@ impl AgentDriver {
                     effect_id,
                     step_id,
                     effect_kind: kinds::TOOL.into(),
-                    payload: serde_json::json!({"tool": tool, "input": input}),
+                    payload: serde_json::json!({
+                        "tool": tool,
+                        "input": input,
+                        // Stable id pairing this start with its completion (G14).
+                        "tool_invocation_id": effect_id.to_string(),
+                    }),
                 },
             )
             .await?;
@@ -830,6 +837,10 @@ impl AgentDriver {
                     ToolOutcome::Success { rendered, .. } => (true, rendered.clone()),
                     ToolOutcome::Failure { rendered, .. } => (false, rendered.clone()),
                 };
+                let duration_ms = record
+                    .end_time
+                    .as_millis()
+                    .saturating_sub(record.start_time.as_millis());
                 self.tasks
                     .append_journal(
                         task_id,
@@ -839,7 +850,14 @@ impl AgentDriver {
                             outcome_kind: kinds::TOOL_RESULT.into(),
                             payload: serde_json::json!({
                                 "success": success,
-                                "tool_invocation_id": record.id.to_string(),
+                                // Matches `tool_started`'s `tool_invocation_id` (G14).
+                                "tool_invocation_id": effect_id.to_string(),
+                                "tool_record_id": record.id.to_string(),
+                                // Structured completion fields alongside `rendered` (G14).
+                                "exit_code": record.exit_status,
+                                "stdout": record.stdout,
+                                "stderr": record.stderr,
+                                "duration_ms": duration_ms,
                                 "rendered": rendered,
                             }),
                         },
@@ -1096,6 +1114,22 @@ pub(crate) enum Flow {
     Return,
 }
 
+/// Wire shape for one parsed verification failure (§19, §35, G15).
+fn failure_payload(f: &valyria_verify::Failure) -> serde_json::Value {
+    let loc = |l: &valyria_verify::Location| serde_json::json!({ "path": l.file.display().to_string(), "line": l.line });
+    let mut locations = Vec::new();
+    if let Some(primary) = &f.primary_location {
+        locations.push(loc(primary));
+    }
+    locations.extend(f.secondary_locations.iter().map(loc));
+    serde_json::json!({
+        "kind": serde_json::to_value(f.kind).unwrap_or(serde_json::json!("unknown")),
+        "message": f.message,
+        "failing_test": f.failing_test,
+        "location": locations,
+    })
+}
+
 fn trust_level_str(t: Trust) -> &'static str {
     match t {
         Trust::Policy => "policy",
@@ -1127,5 +1161,38 @@ fn describe_decision(d: &RepairDecision) -> String {
         RepairDecision::SwitchRole => "switch_role".into(),
         RepairDecision::AskUser { reason } => format!("ask_user: {reason}"),
         RepairDecision::GiveUp { reason } => format!("give_up: {reason}"),
+    }
+}
+
+#[cfg(test)]
+mod diagnostics_tests {
+    use super::*;
+    use valyria_verify::{Failure, FailureKind, Location};
+
+    #[test]
+    fn failure_payload_carries_parsed_locations() {
+        let mut f = Failure::new(FailureKind::TestFailure, "assertion failed: 1 == 2");
+        f.primary_location = Some(Location::at("src/math.rs", 42, 5));
+        f.secondary_locations = vec![Location::new("tests/math_test.rs")];
+        f.failing_test = Some("math::adds".into());
+
+        let v = failure_payload(&f);
+        assert_eq!(v["kind"], "test_failure");
+        assert_eq!(v["failing_test"], "math::adds");
+        let locs = v["location"].as_array().unwrap();
+        assert_eq!(locs.len(), 2);
+        assert_eq!(locs[0]["path"], "src/math.rs");
+        assert_eq!(locs[0]["line"], 42);
+        assert_eq!(locs[1]["path"], "tests/math_test.rs");
+        assert!(locs[1]["line"].is_null());
+    }
+
+    #[test]
+    fn failure_payload_with_no_location_is_still_well_formed() {
+        let f = Failure::new(FailureKind::Timeout, "exceeded 60s");
+        let v = failure_payload(&f);
+        assert_eq!(v["kind"], "timeout");
+        assert_eq!(v["location"].as_array().unwrap().len(), 0);
+        assert!(v["failing_test"].is_null());
     }
 }
