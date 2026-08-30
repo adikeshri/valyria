@@ -316,6 +316,11 @@ impl Client for EmbeddedClient {
                     Ok(id) => id,
                     Err(resp) => return resp,
                 };
+                let checkpoints = self
+                    .runtime
+                    .plan_checkpoints(task_id)
+                    .await
+                    .unwrap_or_default();
                 match self.runtime.plan(task_id).await {
                     Ok(Some(rev)) => Response::TaskPlan(PlanGetResponse {
                         revision: Some(rev.revision),
@@ -324,17 +329,28 @@ impl Client for EmbeddedClient {
                             .plan
                             .steps
                             .iter()
-                            .map(|s| PlanStepSummary {
-                                id: s.id.to_string(),
-                                intent: s.intent.clone(),
-                                targets: s
-                                    .targets
-                                    .iter()
-                                    .map(|p| p.display().to_string())
-                                    .collect(),
-                                depends_on: s.depends_on.iter().map(|d| d.to_string()).collect(),
-                                rollback_boundary: s.rollback_boundary,
-                                checkpoint: s.checkpoint,
+                            .map(|s| {
+                                let step_id = s.id.to_string();
+                                PlanStepSummary {
+                                    checkpoint_id: checkpoints
+                                        .iter()
+                                        .find(|(sid, _)| *sid == step_id)
+                                        .map(|(_, cid)| cid.clone()),
+                                    id: step_id,
+                                    intent: s.intent.clone(),
+                                    targets: s
+                                        .targets
+                                        .iter()
+                                        .map(|p| p.display().to_string())
+                                        .collect(),
+                                    depends_on: s
+                                        .depends_on
+                                        .iter()
+                                        .map(|d| d.to_string())
+                                        .collect(),
+                                    rollback_boundary: s.rollback_boundary,
+                                    checkpoint: s.checkpoint,
+                                }
                             })
                             .collect(),
                     }),

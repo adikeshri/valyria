@@ -634,6 +634,10 @@ impl TaskManager {
                     self.emit(task_id, EventKind::ContextRetrieved, payload.clone())
                         .await?;
                 }
+                kinds::PLAN_CHECKPOINT => {
+                    self.emit(task_id, EventKind::PlanCheckpoint, payload.clone())
+                        .await?;
+                }
                 kinds::TOOL_RESULT | kinds::TOOL_DENIED => {
                     self.emit(task_id, EventKind::ToolCompleted, payload.clone())
                         .await?;

@@ -15,6 +15,24 @@ Work toward the first release. Phases refer to
 
 ### Added
 
+- **Protocol 1.5.0 — diagnostics granularity** (desktop-client gap closure
+  G13, G14, G15; additive, backward compatible; capability
+  `diagnostics_v2`).
+  - **G13** — `PlanStepSummary` gains an optional `checkpoint_id` (the id
+    `task_rollback` expects, joined in from `plan_checkpoint` rows), and a
+    `plan_checkpoint` event `{ checkpoint_id, step_id }` is now projected
+    from the `CONTEXT_RETRIEVED`-style journal entry so a client can learn
+    an id live. New `Runtime::plan_checkpoints`.
+  - **G14** — `tool_started` now carries a `tool_invocation_id` that
+    matches the one on `tool_completed` (the effect id, the real pairing
+    key). `tool_completed` gains structured `exit_code`, `stdout`,
+    `stderr`, `duration_ms` (from the `ToolInvocationRecord`) alongside
+    the pre-formatted `rendered` blob, plus `tool_record_id`.
+  - **G15** — `verification_evidence` / `test_failed` gain a
+    `failures: [{ kind, message, failing_test, location: [{ path, line }] }]`
+    array built from `valyria-verify`'s parsed `Failure`s, so a test
+    failure can open its parsed location.
+
 - **Protocol 1.4.0 — context provenance & change ownership** (desktop-client
   gap closure G7, G8; additive, backward compatible; capabilities
   `context`, `ledger`).

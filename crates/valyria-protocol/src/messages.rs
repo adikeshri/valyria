@@ -119,6 +119,12 @@ pub struct PlanStepSummary {
     pub depends_on: Vec<String>,
     pub rollback_boundary: bool,
     pub checkpoint: bool,
+    /// The `checkpoint_id` a checkpoint at this step was recorded under,
+    /// when one exists — the id `task_rollback` expects (§16, G13).
+    /// Additive as of protocol 1.5.0; also emitted live as a
+    /// `plan_checkpoint` event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

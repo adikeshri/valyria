@@ -36,6 +36,10 @@ pub enum EventKind {
     VerificationEvidence,
     MemoryWritten,
     ResourcePressure,
+    /// A plan checkpoint was taken — payload `{ checkpoint_id, step_id }`.
+    /// Lets a client learn a `checkpoint_id` for `task_rollback` (G13);
+    /// `valyria-plan` owns the shape.
+    PlanCheckpoint,
     /// Progress of an in-flight `model_install` — payload `{ id, phase,
     /// downloaded_bytes, total_bytes }` (`valyria-app` owns the shape).
     ModelInstallProgress,
@@ -71,6 +75,7 @@ impl EventKind {
             EventKind::VerificationEvidence => "verification_evidence",
             EventKind::MemoryWritten => "memory_written",
             EventKind::ResourcePressure => "resource_pressure",
+            EventKind::PlanCheckpoint => "plan_checkpoint",
             EventKind::ModelInstallProgress => "model_install_progress",
             EventKind::ModelInstallCompleted => "model_install_completed",
             EventKind::ModelInstallFailed => "model_install_failed",
@@ -96,5 +101,21 @@ mod tests {
             EventKind::ExternalChangeDetected.as_str(),
             "external_change_detected"
         );
+    }
+
+    #[test]
+    fn newer_kinds_round_trip_through_their_strings() {
+        for (kind, s) in [
+            (EventKind::ContextRetrieved, "context_retrieved"),
+            (EventKind::PlanCheckpoint, "plan_checkpoint"),
+            (EventKind::ModelInstallProgress, "model_install_progress"),
+            (EventKind::ModelInstallCompleted, "model_install_completed"),
+            (EventKind::ModelInstallFailed, "model_install_failed"),
+        ] {
+            assert_eq!(kind.as_str(), s);
+            assert_eq!(serde_json::to_string(&kind).unwrap(), format!("\"{s}\""));
+            let back: EventKind = serde_json::from_str(&format!("\"{s}\"")).unwrap();
+            assert_eq!(back, kind);
+        }
     }
 }
