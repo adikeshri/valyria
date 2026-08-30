@@ -17,14 +17,14 @@ use valyria_protocol::{
     capability, Client, ConfigEntryWire, ConfigShowResponse, CpuInfoWire, DoctorCheckWire,
     DoctorRunResponse, GitBranchWire, GitBranchesResponse, GitCommitWire, GitDiffResponse,
     GitFileStatusWire, GitLogResponse, GitStatusResponse, GpuInfoWire, HardwareProbeResponse,
-    HelloResponse, IndexStatusResponse, MemoryEntryWire, MemoryListRequest, MemoryListResponse,
-    ModelCandidateWire, ModelInspectResponse, ModelListResponse, ModelRecommendResponse,
-    ModelRemoveResponse, ModelSummaryWire, PermissionResolveRequest, PlanGetResponse,
-    PlanStepSummary, PurgeResponse, Request, Response, ScoreExplanationWire, SearchFeatureWire,
-    SearchHitWire, SearchQueryResponse, SearchStageScoreWire, StorageEntryWire,
-    StorageInspectResponse, StoragePurgeRequest, TaskCreateResponse, TaskIdRequest,
-    TaskListResponse, TaskReportResponse, TaskRollbackRequest, TaskRollbackResponse,
-    TaskStatusResponse, TaskSummary, VerifiedClaimWire, WireError, WireEvent,
+    HelloResponse, IndexStatusResponse, LedgerChangeWire, LedgerChangesResponse, MemoryEntryWire,
+    MemoryListRequest, MemoryListResponse, ModelCandidateWire, ModelInspectResponse,
+    ModelListResponse, ModelRecommendResponse, ModelRemoveResponse, ModelSummaryWire,
+    PermissionResolveRequest, PlanGetResponse, PlanStepSummary, PurgeResponse, Request, Response,
+    ScoreExplanationWire, SearchFeatureWire, SearchHitWire, SearchQueryResponse,
+    SearchStageScoreWire, StorageEntryWire, StorageInspectResponse, StoragePurgeRequest,
+    TaskCreateResponse, TaskIdRequest, TaskListResponse, TaskReportResponse, TaskRollbackRequest,
+    TaskRollbackResponse, TaskStatusResponse, TaskSummary, VerifiedClaimWire, WireError, WireEvent,
     WorkspaceStatusResponse, PROTOCOL_VERSION,
 };
 use valyria_types::{CheckpointId, ErrorCode, PermissionMode, TaskId};
@@ -687,6 +687,27 @@ impl Client for EmbeddedClient {
                 Ok(v) => Response::ModelInspect(model_inspect_wire(v)),
                 Err(e) => error_response(e),
             },
+            Request::LedgerChanges(r) => {
+                let task_id = match parse_task_id(&r.task_id) {
+                    Ok(id) => id,
+                    Err(resp) => return resp,
+                };
+                Response::LedgerChanges(LedgerChangesResponse {
+                    changes: self
+                        .runtime
+                        .ledger_changes(task_id)
+                        .into_iter()
+                        .map(|c| LedgerChangeWire {
+                            path: c.path,
+                            classification: c.classification.to_string(),
+                            kind: c.kind.to_string(),
+                            task_id: c.task_id,
+                            step_id: c.step_id,
+                            tool_invocation_id: c.tool_invocation_id,
+                        })
+                        .collect(),
+                })
+            }
             Request::IndexStatus(_) => match self.runtime.index_status().await {
                 Ok(Some(g)) => Response::IndexStatus(IndexStatusResponse {
                     generation: Some(g.generation.0),

@@ -29,7 +29,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use valyria_context::{ContextAssembler, ContextQuery};
+use valyria_context::{AssembledContext, ContextAssembler, ContextQuery};
 use valyria_ledger::Ledger;
 use valyria_model::{GenerateRequest, Message};
 use valyria_orchestrator::{Orchestrator, Role};
@@ -38,7 +38,7 @@ use valyria_plan::PlanStore;
 use valyria_sandbox::{ProcessLauncher, SandboxProfile};
 use valyria_task::{kinds, ControlSignal, JournalEntryKind, TaskManager};
 use valyria_tools::{InvocationResult, ToolCtx, ToolOutcome, ToolRuntime};
-use valyria_types::{AgentState, EffectId, StepId, TaskId};
+use valyria_types::{AgentState, EffectId, ProvenanceSource, StepId, TaskId, Trust};
 use valyria_util::{CancellationToken, Clock, ContentHash};
 use valyria_verify::{
     changeset_hash, diagnose, Diagnosis, EscalationStrategy, ProcessProbeRunner, VerificationLog,
@@ -210,9 +210,16 @@ impl AgentDriver {
                 }
                 AgentState::Discovery => {
                     let ctx = self.build_ctx(task_id, StepId::new(), cancel.child());
-                    self.context
+                    let assembled = self
+                        .context
                         .assemble(&ctx, ContextQuery::new(DEFAULT_CONTEXT_BUDGET_TOKENS))
                         .await?;
+                    self.journal_context_retrieved(
+                        task_id,
+                        &assembled,
+                        DEFAULT_CONTEXT_BUDGET_TOKENS,
+                    )
+                    .await?;
                     self.tasks.transition(task_id, AgentState::Planning).await?;
                 }
                 AgentState::Planning => match self.planning_mode {
@@ -1008,6 +1015,60 @@ impl AgentDriver {
         self.verify_states.lock().unwrap().insert(task_id, state);
     }
 
+    /// Record what the context assembler retrieved for a step so it
+    /// projects to a `context_retrieved` event (§34, G7). Read-only: this
+    /// is a completed-effect journal entry with no matching issue.
+    async fn journal_context_retrieved(
+        &self,
+        task_id: TaskId,
+        assembled: &AssembledContext,
+        budget_total: usize,
+    ) -> Result<()> {
+        let items: Vec<serde_json::Value> = assembled
+            .items
+            .iter()
+            .map(|item| {
+                let path = match &item.provenance.source {
+                    ProvenanceSource::File { path } => path.clone(),
+                    ProvenanceSource::Instruction { path } => path.clone(),
+                    ProvenanceSource::ToolOutput { invocation } => format!("tool:{invocation}"),
+                    ProvenanceSource::Git { commit } => format!("git:{commit}"),
+                    ProvenanceSource::Memory { id } => format!("memory:{id}"),
+                    ProvenanceSource::ModelTurn => "<model turn>".to_string(),
+                };
+                let reason = if item.provenance.retrieval_path.is_empty() {
+                    "explicit".to_string()
+                } else {
+                    item.provenance.retrieval_path.join(" -> ")
+                };
+                serde_json::json!({
+                    "path": path,
+                    "reason": reason,
+                    "trust_level": trust_level_str(item.trust),
+                    "tokens": item.tokens,
+                    "score": item.provenance.score,
+                })
+            })
+            .collect();
+
+        self.tasks
+            .append_journal(
+                task_id,
+                JournalEntryKind::EffectCompleted {
+                    effect_id: EffectId::new(),
+                    step_id: StepId::new(),
+                    outcome_kind: kinds::CONTEXT_RETRIEVED.into(),
+                    payload: serde_json::json!({
+                        "items": items,
+                        "budget_used": assembled.total_tokens,
+                        "budget_total": budget_total,
+                    }),
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
     pub(crate) fn build_ctx(
         &self,
         task_id: TaskId,
@@ -1033,6 +1094,16 @@ impl AgentDriver {
 pub(crate) enum Flow {
     Continue,
     Return,
+}
+
+fn trust_level_str(t: Trust) -> &'static str {
+    match t {
+        Trust::Policy => "policy",
+        Trust::Instruction => "instruction",
+        Trust::Evidence => "evidence",
+        Trust::RepoData => "repo_data",
+        Trust::ModelOutput => "model_output",
+    }
 }
 
 fn describe_finding(f: &LoopFinding) -> String {

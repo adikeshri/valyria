@@ -15,6 +15,22 @@ Work toward the first release. Phases refer to
 
 ### Added
 
+- **Protocol 1.4.0 — context provenance & change ownership** (desktop-client
+  gap closure G7, G8; additive, backward compatible; capabilities
+  `context`, `ledger`).
+  - `context_retrieved` **event** — the agent driver now records what the
+    context assembler retrieved for each Discovery step as a journal
+    entry (`kinds::CONTEXT_RETRIEVED`), which `TaskManager` projects to a
+    `context_retrieved` event: `{ items: [{ path, reason, trust_level,
+    tokens, score }], budget_used, budget_total }`. The Context Inspector
+    has a data source (§34).
+  - `ledger_changes { task_id }` — one row per agent-touched file with
+    `valyria-ledger`'s classification (`agent_authored` / `pre_existing` /
+    `concurrent_user_modification` / `unknown`), computed against the
+    file's on-disk state now, plus `kind` (write/delete), `step_id` and
+    `tool_invocation_id`. The diff viewer's ownership column stops reading
+    "unavailable" (§15, §16).
+
 - **Protocol 1.3.0 — hardware probe & model management** (desktop-client
   gap closure G4, G5; additive, backward compatible; capabilities
   `hardware`, `model_manage`).
