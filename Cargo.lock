@@ -3418,6 +3418,7 @@ dependencies = [
  "async-trait",
  "futures",
  "rusqlite",
+ "rustix 0.38.44",
  "serde",
  "serde_json",
  "tempfile",

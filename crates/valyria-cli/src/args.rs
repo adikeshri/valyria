@@ -29,6 +29,10 @@ pub struct ParsedArgs {
     pub connect: Option<PathBuf>,
     /// `--socket <path>` for `valyria serve`.
     pub socket: Option<PathBuf>,
+    /// `--auth-token-file <path>`: for `valyria serve`, read a per-daemon
+    /// auth token from this file (G10); for `--connect`, present it. When
+    /// unset the daemon relies on the peer-uid check alone.
+    pub auth_token_file: Option<PathBuf>,
 }
 
 pub fn parse(raw: &[String]) -> Result<ParsedArgs, String> {
@@ -70,6 +74,11 @@ pub fn parse(raw: &[String]) -> Result<ParsedArgs, String> {
                 i += 1;
                 let v = raw.get(i).ok_or("--socket needs a path")?;
                 parsed.socket = Some(PathBuf::from(v));
+            }
+            "--auth-token-file" => {
+                i += 1;
+                let v = raw.get(i).ok_or("--auth-token-file needs a path")?;
+                parsed.auth_token_file = Some(PathBuf::from(v));
             }
             "--events" => parsed.events = true,
             "--json" => parsed.json = true,

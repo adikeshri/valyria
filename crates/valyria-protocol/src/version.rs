@@ -12,7 +12,7 @@
 //!   field (backward compatible: old clients ignore it);
 //! - **major** — a removed/renamed variant or field, or a changed type
 //!   (breaking: old clients misparse).
-pub const PROTOCOL_VERSION: &str = "1.5.0";
+pub const PROTOCOL_VERSION: &str = "1.6.0";
 
 /// Capability tokens a `HelloResponse` advertises (§4.27). A client
 /// negotiates against these, not the version string — a runtime built
@@ -59,6 +59,11 @@ pub mod capability {
     /// duration_ms}` on the latter (G14); a parsed `location[]` on
     /// `test_failed` / `verification_evidence` (G15).
     pub const DIAGNOSTICS_V2: &str = "diagnostics_v2";
+    /// The daemon authenticates local clients (G10): every connection is
+    /// peer-uid checked against the daemon's own OS user, and — when the
+    /// daemon was started with a token — every frame must be an
+    /// `AuthCall` / `AuthSubscribe` carrying it.
+    pub const CLIENT_AUTH: &str = "client_auth";
 
     /// The full set an embedded runtime supports.
     pub const ALL: &[&str] = &[
@@ -77,5 +82,6 @@ pub mod capability {
         CONTEXT,
         LEDGER,
         DIAGNOSTICS_V2,
+        CLIENT_AUTH,
     ];
 }
