@@ -12,7 +12,7 @@
 //!   field (backward compatible: old clients ignore it);
 //! - **major** — a removed/renamed variant or field, or a changed type
 //!   (breaking: old clients misparse).
-pub const PROTOCOL_VERSION: &str = "1.6.0";
+pub const PROTOCOL_VERSION: &str = "1.7.0";
 
 /// Capability tokens a `HelloResponse` advertises (§4.27). A client
 /// negotiates against these, not the version string — a runtime built
@@ -64,6 +64,10 @@ pub mod capability {
     /// daemon was started with a token — every frame must be an
     /// `AuthCall` / `AuthSubscribe` carrying it.
     pub const CLIENT_AUTH: &str = "client_auth";
+    /// An event subscription can be scoped to one task (`task_id` on the
+    /// subscribe frame): it then carries that task's events plus
+    /// workspace-global ones only (G11).
+    pub const STREAM_FILTER: &str = "stream_filter";
 
     /// The full set an embedded runtime supports.
     pub const ALL: &[&str] = &[
@@ -83,5 +87,6 @@ pub mod capability {
         LEDGER,
         DIAGNOSTICS_V2,
         CLIENT_AUTH,
+        STREAM_FILTER,
     ];
 }

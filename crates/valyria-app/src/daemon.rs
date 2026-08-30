@@ -149,10 +149,14 @@ mod imp {
                 Some(_) => Err(reject("auth.token_mismatch", "invalid auth token")),
                 None => Ok(Resolved::Call(request)), // token offered, none required
             },
-            ClientFrame::AuthSubscribe { token, since } => match required {
-                Some(want) if want == token => Ok(Resolved::Subscribe(since)),
+            ClientFrame::AuthSubscribe {
+                token,
+                since,
+                task_id,
+            } => match required {
+                Some(want) if want == token => Ok(Resolved::Subscribe { since, task_id }),
                 Some(_) => Err(reject("auth.token_mismatch", "invalid auth token")),
-                None => Ok(Resolved::Subscribe(since)),
+                None => Ok(Resolved::Subscribe { since, task_id }),
             },
             ClientFrame::Call(request) => match required {
                 None => Ok(Resolved::Call(request)),
@@ -161,8 +165,8 @@ mod imp {
                     "this daemon requires an auth token; use AuthCall",
                 )),
             },
-            ClientFrame::Subscribe { since } => match required {
-                None => Ok(Resolved::Subscribe(since)),
+            ClientFrame::Subscribe { since, task_id } => match required {
+                None => Ok(Resolved::Subscribe { since, task_id }),
                 Some(_) => Err(reject(
                     "auth.required",
                     "this daemon requires an auth token; use AuthSubscribe",
@@ -181,8 +185,8 @@ mod imp {
                     .await?;
                 write_half.flush().await?;
             }
-            Ok(Resolved::Subscribe(since)) => {
-                let mut events = client.subscribe_events(since).await;
+            Ok(Resolved::Subscribe { since, task_id }) => {
+                let mut events = client.subscribe_events_for_task(since, task_id).await;
                 while let Some(ev) = events.next().await {
                     let line = encode_line(&ServerFrame::Event(ev));
                     if write_half.write_all(line.as_bytes()).await.is_err() {
@@ -199,7 +203,7 @@ mod imp {
 
     enum Resolved {
         Call(valyria_protocol::Request),
-        Subscribe(u64),
+        Subscribe { since: u64, task_id: Option<String> },
     }
 
     #[cfg(test)]

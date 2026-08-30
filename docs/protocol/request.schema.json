@@ -635,6 +635,13 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0.0
+        },
+        "task_id": {
+          "description": "Restrict the stream to this task's events plus workspace-global (task-less) events (protocol 1.7.0, G11). Absent = the full stream.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     },

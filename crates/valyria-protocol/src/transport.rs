@@ -38,14 +38,27 @@ pub enum ClientFrame {
     Call(Request),
     /// Open an event stream from `since`; the connection then carries
     /// [`ServerFrame::Event`] frames until the client hangs up.
-    Subscribe { since: u64 },
+    ///
+    /// `task_id`, when set (protocol 1.7.0, G11), restricts the stream to
+    /// that task's events plus workspace-global (task-less) events. Old
+    /// frames omit it and get the full stream, unchanged.
+    Subscribe {
+        since: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
+    },
     /// [`Self::Call`] with a per-daemon auth token (protocol 1.6.0, G10).
     /// A daemon started with a token **requires** this variant and rejects
     /// bare [`Self::Call`] with `auth.required`; a daemon without one
     /// accepts either.
     AuthCall { token: String, request: Request },
     /// [`Self::Subscribe`] with the auth token — see [`Self::AuthCall`].
-    AuthSubscribe { token: String, since: u64 },
+    AuthSubscribe {
+        token: String,
+        since: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
+    },
 }
 
 /// A frame sent by the daemon to a client. Externally tagged — see
@@ -120,14 +133,49 @@ impl SocketClient {
     }
 
     #[cfg_attr(not(unix), allow(dead_code))]
-    fn subscribe_frame(&self, since: u64) -> ClientFrame {
+    fn subscribe_frame(&self, since: u64, task_id: Option<String>) -> ClientFrame {
         match &self.token {
             Some(token) => ClientFrame::AuthSubscribe {
                 token: token.clone(),
                 since,
+                task_id,
             },
-            None => ClientFrame::Subscribe { since },
+            None => ClientFrame::Subscribe { since, task_id },
         }
+    }
+
+    #[cfg(unix)]
+    async fn subscribe_inner(
+        &self,
+        since: u64,
+        task_id: Option<String>,
+    ) -> BoxStream<'static, WireEvent> {
+        let stream = match UnixStream::connect(&self.path).await {
+            Ok(s) => s,
+            Err(_) => return futures::stream::empty().boxed(),
+        };
+        let (read_half, mut write_half) = stream.into_split();
+        if write_half
+            .write_all(encode_line(&self.subscribe_frame(since, task_id)).as_bytes())
+            .await
+            .is_err()
+        {
+            return futures::stream::empty().boxed();
+        }
+        let _ = write_half.flush().await;
+        let lines = BufReader::new(read_half).lines();
+        futures::stream::unfold((lines, write_half), |(mut lines, write_half)| async move {
+            loop {
+                match lines.next_line().await {
+                    Ok(Some(line)) => match serde_json::from_str::<ServerFrame>(&line) {
+                        Ok(ServerFrame::Event(ev)) => return Some((ev, (lines, write_half))),
+                        _ => continue,
+                    },
+                    _ => return None,
+                }
+            }
+        })
+        .boxed()
     }
 
     #[cfg(unix)]
@@ -176,6 +224,14 @@ impl Client for SocketClient {
     async fn subscribe_events(&self, _since: u64) -> BoxStream<'static, WireEvent> {
         futures::stream::empty().boxed()
     }
+
+    async fn subscribe_events_for_task(
+        &self,
+        _since: u64,
+        _task_id: Option<String>,
+    ) -> BoxStream<'static, WireEvent> {
+        futures::stream::empty().boxed()
+    }
 }
 
 #[cfg(unix)]
@@ -189,37 +245,15 @@ impl Client for SocketClient {
     }
 
     async fn subscribe_events(&self, since: u64) -> BoxStream<'static, WireEvent> {
-        let stream = match UnixStream::connect(&self.path).await {
-            Ok(s) => s,
-            Err(_) => return futures::stream::empty().boxed(),
-        };
-        let (read_half, mut write_half) = stream.into_split();
-        if write_half
-            .write_all(encode_line(&self.subscribe_frame(since)).as_bytes())
-            .await
-            .is_err()
-        {
-            return futures::stream::empty().boxed();
-        }
-        let _ = write_half.flush().await;
-        // Keep the write half alive for the life of the stream: dropping it
-        // half-closes the connection, which some platforms treat as a full
-        // teardown.
-        let lines = BufReader::new(read_half).lines();
-        futures::stream::unfold((lines, write_half), |(mut lines, write_half)| async move {
-            loop {
-                match lines.next_line().await {
-                    Ok(Some(line)) => match serde_json::from_str::<ServerFrame>(&line) {
-                        Ok(ServerFrame::Event(ev)) => return Some((ev, (lines, write_half))),
-                        // A `Response` frame here, or an unparseable
-                        // line, is not fatal to the stream — skip it.
-                        _ => continue,
-                    },
-                    _ => return None,
-                }
-            }
-        })
-        .boxed()
+        self.subscribe_inner(since, None).await
+    }
+
+    async fn subscribe_events_for_task(
+        &self,
+        since: u64,
+        task_id: Option<String>,
+    ) -> BoxStream<'static, WireEvent> {
+        self.subscribe_inner(since, task_id).await
     }
 }
 

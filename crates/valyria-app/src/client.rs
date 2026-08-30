@@ -773,6 +773,27 @@ impl Client for EmbeddedClient {
         })
         .boxed()
     }
+
+    async fn subscribe_events_for_task(
+        &self,
+        since: u64,
+        task_id: Option<String>,
+    ) -> BoxStream<'static, WireEvent> {
+        let full = self.subscribe_events(since).await;
+        match task_id {
+            None => full,
+            // Keep the task's own events plus workspace-global (task-less)
+            // ones — model-install progress, plan checkpoints for other
+            // surfaces, etc. — so a per-task subscriber is not blind to
+            // things a full subscriber would coalesce in (G11).
+            Some(want) => full
+                .filter(move |ev| {
+                    let keep = ev.task_id.is_none() || ev.task_id.as_deref() == Some(want.as_str());
+                    async move { keep }
+                })
+                .boxed(),
+        }
+    }
 }
 
 fn status_str(s: CheckStatus) -> &'static str {
