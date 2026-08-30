@@ -14,6 +14,7 @@ pub mod error;
 pub mod log;
 pub mod repo;
 pub mod status;
+pub mod worktree_diff;
 
 #[cfg(test)]
 mod test_support;
@@ -24,3 +25,4 @@ pub use error::{GitError, Result};
 pub use log::CommitInfo;
 pub use repo::{HeadInfo, Repo};
 pub use status::{FileStatus, RepoStatus, StatusKind};
+pub use worktree_diff::WorktreeDiff;

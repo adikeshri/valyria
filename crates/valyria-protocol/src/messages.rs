@@ -119,6 +119,12 @@ pub struct PlanStepSummary {
     pub depends_on: Vec<String>,
     pub rollback_boundary: bool,
     pub checkpoint: bool,
+    /// The `checkpoint_id` a checkpoint at this step was recorded under,
+    /// when one exists — the id `task_rollback` expects (§16, G13).
+    /// Additive as of protocol 1.5.0; also emitted live as a
+    /// `plan_checkpoint` event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -133,12 +139,28 @@ pub struct PlanGetResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct PermissionResolveRequest {
     pub task_id: String,
+    /// Legacy approve/deny (protocol 1.0). Ignored when `decision` is set.
     pub approve: bool,
+    /// The `request_id` from the `approval_requested` payload (G2). When
+    /// present it is asserted against the daemon's current pending
+    /// request; a stale id is rejected with `approval.superseded` rather
+    /// than resolving the wrong prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// `once` (approve this call), `task` (approve and grant for the rest
+    /// of the task — "Allow for Task"), or `deny`. Overrides `approve`
+    /// when set. Additive as of protocol 1.8.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct EventsSubscribeRequest {
     pub since: u64,
+    /// Restrict the stream to this task's events plus workspace-global
+    /// (task-less) events (protocol 1.7.0, G11). Absent = the full stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
 }
 
 // --- doctor (§4.28) ---
@@ -269,6 +291,331 @@ pub struct ModelListResponse {
     pub models: Vec<ModelSummaryWire>,
 }
 
+// --- repository read surface (§7, §14, §17, §33; capability `repo`) ---
+//
+// Additive as of protocol 1.2.0. Every method here is read-only: the app's
+// diff viewer, changed-file rail, code search and git panel stop being
+// served by a local-read fallback and are served by Core instead. Git
+// *writes* remain Core-internal and are not exposed.
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct GitFileStatusWire {
+    pub path: String,
+    /// `added` | `modified` | `deleted` | `untracked` | `conflicted`.
+    pub kind: String,
+    /// `true` for an index-vs-HEAD (staged) entry, `false` for a
+    /// worktree-vs-index (unstaged / untracked) entry.
+    pub staged: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct GitStatusResponse {
+    /// Current branch, or `None` when HEAD is detached.
+    pub branch: Option<String>,
+    pub detached: bool,
+    /// HEAD commit SHA, or `None` for an unborn HEAD.
+    pub head_commit: Option<String>,
+    pub files: Vec<GitFileStatusWire>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct GitDiffRequest {
+    /// Restrict the diff to this exact repo-relative path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// `false` → worktree vs index (`git diff`); `true` → index vs HEAD
+    /// (`git diff --staged`).
+    #[serde(default)]
+    pub staged: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct GitDiffResponse {
+    /// Unified-diff text; empty when there is nothing to show.
+    pub unified: String,
+    /// `true` when `unified` was clipped at Core's size cap.
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct GitLogRequest {
+    /// Newest-first commits from HEAD. Defaults to 50, capped at 500.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct GitCommitWire {
+    pub sha: String,
+    pub author_name: String,
+    pub author_email: String,
+    /// The commit subject (first line).
+    pub message: String,
+    /// Author time, unix seconds.
+    pub time_unix: i64,
+    pub parents: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct GitLogResponse {
+    pub commits: Vec<GitCommitWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct GitBranchWire {
+    pub name: String,
+    pub commit: String,
+    pub is_head: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct GitBranchesResponse {
+    pub branches: Vec<GitBranchWire>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SearchQueryRequest {
+    /// The query phrase, or a pattern for `regex` / `ast` modes.
+    pub query: String,
+    /// Mode names (`lexical`, `symbol`, `semantic`, `regex`, `ast`,
+    /// `dependency`, `git`). Empty runs the engine's default set. An
+    /// unknown name is `search.unknown_mode`.
+    #[serde(default)]
+    pub modes: Vec<String>,
+    /// Files the current task is anchored on — they seed dependency-mode
+    /// traversal and pull nearby files up the ranking.
+    #[serde(default)]
+    pub anchors: Vec<String>,
+    /// Max hits. Defaults to 20, capped at 200.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// One reranking feature and its weighted contribution — mirrors
+/// `valyria_search::Feature`. The features of a hit sum *exactly* to its
+/// `score` (§14: "why this file?" answered from stored data).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SearchFeatureWire {
+    pub name: String,
+    pub value: f64,
+    pub weight: f64,
+    pub contribution: f64,
+}
+
+/// How one retrieval mode ranked a hit before fusion — mirrors
+/// `valyria_search::StageScore`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SearchStageScoreWire {
+    pub mode: String,
+    pub rank: u32,
+    pub raw_score: f64,
+}
+
+/// The full derivation of a hit's score — mirrors
+/// `valyria_search::ScoreExplanation`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ScoreExplanationWire {
+    pub stage_scores: Vec<SearchStageScoreWire>,
+    pub features: Vec<SearchFeatureWire>,
+    pub retrieval_paths: Vec<String>,
+}
+
+/// One ranked hit — mirrors `valyria_search::SearchHit`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SearchHitWire {
+    pub path: String,
+    pub symbol_path: Option<String>,
+    pub line: Option<u32>,
+    pub snippet: Option<String>,
+    pub score: f64,
+    pub explanation: ScoreExplanationWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SearchQueryResponse {
+    pub hits: Vec<SearchHitWire>,
+    /// Modes that actually ran.
+    pub modes_run: Vec<String>,
+    /// Human-readable notes about modes that stepped aside ("semantic: no
+    /// embeddings for generation 3", "git: not a git repository"). Never
+    /// an error — a missing mode degrades the result, it does not fail it.
+    pub degraded: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct IndexStatusResponse {
+    /// `None` when the workspace has never been indexed.
+    pub generation: Option<u64>,
+    /// `files` | `complete` (the generation's `GenerationStage`).
+    pub stage: Option<String>,
+    pub file_count: u64,
+    pub symbol_count: u64,
+    /// When the current generation was published, unix milliseconds.
+    pub created_at_ms: Option<i64>,
+}
+
+// --- hardware & models (§20, §21, §22, §37; capabilities `hardware`,
+// `models`) ---
+//
+// Additive as of protocol 1.3.0. `hardware_probe` and `model_recommend`
+// give the first-run wizard a structured source and let it *explain* a
+// recommendation from Core's `fit()` scoring rather than a heuristic
+// (§41). `model_install` / `_remove` / `_activate` / `_inspect` drive
+// `valyria-model-store`; install returns immediately and reports progress
+// on the event stream (`model_install_progress` / `_completed` /
+// `_failed`).
+
+/// Mirrors `valyria_hardware::CpuInfo`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CpuInfoWire {
+    pub brand: String,
+    pub physical_cores: u32,
+    pub logical_cores: u32,
+    pub arch: String,
+}
+
+/// Mirrors `valyria_hardware::GpuInfo`. `vram_bytes` is `None` on a
+/// unified-memory system — meaningful, not missing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct GpuInfoWire {
+    pub name: String,
+    pub vendor: Option<String>,
+    pub core_count: Option<u32>,
+    pub vram_bytes: Option<u64>,
+}
+
+/// Mirrors `valyria_hardware::HardwareReport` (§37, §39).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct HardwareProbeResponse {
+    pub os: String,
+    pub os_version: Option<String>,
+    pub arch: String,
+    pub cpu: CpuInfoWire,
+    pub ram_total_bytes: u64,
+    pub ram_available_bytes: u64,
+    pub gpus: Vec<GpuInfoWire>,
+    /// CPU and GPU share one memory pool (Apple Silicon today).
+    pub unified_memory: bool,
+    /// `Some(false)` = probed and absent; `None` = not probed on this
+    /// platform yet.
+    pub accelerator_present: Option<bool>,
+    pub disk_total_bytes: u64,
+    pub disk_available_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelRecommendRequest {
+    /// A `ModelRole` name: `primary_coder`, `fast_coder`, `planner`,
+    /// `reviewer`, `embedder`, `reranker`, `autocomplete`, `summarizer`.
+    pub role: String,
+}
+
+/// One scored candidate for a role on this machine — mirrors
+/// `valyria_model_registry::CardScore` joined with its card. A card that
+/// will not fit is still listed, with `fit_kind = "will_not_fit"` and no
+/// `adjusted_score`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelCandidateWire {
+    pub id: String,
+    pub display_name: String,
+    pub family: String,
+    pub size_bytes: u64,
+    pub license_name: String,
+    pub installed: bool,
+    /// Catalog role suitability, 0..=100.
+    pub suitability: u32,
+    /// `comfortable` | `tight` | `will_not_fit`.
+    pub fit_kind: String,
+    /// For `tight`, the estimated resource utilisation (0.0..~1.0); for
+    /// `will_not_fit`, the reason (`insufficient_ram` | `insufficient_vram`).
+    pub fit_detail: Option<String>,
+    /// `suitability` minus the tight-fit penalty — the value Core ranks
+    /// on. `None` when the card will not fit.
+    pub adjusted_score: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelRecommendResponse {
+    pub role: String,
+    /// The best-scoring fitting candidate, if any.
+    pub recommended: Option<ModelCandidateWire>,
+    /// Every candidate for the role, best first (non-fitting ones sorted
+    /// last).
+    pub candidates: Vec<ModelCandidateWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelIdRequest {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelActivateRequest {
+    pub id: String,
+    /// The role to bind `id` to (a `ModelRole` name).
+    pub role: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelRemoveResponse {
+    pub freed_bytes: u64,
+}
+
+/// Full detail for one model — mirrors the `ModelCard` plus, when
+/// installed, its `manifest.json` (§4.21). `license_text` is the license
+/// body when Core has it locally, for the acceptance prompt.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelInspectResponse {
+    pub id: String,
+    pub display_name: String,
+    pub family: String,
+    pub parameters_b: f64,
+    pub quantization: String,
+    pub context_length: u32,
+    pub size_bytes: u64,
+    pub license_name: String,
+    pub license_url: Option<String>,
+    pub source_url: String,
+    pub installed: bool,
+    /// Present only when installed.
+    pub installed_at_ms: Option<i64>,
+    /// Measured decode throughput from the post-install probe, if recorded.
+    pub probe_tokens_per_sec: Option<f64>,
+    /// The roles this model is currently bound to.
+    pub active_roles: Vec<String>,
+}
+
+// --- change ownership (§15, §16; capability `ledger`) ---
+//
+// Additive as of protocol 1.4.0. Surfaces `valyria-ledger`'s
+// agent-authored / pre-existing / concurrent-user classification for the
+// diff viewer's ownership column. Context provenance (G7) has no request
+// — it is the `context_retrieved` *event*, emitted per Discovery step.
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct LedgerChangesRequest {
+    pub task_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct LedgerChangeWire {
+    pub path: String,
+    /// `agent_authored` | `pre_existing` | `concurrent_user_modification`
+    /// | `unknown` — computed against the file's on-disk state now.
+    pub classification: String,
+    /// `write` | `delete` — the agent's most recent action on the path.
+    pub kind: String,
+    pub task_id: String,
+    pub step_id: String,
+    pub tool_invocation_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct LedgerChangesResponse {
+    /// One row per agent-touched path, path-ordered.
+    pub changes: Vec<LedgerChangeWire>,
+}
+
 // --- workspace ---
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -327,12 +674,20 @@ mod tests {
 
     #[test]
     fn permission_resolve_request_round_trip() {
+        // Legacy shape (no request_id / decision) still parses.
+        let legacy: PermissionResolveRequest =
+            serde_json::from_str(r#"{"task_id":"task_01H","approve":true}"#).unwrap();
+        assert_eq!(legacy.request_id, None);
+        assert_eq!(legacy.decision, None);
+
         let req = PermissionResolveRequest {
             task_id: "task_01H".into(),
             approve: true,
+            request_id: Some("eff_01H".into()),
+            decision: Some("task".into()),
         };
-        let json = serde_json::to_string(&req).unwrap();
-        let back: PermissionResolveRequest = serde_json::from_str(&json).unwrap();
+        let back: PermissionResolveRequest =
+            serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
         assert_eq!(req, back);
     }
 

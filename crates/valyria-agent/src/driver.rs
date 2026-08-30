@@ -29,7 +29,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use valyria_context::{ContextAssembler, ContextQuery};
+use valyria_context::{AssembledContext, ContextAssembler, ContextQuery};
 use valyria_ledger::Ledger;
 use valyria_model::{GenerateRequest, Message};
 use valyria_orchestrator::{Orchestrator, Role};
@@ -38,7 +38,7 @@ use valyria_plan::PlanStore;
 use valyria_sandbox::{ProcessLauncher, SandboxProfile};
 use valyria_task::{kinds, ControlSignal, JournalEntryKind, TaskManager};
 use valyria_tools::{InvocationResult, ToolCtx, ToolOutcome, ToolRuntime};
-use valyria_types::{AgentState, EffectId, StepId, TaskId};
+use valyria_types::{AgentState, EffectId, ProvenanceSource, StepId, TaskId, Trust};
 use valyria_util::{CancellationToken, Clock, ContentHash};
 use valyria_verify::{
     changeset_hash, diagnose, Diagnosis, EscalationStrategy, ProcessProbeRunner, VerificationLog,
@@ -71,6 +71,18 @@ pub(crate) const MAX_STEP_TURNS: usize = 3;
 /// by this name whose arguments are the plan JSON. Not a real registered
 /// tool — `step_planning` intercepts it before `ToolRuntime` ever sees it.
 pub const SUBMIT_PLAN_ACTION: &str = "submit_plan";
+
+/// How a client resolved an outstanding approval (§13, G2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalDecision {
+    /// Approve just this one tool call.
+    Once,
+    /// Approve, and grant the same class of request for the rest of the
+    /// task (`GrantScope::Task`).
+    Task,
+    /// Deny — the task fails.
+    Deny,
+}
 
 /// Whether the `Planning` state asks the model for a plan or is the
 /// Phase 3 pass-through.
@@ -210,9 +222,16 @@ impl AgentDriver {
                 }
                 AgentState::Discovery => {
                     let ctx = self.build_ctx(task_id, StepId::new(), cancel.child());
-                    self.context
+                    let assembled = self
+                        .context
                         .assemble(&ctx, ContextQuery::new(DEFAULT_CONTEXT_BUDGET_TOKENS))
                         .await?;
+                    self.journal_context_retrieved(
+                        task_id,
+                        &assembled,
+                        DEFAULT_CONTEXT_BUDGET_TOKENS,
+                    )
+                    .await?;
                     self.tasks.transition(task_id, AgentState::Planning).await?;
                 }
                 AgentState::Planning => match self.planning_mode {
@@ -467,6 +486,8 @@ impl AgentDriver {
                         "failure_count": run.failures.len(),
                         "run_id": run.id.to_string(),
                         "digest": run.digest(3),
+                        // Parsed failure locations, when a parser matched (G15).
+                        "failures": run.failures.iter().map(failure_payload).collect::<Vec<_>>(),
                     }),
                 },
             )
@@ -797,7 +818,12 @@ impl AgentDriver {
                     effect_id,
                     step_id,
                     effect_kind: kinds::TOOL.into(),
-                    payload: serde_json::json!({"tool": tool, "input": input}),
+                    payload: serde_json::json!({
+                        "tool": tool,
+                        "input": input,
+                        // Stable id pairing this start with its completion (G14).
+                        "tool_invocation_id": effect_id.to_string(),
+                    }),
                 },
             )
             .await?;
@@ -823,6 +849,10 @@ impl AgentDriver {
                     ToolOutcome::Success { rendered, .. } => (true, rendered.clone()),
                     ToolOutcome::Failure { rendered, .. } => (false, rendered.clone()),
                 };
+                let duration_ms = record
+                    .end_time
+                    .as_millis()
+                    .saturating_sub(record.start_time.as_millis());
                 self.tasks
                     .append_journal(
                         task_id,
@@ -832,7 +862,14 @@ impl AgentDriver {
                             outcome_kind: kinds::TOOL_RESULT.into(),
                             payload: serde_json::json!({
                                 "success": success,
-                                "tool_invocation_id": record.id.to_string(),
+                                // Matches `tool_started`'s `tool_invocation_id` (G14).
+                                "tool_invocation_id": effect_id.to_string(),
+                                "tool_record_id": record.id.to_string(),
+                                // Structured completion fields alongside `rendered` (G14).
+                                "exit_code": record.exit_status,
+                                "stdout": record.stdout,
+                                "stderr": record.stderr,
+                                "duration_ms": duration_ms,
                                 "rendered": rendered,
                             }),
                         },
@@ -849,6 +886,8 @@ impl AgentDriver {
                             step_id,
                             outcome_kind: kinds::PERMISSION_ASK.into(),
                             payload: serde_json::json!({
+                                // Stable request identity for permission_resolve (G2).
+                                "request_id": effect_id.to_string(),
                                 "prompt": prompt,
                                 "tool": request.tool,
                                 "category": format!("{:?}", request.category),
@@ -895,6 +934,26 @@ impl AgentDriver {
     }
 
     pub async fn resolve_permission(&self, task_id: TaskId, approve: bool) -> Result<()> {
+        let decision = if approve {
+            ApprovalDecision::Once
+        } else {
+            ApprovalDecision::Deny
+        };
+        self.resolve_permission_scoped(task_id, None, decision)
+            .await
+    }
+
+    /// Resolve an outstanding approval, optionally asserting `request_id`
+    /// (the pending call's effect id) so a client cannot resolve a prompt
+    /// a newer request has superseded (G2). `decision` is `Once` (approve
+    /// this call), `Task` (approve and grant for the rest of the task), or
+    /// `Deny`.
+    pub async fn resolve_permission_scoped(
+        &self,
+        task_id: TaskId,
+        request_id: Option<String>,
+        decision: ApprovalDecision,
+    ) -> Result<()> {
         let task = self.tasks.get(task_id).await?;
         if task.state != AgentState::WaitingForPermission {
             return Err(AgentError::NotWaitingForPermission(task_id));
@@ -904,6 +963,17 @@ impl AgentDriver {
             .pending_tool_call(task_id)
             .await?
             .ok_or(AgentError::NoPendingToolCall(task_id))?;
+
+        if let Some(want) = &request_id {
+            let current = pending.effect_id.to_string();
+            if *want != current {
+                return Err(AgentError::ApprovalSuperseded {
+                    got: want.clone(),
+                    current,
+                });
+            }
+        }
+
         let tool = self
             .tools
             .get_tool(&pending.tool)
@@ -912,7 +982,7 @@ impl AgentDriver {
         let ctx = self.build_ctx(task_id, pending.step_id, CancellationToken::new());
         let effect_id = pending.effect_id;
 
-        if !approve {
+        if decision == ApprovalDecision::Deny {
             self.tasks
                 .append_journal(
                     task_id,
@@ -933,7 +1003,11 @@ impl AgentDriver {
                 .map_err(|e| AgentError::MalformedCompletion {
                     detail: e.to_string(),
                 })?;
-        let auth = self.permissions.approve(request, GrantScope::OneShot, None);
+        let scope = match decision {
+            ApprovalDecision::Task => GrantScope::Task(task_id),
+            _ => GrantScope::OneShot,
+        };
+        let auth = self.permissions.approve(request, scope, None);
         let result = self
             .tools
             .invoke_with_authorization(&ctx, &pending.tool, pending.input, auth)
@@ -1008,6 +1082,60 @@ impl AgentDriver {
         self.verify_states.lock().unwrap().insert(task_id, state);
     }
 
+    /// Record what the context assembler retrieved for a step so it
+    /// projects to a `context_retrieved` event (§34, G7). Read-only: this
+    /// is a completed-effect journal entry with no matching issue.
+    async fn journal_context_retrieved(
+        &self,
+        task_id: TaskId,
+        assembled: &AssembledContext,
+        budget_total: usize,
+    ) -> Result<()> {
+        let items: Vec<serde_json::Value> = assembled
+            .items
+            .iter()
+            .map(|item| {
+                let path = match &item.provenance.source {
+                    ProvenanceSource::File { path } => path.clone(),
+                    ProvenanceSource::Instruction { path } => path.clone(),
+                    ProvenanceSource::ToolOutput { invocation } => format!("tool:{invocation}"),
+                    ProvenanceSource::Git { commit } => format!("git:{commit}"),
+                    ProvenanceSource::Memory { id } => format!("memory:{id}"),
+                    ProvenanceSource::ModelTurn => "<model turn>".to_string(),
+                };
+                let reason = if item.provenance.retrieval_path.is_empty() {
+                    "explicit".to_string()
+                } else {
+                    item.provenance.retrieval_path.join(" -> ")
+                };
+                serde_json::json!({
+                    "path": path,
+                    "reason": reason,
+                    "trust_level": trust_level_str(item.trust),
+                    "tokens": item.tokens,
+                    "score": item.provenance.score,
+                })
+            })
+            .collect();
+
+        self.tasks
+            .append_journal(
+                task_id,
+                JournalEntryKind::EffectCompleted {
+                    effect_id: EffectId::new(),
+                    step_id: StepId::new(),
+                    outcome_kind: kinds::CONTEXT_RETRIEVED.into(),
+                    payload: serde_json::json!({
+                        "items": items,
+                        "budget_used": assembled.total_tokens,
+                        "budget_total": budget_total,
+                    }),
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
     pub(crate) fn build_ctx(
         &self,
         task_id: TaskId,
@@ -1035,6 +1163,32 @@ pub(crate) enum Flow {
     Return,
 }
 
+/// Wire shape for one parsed verification failure (§19, §35, G15).
+fn failure_payload(f: &valyria_verify::Failure) -> serde_json::Value {
+    let loc = |l: &valyria_verify::Location| serde_json::json!({ "path": l.file.display().to_string(), "line": l.line });
+    let mut locations = Vec::new();
+    if let Some(primary) = &f.primary_location {
+        locations.push(loc(primary));
+    }
+    locations.extend(f.secondary_locations.iter().map(loc));
+    serde_json::json!({
+        "kind": serde_json::to_value(f.kind).unwrap_or(serde_json::json!("unknown")),
+        "message": f.message,
+        "failing_test": f.failing_test,
+        "location": locations,
+    })
+}
+
+fn trust_level_str(t: Trust) -> &'static str {
+    match t {
+        Trust::Policy => "policy",
+        Trust::Instruction => "instruction",
+        Trust::Evidence => "evidence",
+        Trust::RepoData => "repo_data",
+        Trust::ModelOutput => "model_output",
+    }
+}
+
 fn describe_finding(f: &LoopFinding) -> String {
     match f {
         LoopFinding::ExactRepeat { count, .. } => format!("identical step ×{count}"),
@@ -1056,5 +1210,38 @@ fn describe_decision(d: &RepairDecision) -> String {
         RepairDecision::SwitchRole => "switch_role".into(),
         RepairDecision::AskUser { reason } => format!("ask_user: {reason}"),
         RepairDecision::GiveUp { reason } => format!("give_up: {reason}"),
+    }
+}
+
+#[cfg(test)]
+mod diagnostics_tests {
+    use super::*;
+    use valyria_verify::{Failure, FailureKind, Location};
+
+    #[test]
+    fn failure_payload_carries_parsed_locations() {
+        let mut f = Failure::new(FailureKind::TestFailure, "assertion failed: 1 == 2");
+        f.primary_location = Some(Location::at("src/math.rs", 42, 5));
+        f.secondary_locations = vec![Location::new("tests/math_test.rs")];
+        f.failing_test = Some("math::adds".into());
+
+        let v = failure_payload(&f);
+        assert_eq!(v["kind"], "test_failure");
+        assert_eq!(v["failing_test"], "math::adds");
+        let locs = v["location"].as_array().unwrap();
+        assert_eq!(locs.len(), 2);
+        assert_eq!(locs[0]["path"], "src/math.rs");
+        assert_eq!(locs[0]["line"], 42);
+        assert_eq!(locs[1]["path"], "tests/math_test.rs");
+        assert!(locs[1]["line"].is_null());
+    }
+
+    #[test]
+    fn failure_payload_with_no_location_is_still_well_formed() {
+        let f = Failure::new(FailureKind::Timeout, "exceeded 60s");
+        let v = failure_payload(&f);
+        assert_eq!(v["kind"], "timeout");
+        assert_eq!(v["location"].as_array().unwrap().len(), 0);
+        assert!(v["failing_test"].is_null());
     }
 }

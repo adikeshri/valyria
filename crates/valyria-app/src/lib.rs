@@ -29,8 +29,11 @@ pub use daemon::serve;
 pub use doctor::{CheckStatus, Doctor, DoctorCheck, DoctorReport};
 pub use error::{AppError, Result};
 pub use global::{global_migrations, GlobalStore, WorkspaceRegistration};
-pub use runtime::{load_scenario, ConfigWriteScope, Runtime, RuntimeConfig};
+pub use runtime::{
+    load_scenario, ConfigWriteScope, GitStatusView, LedgerChangeView, ModelInspectView, Runtime,
+    RuntimeConfig,
+};
 pub use storage::{PurgeOutcome, PurgeScope, StorageEntry, StorageInspector, StorageReport};
 
-pub use valyria_agent::PlanningMode;
+pub use valyria_agent::{ApprovalDecision, PlanningMode};
 pub use valyria_plan::{RollbackError, RollbackReport};

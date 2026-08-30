@@ -255,7 +255,205 @@
       }
     },
     {
-      "description": "A request that succeeded with nothing to return (`task.pause`, `task.resume`, `task.cancel`, `permission.resolve`).",
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "git_status"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/GitStatusResponse"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "git_diff"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/GitDiffResponse"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "git_log"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/GitLogResponse"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "git_branches"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/GitBranchesResponse"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "search_query"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/SearchQueryResponse"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "index_status"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/IndexStatusResponse"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "hardware_probe"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/HardwareProbeResponse"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "model_recommend"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/ModelRecommendResponse"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "model_remove"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/ModelRemoveResponse"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "model_inspect"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/ModelInspectResponse"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "ledger_changes"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/LedgerChangesResponse"
+        }
+      }
+    },
+    {
+      "description": "A request that succeeded with nothing to return (`task.pause`, `task.resume`, `task.cancel`, `permission.resolve`, `model.install`, `model.activate`).",
       "type": "object",
       "required": [
         "result"
@@ -323,6 +521,34 @@
         }
       }
     },
+    "CpuInfoWire": {
+      "description": "Mirrors `valyria_hardware::CpuInfo`.",
+      "type": "object",
+      "required": [
+        "arch",
+        "brand",
+        "logical_cores",
+        "physical_cores"
+      ],
+      "properties": {
+        "arch": {
+          "type": "string"
+        },
+        "brand": {
+          "type": "string"
+        },
+        "logical_cores": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "physical_cores": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
     "DoctorCheckWire": {
       "type": "object",
       "required": [
@@ -368,6 +594,263 @@
         }
       }
     },
+    "GitBranchWire": {
+      "type": "object",
+      "required": [
+        "commit",
+        "is_head",
+        "name"
+      ],
+      "properties": {
+        "commit": {
+          "type": "string"
+        },
+        "is_head": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        }
+      }
+    },
+    "GitBranchesResponse": {
+      "type": "object",
+      "required": [
+        "branches"
+      ],
+      "properties": {
+        "branches": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/GitBranchWire"
+          }
+        }
+      }
+    },
+    "GitCommitWire": {
+      "type": "object",
+      "required": [
+        "author_email",
+        "author_name",
+        "message",
+        "parents",
+        "sha",
+        "time_unix"
+      ],
+      "properties": {
+        "author_email": {
+          "type": "string"
+        },
+        "author_name": {
+          "type": "string"
+        },
+        "message": {
+          "description": "The commit subject (first line).",
+          "type": "string"
+        },
+        "parents": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "sha": {
+          "type": "string"
+        },
+        "time_unix": {
+          "description": "Author time, unix seconds.",
+          "type": "integer",
+          "format": "int64"
+        }
+      }
+    },
+    "GitDiffResponse": {
+      "type": "object",
+      "required": [
+        "truncated",
+        "unified"
+      ],
+      "properties": {
+        "truncated": {
+          "description": "`true` when `unified` was clipped at Core's size cap.",
+          "type": "boolean"
+        },
+        "unified": {
+          "description": "Unified-diff text; empty when there is nothing to show.",
+          "type": "string"
+        }
+      }
+    },
+    "GitFileStatusWire": {
+      "type": "object",
+      "required": [
+        "kind",
+        "path",
+        "staged"
+      ],
+      "properties": {
+        "kind": {
+          "description": "`added` | `modified` | `deleted` | `untracked` | `conflicted`.",
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "staged": {
+          "description": "`true` for an index-vs-HEAD (staged) entry, `false` for a worktree-vs-index (unstaged / untracked) entry.",
+          "type": "boolean"
+        }
+      }
+    },
+    "GitLogResponse": {
+      "type": "object",
+      "required": [
+        "commits"
+      ],
+      "properties": {
+        "commits": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/GitCommitWire"
+          }
+        }
+      }
+    },
+    "GitStatusResponse": {
+      "type": "object",
+      "required": [
+        "detached",
+        "files"
+      ],
+      "properties": {
+        "branch": {
+          "description": "Current branch, or `None` when HEAD is detached.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "detached": {
+          "type": "boolean"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/GitFileStatusWire"
+          }
+        },
+        "head_commit": {
+          "description": "HEAD commit SHA, or `None` for an unborn HEAD.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "GpuInfoWire": {
+      "description": "Mirrors `valyria_hardware::GpuInfo`. `vram_bytes` is `None` on a unified-memory system — meaningful, not missing.",
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "core_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "name": {
+          "type": "string"
+        },
+        "vendor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "vram_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "HardwareProbeResponse": {
+      "description": "Mirrors `valyria_hardware::HardwareReport` (§37, §39).",
+      "type": "object",
+      "required": [
+        "arch",
+        "cpu",
+        "disk_available_bytes",
+        "disk_total_bytes",
+        "gpus",
+        "os",
+        "ram_available_bytes",
+        "ram_total_bytes",
+        "unified_memory"
+      ],
+      "properties": {
+        "accelerator_present": {
+          "description": "`Some(false)` = probed and absent; `None` = not probed on this platform yet.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "arch": {
+          "type": "string"
+        },
+        "cpu": {
+          "$ref": "#/definitions/CpuInfoWire"
+        },
+        "disk_available_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "disk_total_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "gpus": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/GpuInfoWire"
+          }
+        },
+        "os": {
+          "type": "string"
+        },
+        "os_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ram_available_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "ram_total_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "unified_memory": {
+          "description": "CPU and GPU share one memory pool (Apple Silicon today).",
+          "type": "boolean"
+        }
+      }
+    },
     "HelloResponse": {
       "type": "object",
       "required": [
@@ -388,6 +871,99 @@
         },
         "runtime_version": {
           "type": "string"
+        }
+      }
+    },
+    "IndexStatusResponse": {
+      "type": "object",
+      "required": [
+        "file_count",
+        "symbol_count"
+      ],
+      "properties": {
+        "created_at_ms": {
+          "description": "When the current generation was published, unix milliseconds.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "file_count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "generation": {
+          "description": "`None` when the workspace has never been indexed.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "stage": {
+          "description": "`files` | `complete` (the generation's `GenerationStage`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "symbol_count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "LedgerChangeWire": {
+      "type": "object",
+      "required": [
+        "classification",
+        "kind",
+        "path",
+        "step_id",
+        "task_id"
+      ],
+      "properties": {
+        "classification": {
+          "description": "`agent_authored` | `pre_existing` | `concurrent_user_modification` | `unknown` — computed against the file's on-disk state now.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "`write` | `delete` — the agent's most recent action on the path.",
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "step_id": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "tool_invocation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "LedgerChangesResponse": {
+      "type": "object",
+      "required": [
+        "changes"
+      ],
+      "properties": {
+        "changes": {
+          "description": "One row per agent-touched path, path-ordered.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/LedgerChangeWire"
+          }
         }
       }
     },
@@ -437,6 +1013,150 @@
         }
       }
     },
+    "ModelCandidateWire": {
+      "description": "One scored candidate for a role on this machine — mirrors `valyria_model_registry::CardScore` joined with its card. A card that will not fit is still listed, with `fit_kind = \"will_not_fit\"` and no `adjusted_score`.",
+      "type": "object",
+      "required": [
+        "display_name",
+        "family",
+        "fit_kind",
+        "id",
+        "installed",
+        "license_name",
+        "size_bytes",
+        "suitability"
+      ],
+      "properties": {
+        "adjusted_score": {
+          "description": "`suitability` minus the tight-fit penalty — the value Core ranks on. `None` when the card will not fit.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "family": {
+          "type": "string"
+        },
+        "fit_detail": {
+          "description": "For `tight`, the estimated resource utilisation (0.0..~1.0); for `will_not_fit`, the reason (`insufficient_ram` | `insufficient_vram`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fit_kind": {
+          "description": "`comfortable` | `tight` | `will_not_fit`.",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "installed": {
+          "type": "boolean"
+        },
+        "license_name": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "suitability": {
+          "description": "Catalog role suitability, 0..=100.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "ModelInspectResponse": {
+      "description": "Full detail for one model — mirrors the `ModelCard` plus, when installed, its `manifest.json` (§4.21). `license_text` is the license body when Core has it locally, for the acceptance prompt.",
+      "type": "object",
+      "required": [
+        "active_roles",
+        "context_length",
+        "display_name",
+        "family",
+        "id",
+        "installed",
+        "license_name",
+        "parameters_b",
+        "quantization",
+        "size_bytes",
+        "source_url"
+      ],
+      "properties": {
+        "active_roles": {
+          "description": "The roles this model is currently bound to.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "context_length": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "family": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "installed": {
+          "type": "boolean"
+        },
+        "installed_at_ms": {
+          "description": "Present only when installed.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "license_name": {
+          "type": "string"
+        },
+        "license_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parameters_b": {
+          "type": "number",
+          "format": "double"
+        },
+        "probe_tokens_per_sec": {
+          "description": "Measured decode throughput from the post-install probe, if recorded.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "quantization": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "source_url": {
+          "type": "string"
+        }
+      }
+    },
     "ModelListResponse": {
       "type": "object",
       "required": [
@@ -448,6 +1168,49 @@
           "items": {
             "$ref": "#/definitions/ModelSummaryWire"
           }
+        }
+      }
+    },
+    "ModelRecommendResponse": {
+      "type": "object",
+      "required": [
+        "candidates",
+        "role"
+      ],
+      "properties": {
+        "candidates": {
+          "description": "Every candidate for the role, best first (non-fitting ones sorted last).",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ModelCandidateWire"
+          }
+        },
+        "recommended": {
+          "description": "The best-scoring fitting candidate, if any.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelCandidateWire"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "role": {
+          "type": "string"
+        }
+      }
+    },
+    "ModelRemoveResponse": {
+      "type": "object",
+      "required": [
+        "freed_bytes"
+      ],
+      "properties": {
+        "freed_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
         }
       }
     },
@@ -527,6 +1290,13 @@
         "checkpoint": {
           "type": "boolean"
         },
+        "checkpoint_id": {
+          "description": "The `checkpoint_id` a checkpoint at this step was recorded under, when one exists — the id `task_rollback` expects (§16, G13). Additive as of protocol 1.5.0; also emitted live as a `plan_checkpoint` event.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "depends_on": {
           "type": "array",
           "items": {
@@ -570,6 +1340,156 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0.0
+        }
+      }
+    },
+    "ScoreExplanationWire": {
+      "description": "The full derivation of a hit's score — mirrors `valyria_search::ScoreExplanation`.",
+      "type": "object",
+      "required": [
+        "features",
+        "retrieval_paths",
+        "stage_scores"
+      ],
+      "properties": {
+        "features": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SearchFeatureWire"
+          }
+        },
+        "retrieval_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "stage_scores": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SearchStageScoreWire"
+          }
+        }
+      }
+    },
+    "SearchFeatureWire": {
+      "description": "One reranking feature and its weighted contribution — mirrors `valyria_search::Feature`. The features of a hit sum *exactly* to its `score` (§14: \"why this file?\" answered from stored data).",
+      "type": "object",
+      "required": [
+        "contribution",
+        "name",
+        "value",
+        "weight"
+      ],
+      "properties": {
+        "contribution": {
+          "type": "number",
+          "format": "double"
+        },
+        "name": {
+          "type": "string"
+        },
+        "value": {
+          "type": "number",
+          "format": "double"
+        },
+        "weight": {
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "SearchHitWire": {
+      "description": "One ranked hit — mirrors `valyria_search::SearchHit`.",
+      "type": "object",
+      "required": [
+        "explanation",
+        "path",
+        "score"
+      ],
+      "properties": {
+        "explanation": {
+          "$ref": "#/definitions/ScoreExplanationWire"
+        },
+        "line": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "path": {
+          "type": "string"
+        },
+        "score": {
+          "type": "number",
+          "format": "double"
+        },
+        "snippet": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "symbol_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "SearchQueryResponse": {
+      "type": "object",
+      "required": [
+        "degraded",
+        "hits",
+        "modes_run"
+      ],
+      "properties": {
+        "degraded": {
+          "description": "Human-readable notes about modes that stepped aside (\"semantic: no embeddings for generation 3\", \"git: not a git repository\"). Never an error — a missing mode degrades the result, it does not fail it.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "hits": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SearchHitWire"
+          }
+        },
+        "modes_run": {
+          "description": "Modes that actually ran.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "SearchStageScoreWire": {
+      "description": "How one retrieval mode ranked a hit before fusion — mirrors `valyria_search::StageScore`.",
+      "type": "object",
+      "required": [
+        "mode",
+        "rank",
+        "raw_score"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string"
+        },
+        "rank": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "raw_score": {
+          "type": "number",
+          "format": "double"
         }
       }
     },

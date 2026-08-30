@@ -15,6 +15,170 @@ Work toward the first release. Phases refer to
 
 ### Added
 
+- **Protocol 1.9.0 — Windows named-pipe transport** (desktop-client gap
+  closure G9; additive; runtime capabilities `daemon`, `windows`).
+  - `SocketClient` and `daemon::serve` now speak a **Windows named pipe**
+    (`\\.\pipe\valyria-<id>`) as well as a Unix-domain socket, behind the
+    same `Client` trait — `valyria serve` and `--connect` work on Windows.
+    The frame handling is shared (`daemon::framed::serve_connection`);
+    only the listener and the peer check differ. `SocketClient::new`
+    accepts either a socket path or a pipe name.
+  - The peer boundary on Windows is the pipe's default ACL (creating
+    user's token — the `SO_PEERCRED` analogue); the per-frame `auth_token`
+    (G10) applies identically.
+  - `hello` now advertises `daemon` where the IPC transport exists and
+    `windows` on a Windows build (both runtime-conditional, not in
+    `capability::ALL`).
+  - The whole workspace cross-compiles for `x86_64-pc-windows-*`; the
+    named-pipe daemon test runs on the `windows-latest` CI matrix.
+  - **Not** in scope: a Windows *access* sandbox (Job Objects / restricted
+    tokens). `detect_platform_launcher` still returns `PermissiveSandbox`
+    on Windows — `Confinement::None`, surfaced honestly by `doctor_run`.
+    Tracked as follow-up (needs a Windows CI runner to verify).
+
+- **Protocol 1.8.0 — approval identity & scope** (desktop-client gap
+  closure G2; additive, backward compatible; capability `approval_scope`).
+  - `approval_requested` now carries a stable `request_id` (the pending
+    tool call's effect id).
+  - `permission_resolve` gains `request_id?` and `decision`
+    (`once` | `task` | `deny`). When `request_id` is set it is asserted
+    against the daemon's current pending request — a stale prompt is
+    refused with `approval.superseded` rather than resolving the wrong
+    call. `task` is "Allow for Task" (`GrantScope::Task`), so the same
+    class of request auto-allows for the rest of that task. `approve` is
+    kept for 1.0 clients and used only when `decision` is absent.
+  - New `AgentDriver::resolve_permission_scoped` /
+    `Runtime::resolve_permission_scoped` /
+    `valyria_agent::ApprovalDecision`. `AppError::Agent` now reports the
+    inner code, so `approval.superseded` reaches the wire.
+
+- **Protocol 1.7.1 — event payload contracts** (desktop-client gap closure
+  G12; docs/gate only, patch bump).
+  - `docs/protocol/event-kinds.txt` — the canonical event-`kind` list,
+    exported from `valyria_events::EventKind` and gated against drift by
+    `xtask check-protocol` (a new kind without a contract fails CI).
+  - `docs/protocol/events/<kind>.schema.json` — a JSON Schema per kind
+    with a pinned payload shape (`state_changed`, `tool_started`,
+    `tool_completed`, `approval_requested`, `context_retrieved`,
+    `plan_checkpoint`, `model_install_*`, `verification_evidence` /
+    `test_failed`), from new mirror structs in
+    `valyria_protocol::event_payloads`. Kinds without a struct keep an
+    intentionally open payload. Regenerated and gated with the request /
+    response schemas.
+
+- **Protocol 1.7.0 — per-task event filter** (desktop-client gap closure
+  G11; additive, backward compatible; capability `stream_filter`).
+  - The subscribe frame (`ClientFrame::Subscribe` / `AuthSubscribe` and
+    `EventsSubscribeRequest`) gains an optional `task_id`. When set the
+    stream carries that task's events plus workspace-global (task-less)
+    ones only, so a per-task subscriber is not fed every other task's
+    activity. Omitted = the full stream, unchanged.
+  - New `Client::subscribe_events_for_task(since, task_id)` with a
+    filter-ignoring default; the embedded and socket transports override
+    it. `subscribe_events` is unchanged.
+  - The async-method half of G11 (long operations return immediately and
+    report via events) already shipped with `model_install` in 1.3.0.
+
+- **Protocol 1.6.0 — local client authentication** (desktop-client gap
+  closure G10; additive; capability `client_auth`).
+  - Every daemon connection is now **peer-uid checked**: only the OS user
+    that started the daemon may connect (`UnixStream::peer_cred`), else
+    `auth.peer_uid`. Needs no wire change and applies to every frame.
+  - `daemon::serve` gains an `auth_token: Option<String>` parameter. When
+    set, clients must send the new `ClientFrame::AuthCall` /
+    `AuthSubscribe` variants carrying the token; a bare `Call` / `Subscribe`
+    is refused with `auth.required`, a wrong token with
+    `auth.token_mismatch`. `SocketClient::with_token` produces an
+    authenticating client. `valyria serve` / the CLI gain
+    `--auth-token-file <path>`.
+  - `EmbeddedClient` (in-process) is unaffected — it is already inside the
+    trust boundary.
+
+- **Protocol 1.5.0 — diagnostics granularity** (desktop-client gap closure
+  G13, G14, G15; additive, backward compatible; capability
+  `diagnostics_v2`).
+  - **G13** — `PlanStepSummary` gains an optional `checkpoint_id` (the id
+    `task_rollback` expects, joined in from `plan_checkpoint` rows), and a
+    `plan_checkpoint` event `{ checkpoint_id, step_id }` is now projected
+    from the `CONTEXT_RETRIEVED`-style journal entry so a client can learn
+    an id live. New `Runtime::plan_checkpoints`.
+  - **G14** — `tool_started` now carries a `tool_invocation_id` that
+    matches the one on `tool_completed` (the effect id, the real pairing
+    key). `tool_completed` gains structured `exit_code`, `stdout`,
+    `stderr`, `duration_ms` (from the `ToolInvocationRecord`) alongside
+    the pre-formatted `rendered` blob, plus `tool_record_id`.
+  - **G15** — `verification_evidence` / `test_failed` gain a
+    `failures: [{ kind, message, failing_test, location: [{ path, line }] }]`
+    array built from `valyria-verify`'s parsed `Failure`s, so a test
+    failure can open its parsed location.
+
+- **Protocol 1.4.0 — context provenance & change ownership** (desktop-client
+  gap closure G7, G8; additive, backward compatible; capabilities
+  `context`, `ledger`).
+  - `context_retrieved` **event** — the agent driver now records what the
+    context assembler retrieved for each Discovery step as a journal
+    entry (`kinds::CONTEXT_RETRIEVED`), which `TaskManager` projects to a
+    `context_retrieved` event: `{ items: [{ path, reason, trust_level,
+    tokens, score }], budget_used, budget_total }`. The Context Inspector
+    has a data source (§34).
+  - `ledger_changes { task_id }` — one row per agent-touched file with
+    `valyria-ledger`'s classification (`agent_authored` / `pre_existing` /
+    `concurrent_user_modification` / `unknown`), computed against the
+    file's on-disk state now, plus `kind` (write/delete), `step_id` and
+    `tool_invocation_id`. The diff viewer's ownership column stops reading
+    "unavailable" (§15, §16).
+
+- **Protocol 1.3.0 — hardware probe & model management** (desktop-client
+  gap closure G4, G5; additive, backward compatible; capabilities
+  `hardware`, `model_manage`).
+  - `hardware_probe` — the full `valyria_hardware::HardwareReport` (CPU,
+    RAM, GPUs, unified-memory / accelerator flags, disk) on the wire, so
+    the first-run wizard has a structured source instead of prose.
+  - `model_recommend { role }` — every catalog candidate scored against
+    measured hardware with Core's `fit()` (`valyria_model_registry::
+    score_card_for_role`): `fit_kind` (comfortable / tight / will_not_fit),
+    `fit_detail`, `suitability`, `adjusted_score`, `installed`. The
+    recommendation is Core's, not an app heuristic (§41). Non-fitting
+    candidates are still listed, sorted last.
+  - `model_install { id }` — returns immediately; the resumable, verified
+    download runs on a background task and reports
+    `model_install_progress { id, phase, downloaded_bytes, total_bytes }`
+    then `model_install_completed { id, size_bytes }` or
+    `model_install_failed { id, code, message }` on the event stream (three
+    new `EventKind`s). `model_remove { id }` → freed bytes;
+    `model_activate { id, role }` binds a role in `global.db`;
+    `model_inspect { id }` → card + manifest + active roles.
+  - New `valyria-model-store` surface: `ModelStore::install_with_progress`
+    (progress callback), `InstalledModelStore` role-binding table
+    (migration 901), and `HttpFetcher` — a `reqwest` + `rustls` `Fetcher`
+    implementation behind the default `http` feature (the first HTTP
+    client in the workspace; `--no-default-features` drops the TLS stack).
+    `deny.toml` gains `CDLA-Permissive-2.0` for `webpki-roots`.
+  - The post-install probe is still `NullProber` — a real GGUF load probe
+    needs a linked inference runtime (tracked separately).
+
+- **Protocol 1.2.0 — repository read surface** (desktop-client gap closure
+  G3; additive, backward compatible; capability `repo`).
+  - `git_status` — branch / detached / HEAD SHA plus per-file
+    staged/unstaged/untracked entries.
+  - `git_diff { path?, staged? }` — unified-diff *text* for the working
+    tree (`staged=false` → worktree vs index, `staged=true` → index vs
+    HEAD), path-filterable, capped at 512 KiB with a `truncated` flag.
+    Backed by a new `valyria_git::Repo::worktree_diff` built on `gix`
+    blob reads + `imara-diff`'s unified formatter — no shelling to `git`.
+  - `git_log { limit }` — newest-first commits from HEAD (capped 500;
+    unborn HEAD yields an empty list). `git_branches` — local branches
+    with the HEAD marker.
+  - `search_query { query, modes[], anchors[], limit }` — the fused
+    seven-mode code search (`valyria-search`), returning ranked
+    `SearchHit`s each with the full `ScoreExplanation` (stage scores,
+    weighted features that sum exactly to the score, retrieval path) and
+    the `modes_run` / `degraded` notes. An unknown mode is
+    `search.unknown_mode`; an un-indexed workspace is `search.not_indexed`.
+  - `index_status` — current generation, stage, file/symbol counts.
+  - `Runtime::reindex` — explicit whole-workspace index + graph build, the
+    entry point for the client's "build index" action and first-run.
+
 - **Protocol 1.1.0 — per-task autonomy and config writes** (desktop-client
   gap closure G1, G6; additive, backward compatible).
   - `task_create` gains an optional `permission_mode` (`manual` |

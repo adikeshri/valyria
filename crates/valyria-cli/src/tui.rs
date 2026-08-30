@@ -132,6 +132,8 @@ impl App {
             .call(Request::PermissionResolve(PermissionResolveRequest {
                 task_id: id.clone(),
                 approve,
+                request_id: None,
+                decision: None,
             }))
             .await
         {

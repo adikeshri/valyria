@@ -14,6 +14,7 @@
 
 pub mod client;
 pub mod envelope;
+pub mod event_payloads;
 pub mod messages;
 pub mod schema;
 pub mod transport;
@@ -22,10 +23,17 @@ pub mod version;
 pub use client::Client;
 pub use envelope::{Request, Response};
 pub use messages::{
-    ConfigEntryWire, ConfigSetRequest, ConfigShowResponse, DoctorCheckWire, DoctorRunResponse,
-    Empty, EventsSubscribeRequest, HelloRequest, HelloResponse, MemoryEntryWire, MemoryListRequest,
-    MemoryListResponse, ModelListResponse, ModelSummaryWire, PermissionResolveRequest,
-    PlanGetResponse, PlanStepSummary, PurgeResponse, StorageEntryWire, StorageInspectResponse,
+    ConfigEntryWire, ConfigSetRequest, ConfigShowResponse, CpuInfoWire, DoctorCheckWire,
+    DoctorRunResponse, Empty, EventsSubscribeRequest, GitBranchWire, GitBranchesResponse,
+    GitCommitWire, GitDiffRequest, GitDiffResponse, GitFileStatusWire, GitLogRequest,
+    GitLogResponse, GitStatusResponse, GpuInfoWire, HardwareProbeResponse, HelloRequest,
+    HelloResponse, IndexStatusResponse, LedgerChangeWire, LedgerChangesRequest,
+    LedgerChangesResponse, MemoryEntryWire, MemoryListRequest, MemoryListResponse,
+    ModelActivateRequest, ModelCandidateWire, ModelIdRequest, ModelInspectResponse,
+    ModelListResponse, ModelRecommendRequest, ModelRecommendResponse, ModelRemoveResponse,
+    ModelSummaryWire, PermissionResolveRequest, PlanGetResponse, PlanStepSummary, PurgeResponse,
+    ScoreExplanationWire, SearchFeatureWire, SearchHitWire, SearchQueryRequest,
+    SearchQueryResponse, SearchStageScoreWire, StorageEntryWire, StorageInspectResponse,
     StoragePurgeRequest, TaskCreateRequest, TaskCreateResponse, TaskIdRequest, TaskListResponse,
     TaskReportResponse, TaskRollbackRequest, TaskRollbackResponse, TaskStatusRequest,
     TaskStatusResponse, TaskSummary, VerifiedClaimWire, WireError, WireEvent,

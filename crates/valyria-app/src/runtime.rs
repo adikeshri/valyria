@@ -9,11 +9,12 @@ use std::sync::Arc;
 use rusqlite::OptionalExtension;
 use valyria_agent::{AgentDriver, PlanningMode};
 use valyria_context::ContextAssembler;
-use valyria_events::EventBus;
+use valyria_events::{EventBus, EventKind, NewEvent};
 use valyria_index::IndexStore;
 use valyria_ledger::Ledger;
 use valyria_memory::{MemoryStore, RetrievalRequest};
-use valyria_model_registry::Catalog;
+use valyria_model_registry::{score_card_for_role, CardScore, Catalog, ModelCard, ModelRole};
+use valyria_model_store::{HttpFetcher, ModelStore, NullProber};
 use valyria_orchestrator::{Orchestrator, Role};
 use valyria_permissions::PermissionEngine;
 use valyria_plan::{PlanRevision, PlanStore, RollbackError, RollbackReport};
@@ -22,8 +23,8 @@ use valyria_sandbox::{detect_platform_launcher, ProcessLauncher, SandboxProfile}
 use valyria_store::Store;
 use valyria_task::{Budget, Task, TaskManager};
 use valyria_tools::ToolRuntime;
-use valyria_types::{AgentState, CheckpointId, PermissionMode, TaskId, WorkspaceId};
-use valyria_util::{CancellationToken, Clock, SystemClock};
+use valyria_types::{AgentState, CheckpointId, ErrorCode, PermissionMode, TaskId, WorkspaceId};
+use valyria_util::{CancellationToken, Clock, ContentHash, SystemClock};
 use valyria_verify::{CompletionReport, VerificationLog};
 use valyria_vfs::WorkspaceRoot;
 
@@ -51,6 +52,40 @@ impl ConfigWriteScope {
             _ => None,
         }
     }
+}
+
+/// Working-tree status as [`Runtime::git_status`] returns it.
+#[derive(Debug, Clone)]
+pub struct GitStatusView {
+    pub branch: Option<String>,
+    pub detached: bool,
+    pub head_commit: Option<String>,
+    pub files: Vec<valyria_git::FileStatus>,
+}
+
+/// One agent-touched file and how it is currently classified, as
+/// [`Runtime::ledger_changes`] returns it (§15, §16, G8).
+#[derive(Debug, Clone)]
+pub struct LedgerChangeView {
+    pub path: String,
+    /// `agent_authored` | `pre_existing` | `concurrent_user_modification`
+    /// | `unknown`.
+    pub classification: &'static str,
+    /// `write` | `delete` — the agent's most recent action on the path.
+    pub kind: &'static str,
+    pub task_id: String,
+    pub step_id: String,
+    pub tool_invocation_id: Option<String>,
+}
+
+/// Model detail as [`Runtime::model_inspect`] returns it.
+#[derive(Debug, Clone)]
+pub struct ModelInspectView {
+    pub card: ModelCard,
+    pub installed: bool,
+    pub installed_at_ms: Option<i64>,
+    pub probe_tokens_per_sec: Option<f64>,
+    pub active_roles: Vec<String>,
 }
 
 /// Loads a scenario TOML file into a `Scenario` `RuntimeConfig` can be
@@ -132,9 +167,11 @@ pub struct Runtime {
     tasks: Arc<TaskManager>,
     driver: Arc<AgentDriver>,
     plan_store: Arc<PlanStore>,
+    ledger: Arc<Ledger>,
     workspace_id: WorkspaceId,
     workspace_path: PathBuf,
     data_dir: PathBuf,
+    store: Arc<Store>,
     index: Arc<IndexStore>,
     verification_log: Arc<VerificationLog>,
     memory: Arc<MemoryStore>,
@@ -225,7 +262,7 @@ impl Runtime {
                 tool_runtime,
                 orchestrator,
                 context,
-                ledger,
+                ledger.clone(),
                 engine,
                 verification_log.clone(),
                 plan_store.clone(),
@@ -243,9 +280,11 @@ impl Runtime {
             tasks,
             driver,
             plan_store,
+            ledger,
             workspace_id,
             workspace_path: config.workspace_path.clone(),
             data_dir: config.data_dir.clone(),
+            store,
             index,
             verification_log,
             memory,
@@ -330,7 +369,27 @@ impl Runtime {
     /// resolve_permission` only performs the one resolution step, it does
     /// not itself loop.
     pub async fn resolve_permission(&self, task_id: TaskId, approve: bool) -> Result<()> {
-        self.driver.resolve_permission(task_id, approve).await?;
+        let decision = if approve {
+            valyria_agent::ApprovalDecision::Once
+        } else {
+            valyria_agent::ApprovalDecision::Deny
+        };
+        self.resolve_permission_scoped(task_id, None, decision)
+            .await
+    }
+
+    /// [`Self::resolve_permission`] with an optional `request_id` to assert
+    /// against the current pending request (returns `approval.superseded`
+    /// on a mismatch) and a `decision` of once / task / deny (§13, G2).
+    pub async fn resolve_permission_scoped(
+        &self,
+        task_id: TaskId,
+        request_id: Option<String>,
+        decision: valyria_agent::ApprovalDecision,
+    ) -> Result<()> {
+        self.driver
+            .resolve_permission_scoped(task_id, request_id, decision)
+            .await?;
         let task = self.tasks.get(task_id).await?;
         if !task.state.is_terminal()
             && task.state != AgentState::WaitingForPermission
@@ -352,6 +411,19 @@ impl Runtime {
             .latest_revision(task_id)
             .await
             .map_err(|e| AppError::Plan(e.to_string()))
+    }
+
+    /// `(plan_step_id, checkpoint_id)` for every checkpoint recorded for a
+    /// task — the ids `task_rollback` expects (§16, G13).
+    pub async fn plan_checkpoints(&self, task_id: TaskId) -> Result<Vec<(String, String)>> {
+        Ok(self
+            .plan_store
+            .checkpoints_for_task(task_id)
+            .await
+            .map_err(|e| AppError::Plan(e.to_string()))?
+            .into_iter()
+            .map(|c| (c.step_id.to_string(), c.id.to_string()))
+            .collect())
     }
 
     /// Roll a task's workspace back to a checkpoint taken at a plan step
@@ -514,6 +586,167 @@ impl Runtime {
         self.config_show()
     }
 
+    // --- repository read surface (§7, §14, §17, §33; capability `repo`) ---
+
+    /// Largest `git_diff` payload Core will return before truncating.
+    const GIT_DIFF_CAP: usize = 512 * 1024;
+
+    fn git_repo(&self) -> Result<valyria_git::Repo> {
+        Ok(valyria_git::Repo::open(&self.workspace_path)?)
+    }
+
+    /// Working-tree status: branch/HEAD plus per-file staged/unstaged
+    /// changes. Read-only — git *writes* stay Core-internal (§17).
+    pub fn git_status(&self) -> Result<GitStatusView> {
+        let repo = self.git_repo()?;
+        let head = repo.head_info()?;
+        Ok(GitStatusView {
+            branch: head.branch,
+            detached: head.detached,
+            head_commit: head.commit,
+            files: repo.status()?.files,
+        })
+    }
+
+    /// Unified-diff text for the working tree. `staged == false` is
+    /// worktree-vs-index; `staged == true` is index-vs-HEAD. `path`
+    /// restricts to one repo-relative file.
+    pub fn git_diff(&self, path: Option<&str>, staged: bool) -> Result<valyria_git::WorktreeDiff> {
+        Ok(self
+            .git_repo()?
+            .worktree_diff(path, staged, Self::GIT_DIFF_CAP)?)
+    }
+
+    /// Newest-first commits from HEAD (at most `limit`, capped at 500).
+    /// An unborn HEAD yields an empty list rather than an error.
+    pub fn git_log(&self, limit: usize) -> Result<Vec<valyria_git::CommitInfo>> {
+        match self.git_repo()?.log(limit.min(500)) {
+            Ok(commits) => Ok(commits),
+            Err(valyria_git::GitError::UnbornHead) => Ok(Vec::new()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn git_branches(&self) -> Result<Vec<valyria_git::BranchInfo>> {
+        Ok(self.git_repo()?.branches()?)
+    }
+
+    /// Agent-touched files for `task_id`, each with the ledger's current
+    /// classification (agent-authored / pre-existing / concurrent user
+    /// modification) computed against the file's on-disk state now
+    /// (§15, §16, G8). One row per path — the agent's most recent entry
+    /// for it.
+    pub fn ledger_changes(&self, task_id: TaskId) -> Vec<LedgerChangeView> {
+        use std::collections::BTreeMap;
+        use valyria_ledger::ChangeClassification;
+
+        // Most recent ledger entry per path (entries are append-order).
+        let mut latest: BTreeMap<std::path::PathBuf, valyria_ledger::LedgerEntry> = BTreeMap::new();
+        for entry in self.ledger.entries_for_task(task_id) {
+            latest.insert(entry.path.clone(), entry);
+        }
+
+        latest
+            .into_values()
+            .map(|entry| {
+                let abs = self.workspace_path.join(&entry.path);
+                let observed = std::fs::read(&abs).ok().map(|b| ContentHash::of_bytes(&b));
+                let classification = match self.ledger.classify(&entry.path, observed) {
+                    ChangeClassification::AgentAuthored => "agent_authored",
+                    ChangeClassification::PreExisting => "pre_existing",
+                    ChangeClassification::ConcurrentUserModification => {
+                        "concurrent_user_modification"
+                    }
+                    ChangeClassification::Unknown => "unknown",
+                };
+                let kind = if entry.after_hash.is_none() {
+                    "delete"
+                } else {
+                    "write"
+                };
+                LedgerChangeView {
+                    path: entry.path.display().to_string(),
+                    classification,
+                    kind,
+                    task_id: entry.task_id.to_string(),
+                    step_id: entry.step_id.to_string(),
+                    tool_invocation_id: entry.tool_invocation_id.map(|t| t.to_string()),
+                }
+            })
+            .collect()
+    }
+
+    /// The newest published index generation, if any (§4.30).
+    pub async fn index_status(&self) -> Result<Option<valyria_index::GenerationInfo>> {
+        Ok(self.index.current().await?)
+    }
+
+    /// Index the whole workspace as one generation and build the
+    /// import/call graph over it, so `search_query` and `index_status`
+    /// have something to serve. Returns the new generation's info.
+    ///
+    /// Indexing is otherwise an internal, task-driven concern; this is the
+    /// explicit entry point the desktop client's "build index" action and
+    /// the first-run flow call.
+    pub async fn reindex(&self) -> Result<valyria_index::GenerationInfo> {
+        let registry = valyria_lang::LanguageRegistry::with_builtin_languages()
+            .map_err(|e| AppError::Repo(format!("language registry: {e}")))?;
+        let pipeline = valyria_index::IndexPipeline::new(
+            self.workspace_path.clone(),
+            registry,
+            (*self.index).clone(),
+        );
+        let delta = pipeline.bootstrap_unstaged(&|_| {}).await?;
+        valyria_graph::GraphStore::new(self.store.clone())
+            .build_for(&self.index, delta.generation)
+            .await
+            .map_err(|e| AppError::Repo(format!("graph build: {e}")))?;
+        self.index
+            .current()
+            .await?
+            .ok_or_else(|| AppError::Repo("index generation vanished after publish".into()))
+    }
+
+    /// Run the fused code search (§4.16) and return the ranked, explained
+    /// hits verbatim.
+    ///
+    /// `SearchEngine::search` returns a `!Send` future (it holds a `gix`
+    /// handle across `.await`), so it cannot be awaited inside the `Send`
+    /// `Client::call`. It runs on a dedicated current-thread runtime on a
+    /// scoped OS thread; only the plain-data `SearchResults` crosses back.
+    /// This mirrors `valyria_context::retrieve::SearchRetriever`.
+    pub fn search(
+        &self,
+        query: &valyria_search::SearchQuery,
+    ) -> Result<valyria_search::SearchResults> {
+        let root = self.workspace_path.clone();
+        let index = (*self.index).clone();
+        let store = self.store.clone();
+
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|e| AppError::Repo(format!("search runtime: {e}")))?;
+                    let registry = valyria_lang::LanguageRegistry::with_builtin_languages()
+                        .map_err(|e| AppError::Repo(format!("language registry: {e}")))?;
+                    let engine = valyria_search::SearchEngine::new(
+                        root,
+                        index,
+                        valyria_graph::GraphStore::new(store.clone()),
+                        valyria_embed::EmbedStore::new(store),
+                        std::sync::Arc::new(valyria_embed::HashingEmbedder::default()),
+                        registry,
+                    );
+                    rt.block_on(engine.search(query)).map_err(AppError::Search)
+                })
+                .join()
+                .map_err(|_| AppError::Repo("search thread panicked".into()))?
+        })
+    }
+
     /// Relevance-ranked memory entries for `query` (§4.19). With no query,
     /// returns nothing — a browse-all surface is a follow-up.
     pub async fn memory_list(
@@ -557,6 +790,224 @@ impl Runtime {
                 (c, is_installed)
             })
             .collect())
+    }
+
+    // --- hardware & model management (§20, §21, §22, §37;
+    // capabilities `hardware`, `model_manage`) ---
+
+    fn model_store(&self) -> ModelStore {
+        ModelStore::new(self.global.root())
+    }
+
+    /// A structured hardware report (§37) — the source the first-run
+    /// wizard's Hardware View and model recommendation are built on.
+    pub fn hardware_probe(&self) -> valyria_hardware::HardwareReport {
+        valyria_hardware::probe()
+    }
+
+    /// Score every catalog candidate for `role` against measured hardware
+    /// (§22, §41). Returns `(recommended, all_candidates_best_first)`.
+    /// A non-fitting card is still listed, with `score: None`. The
+    /// recommendation is Core's `fit()` scoring, not an app heuristic.
+    pub async fn model_recommend(
+        &self,
+        role: ModelRole,
+    ) -> Result<(
+        Option<(ModelCard, CardScore)>,
+        Vec<(ModelCard, Option<CardScore>, bool)>,
+    )> {
+        let catalog = Catalog::embedded().map_err(|e| AppError::Plan(e.to_string()))?;
+        let hw = self.hardware_probe();
+        let installed: std::collections::BTreeSet<String> = self
+            .global
+            .models()
+            .list()
+            .await?
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+
+        let mut scored: Vec<(ModelCard, Option<CardScore>, bool)> = catalog
+            .candidates_for_role(role)
+            .into_iter()
+            .map(|card| {
+                let score = score_card_for_role(card, role, &hw);
+                (card.clone(), score, installed.contains(&card.id))
+            })
+            .collect();
+        // Fitting candidates first, best adjusted score first; non-fitting last.
+        scored.sort_by(|a, b| match (&a.1, &b.1) {
+            (Some(x), Some(y)) => y
+                .adjusted
+                .partial_cmp(&x.adjusted)
+                .unwrap_or(std::cmp::Ordering::Equal),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.0.id.cmp(&b.0.id),
+        });
+
+        let recommended = scored
+            .iter()
+            .find_map(|(c, s, _)| s.map(|s| (c.clone(), s)));
+        Ok((recommended, scored))
+    }
+
+    /// Begin installing catalog model `id`. Returns immediately; the
+    /// download runs on a background task and reports
+    /// `model_install_progress` / `_completed` / `_failed` on the event
+    /// stream (§20, §21). The weights land in `~/.valyria/models/<id>/`,
+    /// Core-owned; nothing else fetches them.
+    pub async fn model_install(&self, id: &str) -> Result<()> {
+        self.model_install_with(id, HttpFetcher::new()?).await
+    }
+
+    /// [`Self::model_install`] with an injected [`Fetcher`](valyria_model_store::Fetcher)
+    /// — production passes an `HttpFetcher`; tests pass an in-memory one.
+    pub async fn model_install_with<F>(&self, id: &str, fetcher: F) -> Result<()>
+    where
+        F: valyria_model_store::Fetcher + Send + Sync + 'static,
+    {
+        let catalog = Catalog::embedded().map_err(|e| AppError::Plan(e.to_string()))?;
+        let card = catalog
+            .get(id)
+            .ok_or_else(|| AppError::Repo(format!("no catalog model `{id}`")))?
+            .clone();
+        let store = self.model_store();
+        if store.is_installed(id) {
+            return Err(AppError::ModelStore(
+                valyria_model_store::ModelStoreError::AlreadyInstalled { id: id.to_string() },
+            ));
+        }
+        let hw = self.hardware_probe();
+        let plan = store.plan_install(&card, &hw).confirm();
+
+        let events = self.events.clone();
+        let installed_index = self.global.models().clone();
+        let id_owned = id.to_string();
+
+        tokio::spawn(async move {
+            let cancel = CancellationToken::new();
+
+            // The progress callback is synchronous; funnel its updates
+            // through a channel that a concurrent task turns into events.
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let pid = id_owned.clone();
+            let progress = move |p: valyria_model_store::InstallProgress| {
+                let _ = tx.send(p);
+            };
+
+            let drain_events = events.clone();
+            let drain_id = id_owned.clone();
+            let drainer = tokio::spawn(async move {
+                while let Some(p) = rx.recv().await {
+                    let _ = drain_events
+                        .append(NewEvent::new(
+                            EventKind::ModelInstallProgress,
+                            serde_json::json!({
+                                "id": drain_id,
+                                "phase": p.phase.as_str(),
+                                "downloaded_bytes": p.downloaded_bytes,
+                                "total_bytes": p.total_bytes,
+                            }),
+                        ))
+                        .await;
+                }
+            });
+
+            let outcome = store
+                .install_with_progress(&plan, &fetcher, &NullProber, &cancel, &progress)
+                .await;
+            drop(progress); // close tx so the drainer finishes
+            let _ = drainer.await;
+
+            match outcome {
+                Ok(manifest) => {
+                    let _ = installed_index.record(&manifest).await;
+                    let _ = events
+                        .append(NewEvent::new(
+                            EventKind::ModelInstallCompleted,
+                            serde_json::json!({
+                                "id": pid,
+                                "size_bytes": manifest.size_bytes,
+                            }),
+                        ))
+                        .await;
+                }
+                Err(e) => {
+                    let _ = events
+                        .append(NewEvent::new(
+                            EventKind::ModelInstallFailed,
+                            serde_json::json!({
+                                "id": pid,
+                                "code": ErrorCode::code(&e),
+                                "message": e.to_string(),
+                            }),
+                        ))
+                        .await;
+                }
+            }
+        });
+        Ok(())
+    }
+
+    /// Remove installed model `id`, dropping any role bindings that named
+    /// it. Returns bytes reclaimed.
+    pub async fn model_remove(&self, id: &str) -> Result<u64> {
+        let freed = self.model_store().remove(id)?;
+        let _ = self.global.models().delete(id).await;
+        let _ = self.global.models().clear_bindings_for(id).await;
+        Ok(freed)
+    }
+
+    /// Bind installed model `id` to `role` (§38). Persisted in `global.db`.
+    pub async fn model_activate(&self, id: &str, role: ModelRole) -> Result<()> {
+        if !self.model_store().is_installed(id) {
+            return Err(AppError::ModelStore(
+                valyria_model_store::ModelStoreError::NotInstalled { id: id.to_string() },
+            ));
+        }
+        let now = SystemClock.now().as_millis() as i64;
+        self.global
+            .models()
+            .set_role_binding(role.as_str(), id, now)
+            .await?;
+        Ok(())
+    }
+
+    /// Full detail for model `id`: its catalog card, its manifest when
+    /// installed, and the roles it is bound to.
+    pub async fn model_inspect(&self, id: &str) -> Result<ModelInspectView> {
+        let catalog = Catalog::embedded().map_err(|e| AppError::Plan(e.to_string()))?;
+        let card = catalog
+            .get(id)
+            .ok_or_else(|| AppError::Repo(format!("no catalog model `{id}`")))?
+            .clone();
+        let store = self.model_store();
+        let installed = store.is_installed(id);
+        let manifest = if installed {
+            store.manifest(id).ok()
+        } else {
+            None
+        };
+        let active_roles: Vec<String> = self
+            .global
+            .models()
+            .role_bindings()
+            .await?
+            .into_iter()
+            .filter(|(_, m)| m == id)
+            .map(|(role, _)| role)
+            .collect();
+        Ok(ModelInspectView {
+            card,
+            installed,
+            installed_at_ms: manifest.as_ref().map(|m| m.installed_at_ms),
+            probe_tokens_per_sec: manifest
+                .as_ref()
+                .and_then(|m| m.probe.as_ref())
+                .map(|p| p.tokens_per_sec as f64),
+            active_roles,
+        })
     }
 
     fn spawn_driver(&self, task_id: TaskId) {

@@ -231,13 +231,37 @@ const PROTOCOL_SCHEMA_DIR: &str = "docs/protocol";
 /// `valyria-protocol` types (§4.27). Run this after any deliberate wire
 /// change; `check-protocol` gates that it was run.
 fn export_schema() -> Result<()> {
+    check_event_kinds_match()?;
     let root = workspace_root()?;
     let dir = root.join(PROTOCOL_SCHEMA_DIR);
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     for (name, contents) in valyria_protocol::export_schema() {
-        let path = dir.join(name);
+        let path = dir.join(&name);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        }
         fs::write(&path, contents).with_context(|| format!("writing {}", path.display()))?;
         println!("wrote {}", path.display());
+    }
+    Ok(())
+}
+
+/// G12 gate: the canonical event-kind list `valyria-protocol` exports must
+/// match `valyria_events::EventKind`. Adding a kind without updating
+/// `event_payloads::EVENT_KINDS` (and giving it a payload contract) fails
+/// here.
+fn check_event_kinds_match() -> Result<()> {
+    let live: Vec<&str> = valyria_events::EventKind::ALL
+        .iter()
+        .map(|k| k.as_str())
+        .collect();
+    let exported: Vec<&str> = valyria_protocol::event_payloads::EVENT_KINDS.to_vec();
+    if live != exported {
+        bail!(
+            "event-kind list drift:\n  valyria_events::EventKind::ALL = {live:?}\n  \
+             valyria_protocol::event_payloads::EVENT_KINDS = {exported:?}\n\
+             update EVENT_KINDS (and add a payload schema for the new kind)."
+        );
     }
     Ok(())
 }
@@ -247,12 +271,13 @@ fn export_schema() -> Result<()> {
 /// (`cargo xtask schema`) or the change is breaking and
 /// `PROTOCOL_VERSION` must be bumped.
 fn check_protocol() -> Result<()> {
+    check_event_kinds_match()?;
     let root = workspace_root()?;
     let dir = root.join(PROTOCOL_SCHEMA_DIR);
     let mut stale = Vec::new();
 
     for (name, expected) in valyria_protocol::export_schema() {
-        let path = dir.join(name);
+        let path = dir.join(&name);
         let actual = fs::read_to_string(&path).unwrap_or_default();
         if actual != expected {
             stale.push(name);

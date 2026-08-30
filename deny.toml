@@ -47,6 +47,11 @@ allow = [
     "MPL-2.0",
     "Zlib",
     "CC0-1.0",
+    # `webpki-roots` (Mozilla's CA bundle, pulled in by reqwest's
+    # rustls-tls feature for model-weight downloads — valyria-model-store's
+    # default `http` feature) ships the trust-store data under this
+    # permissive data license.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
 

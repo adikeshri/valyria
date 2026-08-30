@@ -8,11 +8,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::messages::{
     ConfigSetRequest, ConfigShowResponse, DoctorRunResponse, Empty, EventsSubscribeRequest,
-    HelloRequest, HelloResponse, MemoryListRequest, MemoryListResponse, ModelListResponse,
-    PermissionResolveRequest, PlanGetResponse, PurgeResponse, StorageInspectResponse,
-    StoragePurgeRequest, TaskCreateRequest, TaskCreateResponse, TaskIdRequest, TaskListResponse,
-    TaskReportResponse, TaskRollbackRequest, TaskRollbackResponse, TaskStatusRequest,
-    TaskStatusResponse, WireError, WorkspaceStatusResponse,
+    GitBranchesResponse, GitDiffRequest, GitDiffResponse, GitLogRequest, GitLogResponse,
+    GitStatusResponse, HardwareProbeResponse, HelloRequest, HelloResponse, IndexStatusResponse,
+    LedgerChangesRequest, LedgerChangesResponse, MemoryListRequest, MemoryListResponse,
+    ModelActivateRequest, ModelIdRequest, ModelInspectResponse, ModelListResponse,
+    ModelRecommendRequest, ModelRecommendResponse, ModelRemoveResponse, PermissionResolveRequest,
+    PlanGetResponse, PurgeResponse, SearchQueryRequest, SearchQueryResponse,
+    StorageInspectResponse, StoragePurgeRequest, TaskCreateRequest, TaskCreateResponse,
+    TaskIdRequest, TaskListResponse, TaskReportResponse, TaskRollbackRequest, TaskRollbackResponse,
+    TaskStatusRequest, TaskStatusResponse, WireError, WorkspaceStatusResponse,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -38,6 +42,19 @@ pub enum Request {
     ConfigSet(ConfigSetRequest),
     MemoryList(MemoryListRequest),
     ModelList(Empty),
+    GitStatus(Empty),
+    GitDiff(GitDiffRequest),
+    GitLog(GitLogRequest),
+    GitBranches(Empty),
+    SearchQuery(SearchQueryRequest),
+    IndexStatus(Empty),
+    HardwareProbe(Empty),
+    ModelRecommend(ModelRecommendRequest),
+    ModelInstall(ModelIdRequest),
+    ModelRemove(ModelIdRequest),
+    ModelActivate(ModelActivateRequest),
+    ModelInspect(ModelIdRequest),
+    LedgerChanges(LedgerChangesRequest),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -57,8 +74,20 @@ pub enum Response {
     ConfigShow(ConfigShowResponse),
     MemoryList(MemoryListResponse),
     ModelList(ModelListResponse),
+    GitStatus(GitStatusResponse),
+    GitDiff(GitDiffResponse),
+    GitLog(GitLogResponse),
+    GitBranches(GitBranchesResponse),
+    SearchQuery(SearchQueryResponse),
+    IndexStatus(IndexStatusResponse),
+    HardwareProbe(HardwareProbeResponse),
+    ModelRecommend(ModelRecommendResponse),
+    ModelRemove(ModelRemoveResponse),
+    ModelInspect(ModelInspectResponse),
+    LedgerChanges(LedgerChangesResponse),
     /// A request that succeeded with nothing to return (`task.pause`,
-    /// `task.resume`, `task.cancel`, `permission.resolve`).
+    /// `task.resume`, `task.cancel`, `permission.resolve`,
+    /// `model.install`, `model.activate`).
     Ack,
     Error(WireError),
 }

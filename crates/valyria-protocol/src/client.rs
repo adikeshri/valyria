@@ -20,4 +20,18 @@ pub trait Client: Send + Sync {
     /// transparently resubscribes on `Delivery::Lagged`, so no caller here
     /// ever observes a gap.
     async fn subscribe_events(&self, since: u64) -> BoxStream<'static, WireEvent>;
+
+    /// [`Self::subscribe_events`] restricted to one task's events plus
+    /// workspace-global (task-less) events (protocol 1.7.0, G11).
+    /// `task_id: None` is exactly [`Self::subscribe_events`]. The default
+    /// impl ignores the filter; the embedded and socket transports
+    /// override it.
+    async fn subscribe_events_for_task(
+        &self,
+        since: u64,
+        task_id: Option<String>,
+    ) -> BoxStream<'static, WireEvent> {
+        let _ = task_id;
+        self.subscribe_events(since).await
+    }
 }

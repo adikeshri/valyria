@@ -1,0 +1,102 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "VerificationEvidencePayload",
+  "description": "`verification_evidence` / `test_failed` — a verification run result.",
+  "type": "object",
+  "required": [
+    "command",
+    "digest",
+    "failure_count",
+    "failures",
+    "outcome",
+    "passed",
+    "run_id"
+  ],
+  "properties": {
+    "command": {
+      "type": "string"
+    },
+    "digest": {
+      "type": "string"
+    },
+    "exit_code": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "failure_count": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "failures": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/FailurePayload"
+      }
+    },
+    "outcome": {
+      "type": "string"
+    },
+    "passed": {
+      "type": "boolean"
+    },
+    "run_id": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "FailureLocationPayload": {
+      "description": "A parsed verification failure location (§19, §35, G15).",
+      "type": "object",
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "line": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "path": {
+          "type": "string"
+        }
+      }
+    },
+    "FailurePayload": {
+      "description": "One parsed verification failure (G15).",
+      "type": "object",
+      "required": [
+        "kind",
+        "location",
+        "message"
+      ],
+      "properties": {
+        "failing_test": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "description": "`compile_error` | `test_failure` | `test_panic` | `lint_error` | `type_error` | `format_violation` | `timeout` | `unknown`.",
+          "type": "string"
+        },
+        "location": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/FailureLocationPayload"
+          }
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

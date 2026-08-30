@@ -14,8 +14,8 @@ use std::sync::Arc;
 
 use futures::stream::{BoxStream, StreamExt};
 use serde::{Deserialize, Serialize};
-#[cfg(unix)]
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[cfg(any(unix, windows))]
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 #[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
@@ -38,7 +38,27 @@ pub enum ClientFrame {
     Call(Request),
     /// Open an event stream from `since`; the connection then carries
     /// [`ServerFrame::Event`] frames until the client hangs up.
-    Subscribe { since: u64 },
+    ///
+    /// `task_id`, when set (protocol 1.7.0, G11), restricts the stream to
+    /// that task's events plus workspace-global (task-less) events. Old
+    /// frames omit it and get the full stream, unchanged.
+    Subscribe {
+        since: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
+    },
+    /// [`Self::Call`] with a per-daemon auth token (protocol 1.6.0, G10).
+    /// A daemon started with a token **requires** this variant and rejects
+    /// bare [`Self::Call`] with `auth.required`; a daemon without one
+    /// accepts either.
+    AuthCall { token: String, request: Request },
+    /// [`Self::Subscribe`] with the auth token — see [`Self::AuthCall`].
+    AuthSubscribe {
+        token: String,
+        since: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
+    },
 }
 
 /// A frame sent by the daemon to a client. Externally tagged — see
@@ -68,6 +88,11 @@ pub fn encode_line<T: Serialize>(frame: &T) -> String {
 /// that just went away should print a clean error, not unwind.
 pub struct SocketClient {
     path: PathBuf,
+    /// Per-daemon auth token (G10). When set, frames go out as
+    /// [`ClientFrame::AuthCall`] / [`ClientFrame::AuthSubscribe`]. Only the
+    /// unix transport reads it; the non-unix stub is a hard error.
+    #[cfg_attr(not(any(unix, windows)), allow(dead_code))]
+    token: Option<String>,
     /// Serializes concurrent `call`s that would otherwise race to open
     /// their own connections — harmless, but this keeps the socket's
     /// accept rate sane and makes tests deterministic.
@@ -78,6 +103,16 @@ impl SocketClient {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
+            token: None,
+            connect_lock: Mutex::new(()),
+        }
+    }
+
+    /// A client that authenticates every frame with `token` (G10).
+    pub fn with_token(path: impl Into<PathBuf>, token: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            token: Some(token.into()),
             connect_lock: Mutex::new(()),
         }
     }
@@ -86,29 +121,111 @@ impl SocketClient {
         &self.path
     }
 
-    #[cfg(unix)]
-    async fn call_inner(&self, req: Request) -> std::io::Result<Response> {
-        let _guard = self.connect_lock.lock().await;
-        let stream = UnixStream::connect(&self.path).await?;
-        let (read_half, mut write_half) = stream.into_split();
-        write_half
-            .write_all(encode_line(&ClientFrame::Call(req)).as_bytes())
-            .await?;
-        write_half.flush().await?;
-
-        let mut lines = BufReader::new(read_half).lines();
-        let line = lines.next_line().await?.ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "daemon closed")
-        })?;
-        match serde_json::from_str::<ServerFrame>(&line) {
-            Ok(ServerFrame::Response(resp)) => Ok(resp),
-            Ok(ServerFrame::Event(_)) => Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "daemon sent an event in response to a call",
-            )),
-            Err(e) => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+    #[cfg_attr(not(any(unix, windows)), allow(dead_code))]
+    fn call_frame(&self, request: Request) -> ClientFrame {
+        match &self.token {
+            Some(token) => ClientFrame::AuthCall {
+                token: token.clone(),
+                request,
+            },
+            None => ClientFrame::Call(request),
         }
     }
+
+    #[cfg_attr(not(any(unix, windows)), allow(dead_code))]
+    fn subscribe_frame(&self, since: u64, task_id: Option<String>) -> ClientFrame {
+        match &self.token {
+            Some(token) => ClientFrame::AuthSubscribe {
+                token: token.clone(),
+                since,
+                task_id,
+            },
+            None => ClientFrame::Subscribe { since, task_id },
+        }
+    }
+
+    /// Open a fresh transport connection to the daemon. On Unix this is a
+    /// Unix-domain socket; on Windows a named pipe (G9). Both platforms
+    /// yield a stream that satisfies the generic framing helpers below.
+    #[cfg(unix)]
+    async fn connect(&self) -> std::io::Result<UnixStream> {
+        UnixStream::connect(&self.path).await
+    }
+
+    #[cfg(windows)]
+    async fn connect(&self) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeClient> {
+        use tokio::net::windows::named_pipe::ClientOptions;
+        // ERROR_PIPE_BUSY (231): the server is between accept instances.
+        const ERROR_PIPE_BUSY: i32 = 231;
+        for _ in 0..100 {
+            match ClientOptions::new().open(self.path.as_os_str()) {
+                Ok(client) => return Ok(client),
+                Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "named pipe stayed busy",
+        ))
+    }
+}
+
+/// Write one frame and read exactly one `Response` back.
+#[cfg(any(unix, windows))]
+async fn run_call<S>(stream: S, frame: ClientFrame) -> std::io::Result<Response>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (read_half, mut write_half) = tokio::io::split(stream);
+    write_half.write_all(encode_line(&frame).as_bytes()).await?;
+    write_half.flush().await?;
+    let mut lines = BufReader::new(read_half).lines();
+    let line = lines
+        .next_line()
+        .await?
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "daemon closed"))?;
+    match serde_json::from_str::<ServerFrame>(&line) {
+        Ok(ServerFrame::Response(resp)) => Ok(resp),
+        Ok(ServerFrame::Event(_)) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "daemon sent an event in response to a call",
+        )),
+        Err(e) => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+    }
+}
+
+/// Write one subscribe frame and stream `Event` frames until the
+/// connection ends. The write half is kept alive for the stream's life.
+#[cfg(any(unix, windows))]
+async fn run_subscribe<S>(stream: S, frame: ClientFrame) -> BoxStream<'static, WireEvent>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (read_half, mut write_half) = tokio::io::split(stream);
+    if write_half
+        .write_all(encode_line(&frame).as_bytes())
+        .await
+        .is_err()
+    {
+        return futures::stream::empty().boxed();
+    }
+    let _ = write_half.flush().await;
+    let lines = BufReader::new(read_half).lines();
+    futures::stream::unfold((lines, write_half), |(mut lines, write_half)| async move {
+        loop {
+            match lines.next_line().await {
+                Ok(Some(line)) => match serde_json::from_str::<ServerFrame>(&line) {
+                    Ok(ServerFrame::Event(ev)) => return Some((ev, (lines, write_half))),
+                    _ => continue,
+                },
+                _ => return None,
+            }
+        }
+    })
+    .boxed()
 }
 
 fn transport_error(message: impl std::fmt::Display) -> Response {
@@ -119,63 +236,66 @@ fn transport_error(message: impl std::fmt::Display) -> Response {
     })
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 #[async_trait::async_trait]
 impl Client for SocketClient {
     async fn call(&self, _req: Request) -> Response {
-        let _guard = self.connect_lock.lock().await;
-        transport_error(
-            "the valyria daemon transport requires a Unix platform (Unix-domain socket)",
-        )
+        transport_error("the valyria daemon transport requires a Unix or Windows platform")
     }
 
     async fn subscribe_events(&self, _since: u64) -> BoxStream<'static, WireEvent> {
         futures::stream::empty().boxed()
     }
+
+    async fn subscribe_events_for_task(
+        &self,
+        _since: u64,
+        _task_id: Option<String>,
+    ) -> BoxStream<'static, WireEvent> {
+        futures::stream::empty().boxed()
+    }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[async_trait::async_trait]
 impl Client for SocketClient {
     async fn call(&self, req: Request) -> Response {
-        match self.call_inner(req).await {
+        let _guard = self.connect_lock.lock().await;
+        let stream = match self.connect().await {
+            Ok(s) => s,
+            Err(e) => return transport_error(e),
+        };
+        match run_call(stream, self.call_frame(req)).await {
             Ok(resp) => resp,
             Err(e) => transport_error(e),
         }
     }
 
     async fn subscribe_events(&self, since: u64) -> BoxStream<'static, WireEvent> {
-        let stream = match UnixStream::connect(&self.path).await {
+        self.subscribe_inner(since, None).await
+    }
+
+    async fn subscribe_events_for_task(
+        &self,
+        since: u64,
+        task_id: Option<String>,
+    ) -> BoxStream<'static, WireEvent> {
+        self.subscribe_inner(since, task_id).await
+    }
+}
+
+#[cfg(any(unix, windows))]
+impl SocketClient {
+    async fn subscribe_inner(
+        &self,
+        since: u64,
+        task_id: Option<String>,
+    ) -> BoxStream<'static, WireEvent> {
+        let stream = match self.connect().await {
             Ok(s) => s,
             Err(_) => return futures::stream::empty().boxed(),
         };
-        let (read_half, mut write_half) = stream.into_split();
-        if write_half
-            .write_all(encode_line(&ClientFrame::Subscribe { since }).as_bytes())
-            .await
-            .is_err()
-        {
-            return futures::stream::empty().boxed();
-        }
-        let _ = write_half.flush().await;
-        // Keep the write half alive for the life of the stream: dropping it
-        // half-closes the connection, which some platforms treat as a full
-        // teardown.
-        let lines = BufReader::new(read_half).lines();
-        futures::stream::unfold((lines, write_half), |(mut lines, write_half)| async move {
-            loop {
-                match lines.next_line().await {
-                    Ok(Some(line)) => match serde_json::from_str::<ServerFrame>(&line) {
-                        Ok(ServerFrame::Event(ev)) => return Some((ev, (lines, write_half))),
-                        // A `Response` frame here, or an unparseable
-                        // line, is not fatal to the stream — skip it.
-                        _ => continue,
-                    },
-                    _ => return None,
-                }
-            }
-        })
-        .boxed()
+        run_subscribe(stream, self.subscribe_frame(since, task_id)).await
     }
 }
 

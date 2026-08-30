@@ -25,6 +25,32 @@ use crate::probe::Prober;
 /// enough that per-request overhead is negligible for multi-GB files.
 const CHUNK_BYTES: u64 = 8 * 1024 * 1024;
 
+/// Which stage of an install a [`InstallProgress`] update is reporting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallPhase {
+    Downloading,
+    Verifying,
+    Probing,
+}
+
+impl InstallPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            InstallPhase::Downloading => "downloading",
+            InstallPhase::Verifying => "verifying",
+            InstallPhase::Probing => "probing",
+        }
+    }
+}
+
+/// A progress update from [`ModelStore::install_with_progress`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstallProgress {
+    pub phase: InstallPhase,
+    pub downloaded_bytes: u64,
+    pub total_bytes: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct ModelStore {
     root: PathBuf,
@@ -157,6 +183,22 @@ impl ModelStore {
         prober: &P,
         cancel: &CancellationToken,
     ) -> Result<Manifest> {
+        self.install_with_progress(plan, fetcher, prober, cancel, &|_| {})
+            .await
+    }
+
+    /// [`Self::install`] with a progress callback, invoked as bytes land,
+    /// then once for the integrity check and once for the probe. The
+    /// callback must not block for long — it feeds the daemon's
+    /// `model_install_progress` event stream.
+    pub async fn install_with_progress<F: Fetcher, P: Prober>(
+        &self,
+        plan: &InstallPlan,
+        fetcher: &F,
+        prober: &P,
+        cancel: &CancellationToken,
+        progress: &(dyn Fn(InstallProgress) + Sync),
+    ) -> Result<Manifest> {
         let id = plan.card.id.clone();
         if !plan.confirmed {
             return Err(ModelStoreError::Unconfirmed { id });
@@ -219,12 +261,22 @@ impl ModelStore {
             }
             file.write_all(&bytes)?;
             offset += bytes.len() as u64;
+            progress(InstallProgress {
+                phase: InstallPhase::Downloading,
+                downloaded_bytes: offset,
+                total_bytes: head.len,
+            });
         }
         file.flush()?;
         drop(file);
 
         // Whole-file integrity check (§4.21). A mismatch is a hard failure
         // and the bytes are deleted — no broken install is left on disk.
+        progress(InstallProgress {
+            phase: InstallPhase::Verifying,
+            downloaded_bytes: head.len,
+            total_bytes: head.len,
+        });
         let actual = ContentHash::of_reader(BufReader::new(File::open(&part_path)?))?.to_hex();
         if actual != plan.card.content_hash {
             let _ = fs::remove_file(&part_path);
@@ -238,6 +290,11 @@ impl ModelStore {
         fs::rename(&part_path, &final_path)?;
         let size_bytes = fs::metadata(&final_path)?.len();
 
+        progress(InstallProgress {
+            phase: InstallPhase::Probing,
+            downloaded_bytes: head.len,
+            total_bytes: head.len,
+        });
         let probe =
             prober
                 .probe(&final_path, &plan.card)

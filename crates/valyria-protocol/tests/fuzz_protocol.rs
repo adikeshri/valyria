@@ -25,7 +25,10 @@ fn arb_request() -> impl Strategy<Value = Request> {
         "[a-z0-9_]{0,30}".prop_map(|id| Request::TaskStatus(TaskStatusRequest { task_id: id })),
         "[a-z0-9_]{0,30}".prop_map(|id| Request::TaskReport(TaskIdRequest { task_id: id })),
         "[a-z0-9_]{0,30}".prop_map(|id| Request::TaskCancel(TaskIdRequest { task_id: id })),
-        any::<u64>().prop_map(|since| Request::EventsSubscribe(EventsSubscribeRequest { since })),
+        any::<u64>().prop_map(|since| Request::EventsSubscribe(EventsSubscribeRequest {
+            since,
+            task_id: None
+        })),
         ".{0,40}".prop_map(|q| Request::MemoryList(MemoryListRequest {
             query: Some(q),
             limit: None

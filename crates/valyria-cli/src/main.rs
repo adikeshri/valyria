@@ -94,7 +94,19 @@ fn print_usage() {
 /// a `SocketClient` and nothing else changes.
 async fn build_client(parsed: &ParsedArgs) -> Result<Arc<dyn Client>, String> {
     if let Some(socket) = &parsed.connect {
-        return Ok(Arc::new(valyria_protocol::SocketClient::new(socket)));
+        let client = match &parsed.auth_token_file {
+            Some(path) => {
+                let token = std::fs::read_to_string(path)
+                    .map_err(|e| {
+                        format!("failed to read --auth-token-file {}: {e}", path.display())
+                    })?
+                    .trim()
+                    .to_string();
+                valyria_protocol::SocketClient::with_token(socket, token)
+            }
+            None => valyria_protocol::SocketClient::new(socket),
+        };
+        return Ok(Arc::new(client));
     }
     let workspace_path = resolve_workspace(parsed);
     let mut config = RuntimeConfig::new(workspace_path);
@@ -283,7 +295,20 @@ async fn cmd_serve(raw: Vec<String>) -> ExitCode {
         sig.cancel();
     });
 
-    match serve(runtime, &socket, shutdown).await {
+    let auth_token = match &parsed.auth_token_file {
+        Some(path) => match std::fs::read_to_string(path) {
+            Ok(t) => Some(t.trim().to_string()),
+            Err(e) => {
+                return print_error_and_fail(
+                    "serve",
+                    &format!("failed to read --auth-token-file {}: {e}", path.display()),
+                )
+            }
+        },
+        None => None,
+    };
+
+    match serve(runtime, &socket, shutdown, auth_token).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => print_error_and_fail("serve", &e.to_string()),
     }
@@ -707,6 +732,8 @@ async fn cmd_permission_resolve(raw: Vec<String>) -> ExitCode {
             .call(Request::PermissionResolve(PermissionResolveRequest {
                 task_id: resolve_task_id,
                 approve,
+                request_id: None,
+                decision: None,
             }))
             .await
         {

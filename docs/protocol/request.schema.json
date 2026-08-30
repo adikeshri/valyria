@@ -361,6 +361,240 @@
           "$ref": "#/definitions/Empty"
         }
       }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "git_status"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/Empty"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "git_diff"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/GitDiffRequest"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "git_log"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/GitLogRequest"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "git_branches"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/Empty"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "search_query"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/SearchQueryRequest"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "index_status"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/Empty"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "hardware_probe"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/Empty"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "model_recommend"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/ModelRecommendRequest"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "model_install"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/ModelIdRequest"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "model_remove"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/ModelIdRequest"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "model_activate"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/ModelActivateRequest"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "model_inspect"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/ModelIdRequest"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "ledger_changes"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/LedgerChangesRequest"
+        }
+      }
     }
   ],
   "definitions": {
@@ -401,6 +635,44 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0.0
+        },
+        "task_id": {
+          "description": "Restrict the stream to this task's events plus workspace-global (task-less) events (protocol 1.7.0, G11). Absent = the full stream.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "GitDiffRequest": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "description": "Restrict the diff to this exact repo-relative path.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "staged": {
+          "description": "`false` → worktree vs index (`git diff`); `true` → index vs HEAD (`git diff --staged`).",
+          "default": false,
+          "type": "boolean"
+        }
+      }
+    },
+    "GitLogRequest": {
+      "type": "object",
+      "properties": {
+        "limit": {
+          "description": "Newest-first commits from HEAD. Defaults to 50, capped at 500.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
         }
       }
     },
@@ -411,6 +683,17 @@
       ],
       "properties": {
         "client_name": {
+          "type": "string"
+        }
+      }
+    },
+    "LedgerChangesRequest": {
+      "type": "object",
+      "required": [
+        "task_id"
+      ],
+      "properties": {
+        "task_id": {
           "type": "string"
         }
       }
@@ -435,6 +718,45 @@
         }
       }
     },
+    "ModelActivateRequest": {
+      "type": "object",
+      "required": [
+        "id",
+        "role"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "role": {
+          "description": "The role to bind `id` to (a `ModelRole` name).",
+          "type": "string"
+        }
+      }
+    },
+    "ModelIdRequest": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      }
+    },
+    "ModelRecommendRequest": {
+      "type": "object",
+      "required": [
+        "role"
+      ],
+      "properties": {
+        "role": {
+          "description": "A `ModelRole` name: `primary_coder`, `fast_coder`, `planner`, `reviewer`, `embedder`, `reranker`, `autocomplete`, `summarizer`.",
+          "type": "string"
+        }
+      }
+    },
     "PermissionResolveRequest": {
       "type": "object",
       "required": [
@@ -443,9 +765,61 @@
       ],
       "properties": {
         "approve": {
+          "description": "Legacy approve/deny (protocol 1.0). Ignored when `decision` is set.",
           "type": "boolean"
         },
+        "decision": {
+          "description": "`once` (approve this call), `task` (approve and grant for the rest of the task — \"Allow for Task\"), or `deny`. Overrides `approve` when set. Additive as of protocol 1.8.0.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "request_id": {
+          "description": "The `request_id` from the `approval_requested` payload (G2). When present it is asserted against the daemon's current pending request; a stale id is rejected with `approval.superseded` rather than resolving the wrong prompt.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "task_id": {
+          "type": "string"
+        }
+      }
+    },
+    "SearchQueryRequest": {
+      "type": "object",
+      "required": [
+        "query"
+      ],
+      "properties": {
+        "anchors": {
+          "description": "Files the current task is anchored on — they seed dependency-mode traversal and pull nearby files up the ranking.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "limit": {
+          "description": "Max hits. Defaults to 20, capped at 200.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "modes": {
+          "description": "Mode names (`lexical`, `symbol`, `semantic`, `regex`, `ast`, `dependency`, `git`). Empty runs the engine's default set. An unknown name is `search.unknown_mode`.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "query": {
+          "description": "The query phrase, or a pattern for `regex` / `ast` modes.",
           "type": "string"
         }
       }

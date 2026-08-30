@@ -16,7 +16,7 @@ pub mod plan_exec;
 pub mod repair;
 
 pub use action::ActionRequest;
-pub use driver::{AgentDriver, PlanningMode, SUBMIT_PLAN_ACTION};
+pub use driver::{AgentDriver, ApprovalDecision, PlanningMode, SUBMIT_PLAN_ACTION};
 pub use error::{AgentError, Result};
 pub use loop_detect::{DetectorConfig, LoopDetector, LoopFinding, ProgressMetric, StepSignature};
 pub use repair::{RepairAttempt, RepairDecision, RepairLedger, RepairOutcome};

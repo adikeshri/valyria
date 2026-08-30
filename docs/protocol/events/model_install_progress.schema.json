@@ -1,0 +1,31 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ModelInstallProgressPayload",
+  "description": "`model_install_progress` — an in-flight `model_install` (G5).",
+  "type": "object",
+  "required": [
+    "downloaded_bytes",
+    "id",
+    "phase",
+    "total_bytes"
+  ],
+  "properties": {
+    "downloaded_bytes": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "id": {
+      "type": "string"
+    },
+    "phase": {
+      "description": "`downloading` | `verifying` | `probing`.",
+      "type": "string"
+    },
+    "total_bytes": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  }
+}

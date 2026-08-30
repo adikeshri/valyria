@@ -20,9 +20,11 @@ valyria-config = { workspace = true }
 valyria-vfs = { workspace = true }
 valyria-hardware = { workspace = true }
 valyria-git = { workspace = true }
+valyria-lang = { workspace = true }
 valyria-index = { workspace = true }
 valyria-graph = { workspace = true }
 valyria-embed = { workspace = true }
+valyria-search = { workspace = true }
 valyria-sandbox = { workspace = true }
 valyria-permissions = { workspace = true }
 valyria-ledger = { workspace = true }
@@ -45,9 +47,12 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
-tokio = { workspace = true, features = ["net"] }
+tokio = { workspace = true, features = ["net", "sync"] }
 async-trait = { workspace = true }
 futures = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true }
 
 [dev-dependencies]
 valyria-testkit = { workspace = true }

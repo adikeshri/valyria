@@ -12,7 +12,7 @@
 //!   field (backward compatible: old clients ignore it);
 //! - **major** — a removed/renamed variant or field, or a changed type
 //!   (breaking: old clients misparse).
-pub const PROTOCOL_VERSION: &str = "1.1.0";
+pub const PROTOCOL_VERSION: &str = "1.9.0";
 
 /// Capability tokens a `HelloResponse` advertises (§4.27). A client
 /// negotiates against these, not the version string — a runtime built
@@ -31,6 +31,56 @@ pub mod capability {
     /// `task_create` accepts a per-task `permission_mode` override, so the
     /// autonomy control need not restart the daemon (§25).
     pub const TASK_PERMISSION_MODE: &str = "task_permission_mode";
+    /// The read-only repository surface is served: `git_status`,
+    /// `git_diff`, `git_log`, `git_branches`, `search_query`,
+    /// `index_status` (§7, §14, §17, §33). A client with this capability
+    /// stops using its local-read fallback for these.
+    pub const REPO: &str = "repo";
+    /// `hardware_probe` and `model_recommend` are served — a structured
+    /// hardware report and Core's `fit()`-scored model recommendation
+    /// (§22, §37), so the client need not invent a heuristic.
+    pub const HARDWARE: &str = "hardware";
+    /// The model lifecycle is served, not just `model_list`:
+    /// `model_install` (with `model_install_progress` events),
+    /// `model_remove`, `model_activate`, `model_inspect` (§20, §21).
+    pub const MODEL_MANAGE: &str = "model_manage";
+    /// Context provenance is emitted: a `context_retrieved` event per
+    /// Discovery step, carrying the retrieved items with reason / trust /
+    /// tokens and the budget used (§34). The Context Inspector lights up.
+    pub const CONTEXT: &str = "context";
+    /// `ledger_changes { task_id }` is served — `valyria-ledger`'s
+    /// agent-authored / pre-existing / concurrent-user classification for
+    /// the diff viewer's ownership column (§15, §16).
+    pub const LEDGER: &str = "ledger";
+    /// Fine-grained diagnostics are present: a discoverable
+    /// `checkpoint_id` on `PlanStepSummary` plus a `plan_checkpoint`
+    /// event (G13); a `tool_invocation_id` pairing `tool_started` with
+    /// `tool_completed` and structured `{exit_code, stdout, stderr,
+    /// duration_ms}` on the latter (G14); a parsed `location[]` on
+    /// `test_failed` / `verification_evidence` (G15).
+    pub const DIAGNOSTICS_V2: &str = "diagnostics_v2";
+    /// The daemon authenticates local clients (G10): every connection is
+    /// peer-uid checked against the daemon's own OS user, and — when the
+    /// daemon was started with a token — every frame must be an
+    /// `AuthCall` / `AuthSubscribe` carrying it.
+    pub const CLIENT_AUTH: &str = "client_auth";
+    /// An event subscription can be scoped to one task (`task_id` on the
+    /// subscribe frame): it then carries that task's events plus
+    /// workspace-global ones only (G11).
+    pub const STREAM_FILTER: &str = "stream_filter";
+    /// Approvals carry a stable `request_id` and `permission_resolve`
+    /// takes `{ request_id?, decision: once|task|deny }` — a stale prompt
+    /// is refused with `approval.superseded`, and `task` is "Allow for
+    /// Task" (§13, G2).
+    pub const APPROVAL_SCOPE: &str = "approval_scope";
+    /// The daemon IPC transport is available on this platform (a
+    /// Unix-domain socket or, since protocol 1.9.0, a Windows named
+    /// pipe). Advertised at runtime by [`crate::HelloResponse`], not part
+    /// of [`ALL`], because it is platform-conditional.
+    pub const DAEMON: &str = "daemon";
+    /// This build serves the daemon over a **Windows named pipe** (G9).
+    /// Runtime-advertised on Windows only.
+    pub const WINDOWS: &str = "windows";
 
     /// The full set an embedded runtime supports.
     pub const ALL: &[&str] = &[
@@ -43,5 +93,14 @@ pub mod capability {
         EVENTS_RESUME,
         CONFIG_WRITE,
         TASK_PERMISSION_MODE,
+        REPO,
+        HARDWARE,
+        MODEL_MANAGE,
+        CONTEXT,
+        LEDGER,
+        DIAGNOSTICS_V2,
+        CLIENT_AUTH,
+        STREAM_FILTER,
+        APPROVAL_SCOPE,
     ];
 }

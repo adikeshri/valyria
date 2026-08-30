@@ -10,20 +10,36 @@
 use crate::envelope::{Request, Response};
 use crate::messages::WireEvent;
 
-/// One exported schema file: `(filename, pretty-printed JSON)`.
-pub type SchemaFile = (&'static str, String);
+/// One exported schema file: `(relative path, contents)`. The path may
+/// contain a subdirectory (`events/…`).
+pub type SchemaFile = (String, String);
 
 /// Every schema file `xtask schema` writes into `docs/protocol/`, in a
 /// deterministic order. `version.txt` pins the schema to a protocol
 /// version so the compat gate can tell "changed, version bumped" from
-/// "changed, version not bumped".
+/// "changed, version not bumped". `events/<kind>.schema.json` pins each
+/// event payload contract (G12).
 pub fn export() -> Vec<SchemaFile> {
-    vec![
-        ("request.schema.json", schema_json::<Request>()),
-        ("response.schema.json", schema_json::<Response>()),
-        ("event.schema.json", schema_json::<WireEvent>()),
-        ("version.txt", format!("{}\n", crate::PROTOCOL_VERSION)),
-    ]
+    let mut files = vec![
+        ("request.schema.json".to_string(), schema_json::<Request>()),
+        (
+            "response.schema.json".to_string(),
+            schema_json::<Response>(),
+        ),
+        ("event.schema.json".to_string(), schema_json::<WireEvent>()),
+        (
+            "version.txt".to_string(),
+            format!("{}\n", crate::PROTOCOL_VERSION),
+        ),
+    ];
+    files.push((
+        "event-kinds.txt".to_string(),
+        format!("{}\n", crate::event_payloads::EVENT_KINDS.join("\n")),
+    ));
+    for (kind, json) in crate::event_payloads::payload_schemas() {
+        files.push((format!("events/{kind}.schema.json"), json));
+    }
+    files
 }
 
 fn schema_json<T: schemars::JsonSchema>() -> String {
@@ -43,17 +59,23 @@ mod tests {
     }
 
     #[test]
-    fn export_covers_the_three_wire_types_plus_version() {
-        let names: Vec<_> = export().into_iter().map(|(n, _)| n).collect();
+    fn export_covers_the_three_wire_types_plus_version_then_event_payloads() {
+        let names: Vec<String> = export().into_iter().map(|(n, _)| n).collect();
         assert_eq!(
-            names,
-            vec![
-                "request.schema.json",
-                "response.schema.json",
-                "event.schema.json",
-                "version.txt",
+            &names[..4],
+            &[
+                "request.schema.json".to_string(),
+                "response.schema.json".to_string(),
+                "event.schema.json".to_string(),
+                "version.txt".to_string(),
             ]
         );
+        assert!(names
+            .iter()
+            .any(|n| n == "events/context_retrieved.schema.json"));
+        assert!(names
+            .iter()
+            .any(|n| n == "events/tool_completed.schema.json"));
     }
 
     #[test]
