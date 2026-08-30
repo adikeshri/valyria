@@ -94,6 +94,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # --- git ---
 gix = { version = "0.66", default-features = false, features = ["max-performance-safe"] }
+# Unified-diff generation (already in the tree transitively via gix's blob-diff).
+imara-diff = "0.1"
 
 # --- concurrency helpers ---
 parking_lot = "0.12"

@@ -18,6 +18,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
 gix = { workspace = true, features = ["status", "blob-diff"] }
+imara-diff = { workspace = true }
 
 [dev-dependencies]
 valyria-testkit = { workspace = true }

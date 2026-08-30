@@ -269,6 +269,169 @@ pub struct ModelListResponse {
     pub models: Vec<ModelSummaryWire>,
 }
 
+// --- repository read surface (§7, §14, §17, §33; capability `repo`) ---
+//
+// Additive as of protocol 1.2.0. Every method here is read-only: the app's
+// diff viewer, changed-file rail, code search and git panel stop being
+// served by a local-read fallback and are served by Core instead. Git
+// *writes* remain Core-internal and are not exposed.
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct GitFileStatusWire {
+    pub path: String,
+    /// `added` | `modified` | `deleted` | `untracked` | `conflicted`.
+    pub kind: String,
+    /// `true` for an index-vs-HEAD (staged) entry, `false` for a
+    /// worktree-vs-index (unstaged / untracked) entry.
+    pub staged: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct GitStatusResponse {
+    /// Current branch, or `None` when HEAD is detached.
+    pub branch: Option<String>,
+    pub detached: bool,
+    /// HEAD commit SHA, or `None` for an unborn HEAD.
+    pub head_commit: Option<String>,
+    pub files: Vec<GitFileStatusWire>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct GitDiffRequest {
+    /// Restrict the diff to this exact repo-relative path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// `false` → worktree vs index (`git diff`); `true` → index vs HEAD
+    /// (`git diff --staged`).
+    #[serde(default)]
+    pub staged: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct GitDiffResponse {
+    /// Unified-diff text; empty when there is nothing to show.
+    pub unified: String,
+    /// `true` when `unified` was clipped at Core's size cap.
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct GitLogRequest {
+    /// Newest-first commits from HEAD. Defaults to 50, capped at 500.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct GitCommitWire {
+    pub sha: String,
+    pub author_name: String,
+    pub author_email: String,
+    /// The commit subject (first line).
+    pub message: String,
+    /// Author time, unix seconds.
+    pub time_unix: i64,
+    pub parents: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct GitLogResponse {
+    pub commits: Vec<GitCommitWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct GitBranchWire {
+    pub name: String,
+    pub commit: String,
+    pub is_head: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct GitBranchesResponse {
+    pub branches: Vec<GitBranchWire>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SearchQueryRequest {
+    /// The query phrase, or a pattern for `regex` / `ast` modes.
+    pub query: String,
+    /// Mode names (`lexical`, `symbol`, `semantic`, `regex`, `ast`,
+    /// `dependency`, `git`). Empty runs the engine's default set. An
+    /// unknown name is `search.unknown_mode`.
+    #[serde(default)]
+    pub modes: Vec<String>,
+    /// Files the current task is anchored on — they seed dependency-mode
+    /// traversal and pull nearby files up the ranking.
+    #[serde(default)]
+    pub anchors: Vec<String>,
+    /// Max hits. Defaults to 20, capped at 200.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// One reranking feature and its weighted contribution — mirrors
+/// `valyria_search::Feature`. The features of a hit sum *exactly* to its
+/// `score` (§14: "why this file?" answered from stored data).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SearchFeatureWire {
+    pub name: String,
+    pub value: f64,
+    pub weight: f64,
+    pub contribution: f64,
+}
+
+/// How one retrieval mode ranked a hit before fusion — mirrors
+/// `valyria_search::StageScore`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SearchStageScoreWire {
+    pub mode: String,
+    pub rank: u32,
+    pub raw_score: f64,
+}
+
+/// The full derivation of a hit's score — mirrors
+/// `valyria_search::ScoreExplanation`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ScoreExplanationWire {
+    pub stage_scores: Vec<SearchStageScoreWire>,
+    pub features: Vec<SearchFeatureWire>,
+    pub retrieval_paths: Vec<String>,
+}
+
+/// One ranked hit — mirrors `valyria_search::SearchHit`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SearchHitWire {
+    pub path: String,
+    pub symbol_path: Option<String>,
+    pub line: Option<u32>,
+    pub snippet: Option<String>,
+    pub score: f64,
+    pub explanation: ScoreExplanationWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SearchQueryResponse {
+    pub hits: Vec<SearchHitWire>,
+    /// Modes that actually ran.
+    pub modes_run: Vec<String>,
+    /// Human-readable notes about modes that stepped aside ("semantic: no
+    /// embeddings for generation 3", "git: not a git repository"). Never
+    /// an error — a missing mode degrades the result, it does not fail it.
+    pub degraded: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct IndexStatusResponse {
+    /// `None` when the workspace has never been indexed.
+    pub generation: Option<u64>,
+    /// `files` | `complete` (the generation's `GenerationStage`).
+    pub stage: Option<String>,
+    pub file_count: u64,
+    pub symbol_count: u64,
+    /// When the current generation was published, unix milliseconds.
+    pub created_at_ms: Option<i64>,
+}
+
 // --- workspace ---
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

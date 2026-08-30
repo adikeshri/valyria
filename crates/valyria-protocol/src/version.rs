@@ -12,7 +12,7 @@
 //!   field (backward compatible: old clients ignore it);
 //! - **major** — a removed/renamed variant or field, or a changed type
 //!   (breaking: old clients misparse).
-pub const PROTOCOL_VERSION: &str = "1.1.0";
+pub const PROTOCOL_VERSION: &str = "1.2.0";
 
 /// Capability tokens a `HelloResponse` advertises (§4.27). A client
 /// negotiates against these, not the version string — a runtime built
@@ -31,6 +31,11 @@ pub mod capability {
     /// `task_create` accepts a per-task `permission_mode` override, so the
     /// autonomy control need not restart the daemon (§25).
     pub const TASK_PERMISSION_MODE: &str = "task_permission_mode";
+    /// The read-only repository surface is served: `git_status`,
+    /// `git_diff`, `git_log`, `git_branches`, `search_query`,
+    /// `index_status` (§7, §14, §17, §33). A client with this capability
+    /// stops using its local-read fallback for these.
+    pub const REPO: &str = "repo";
 
     /// The full set an embedded runtime supports.
     pub const ALL: &[&str] = &[
@@ -43,5 +48,6 @@ pub mod capability {
         EVENTS_RESUME,
         CONFIG_WRITE,
         TASK_PERMISSION_MODE,
+        REPO,
     ];
 }

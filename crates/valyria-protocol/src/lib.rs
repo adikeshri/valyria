@@ -23,9 +23,13 @@ pub use client::Client;
 pub use envelope::{Request, Response};
 pub use messages::{
     ConfigEntryWire, ConfigSetRequest, ConfigShowResponse, DoctorCheckWire, DoctorRunResponse,
-    Empty, EventsSubscribeRequest, HelloRequest, HelloResponse, MemoryEntryWire, MemoryListRequest,
-    MemoryListResponse, ModelListResponse, ModelSummaryWire, PermissionResolveRequest,
-    PlanGetResponse, PlanStepSummary, PurgeResponse, StorageEntryWire, StorageInspectResponse,
+    Empty, EventsSubscribeRequest, GitBranchWire, GitBranchesResponse, GitCommitWire,
+    GitDiffRequest, GitDiffResponse, GitFileStatusWire, GitLogRequest, GitLogResponse,
+    GitStatusResponse, HelloRequest, HelloResponse, IndexStatusResponse, MemoryEntryWire,
+    MemoryListRequest, MemoryListResponse, ModelListResponse, ModelSummaryWire,
+    PermissionResolveRequest, PlanGetResponse, PlanStepSummary, PurgeResponse,
+    ScoreExplanationWire, SearchFeatureWire, SearchHitWire, SearchQueryRequest,
+    SearchQueryResponse, SearchStageScoreWire, StorageEntryWire, StorageInspectResponse,
     StoragePurgeRequest, TaskCreateRequest, TaskCreateResponse, TaskIdRequest, TaskListResponse,
     TaskReportResponse, TaskRollbackRequest, TaskRollbackResponse, TaskStatusRequest,
     TaskStatusResponse, TaskSummary, VerifiedClaimWire, WireError, WireEvent,

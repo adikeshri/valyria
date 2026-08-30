@@ -20,6 +20,12 @@ pub enum AppError {
     Memory(#[from] valyria_memory::MemoryError),
     #[error("verify error: {0}")]
     Verify(#[from] valyria_verify::VerifyError),
+    #[error("git error: {0}")]
+    Git(#[from] valyria_git::GitError),
+    #[error("index error: {0}")]
+    Index(#[from] valyria_index::IndexError),
+    #[error("search error: {0}")]
+    Search(#[from] valyria_search::SearchError),
     #[error("config error: {0}")]
     Config(#[from] valyria_config::ConfigError),
     /// A `config_set` write failure. Kept distinct from [`Self::Config`]
@@ -42,6 +48,8 @@ pub enum AppError {
     NotPaused(valyria_types::TaskId),
     #[error("plan error: {0}")]
     Plan(String),
+    #[error("repository surface error: {0}")]
+    Repo(String),
 }
 
 impl ErrorCode for AppError {
@@ -56,6 +64,9 @@ impl ErrorCode for AppError {
             AppError::Scenario(_) => "app.scenario",
             AppError::Memory(_) => "app.memory",
             AppError::Verify(_) => "app.verify",
+            AppError::Git(e) => e.code(),
+            AppError::Index(e) => e.code(),
+            AppError::Search(e) => e.code(),
             AppError::Config(_) => "app.config",
             AppError::ConfigWrite(e) => e.code(),
             AppError::ModelStore(_) => "app.model_store",
@@ -65,6 +76,7 @@ impl ErrorCode for AppError {
             AppError::CorruptWorkspaceId(_) => "app.corrupt_workspace_id",
             AppError::NotPaused(_) => "app.not_paused",
             AppError::Plan(_) => "app.plan",
+            AppError::Repo(_) => "app.repo",
         }
     }
 
@@ -79,6 +91,9 @@ impl ErrorCode for AppError {
             AppError::Scenario(_) => false,
             AppError::Memory(_) => false,
             AppError::Verify(_) => false,
+            AppError::Git(_) => false,
+            AppError::Index(e) => e.retryable(),
+            AppError::Search(_) => false,
             AppError::Config(_) => false,
             AppError::ConfigWrite(_) => false,
             AppError::ModelStore(_) => false,
@@ -88,6 +103,7 @@ impl ErrorCode for AppError {
             AppError::CorruptWorkspaceId(_) => false,
             AppError::NotPaused(_) => false,
             AppError::Plan(_) => false,
+            AppError::Repo(_) => false,
         }
     }
 }

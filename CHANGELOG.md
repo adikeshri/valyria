@@ -15,6 +15,28 @@ Work toward the first release. Phases refer to
 
 ### Added
 
+- **Protocol 1.2.0 — repository read surface** (desktop-client gap closure
+  G3; additive, backward compatible; capability `repo`).
+  - `git_status` — branch / detached / HEAD SHA plus per-file
+    staged/unstaged/untracked entries.
+  - `git_diff { path?, staged? }` — unified-diff *text* for the working
+    tree (`staged=false` → worktree vs index, `staged=true` → index vs
+    HEAD), path-filterable, capped at 512 KiB with a `truncated` flag.
+    Backed by a new `valyria_git::Repo::worktree_diff` built on `gix`
+    blob reads + `imara-diff`'s unified formatter — no shelling to `git`.
+  - `git_log { limit }` — newest-first commits from HEAD (capped 500;
+    unborn HEAD yields an empty list). `git_branches` — local branches
+    with the HEAD marker.
+  - `search_query { query, modes[], anchors[], limit }` — the fused
+    seven-mode code search (`valyria-search`), returning ranked
+    `SearchHit`s each with the full `ScoreExplanation` (stage scores,
+    weighted features that sum exactly to the score, retrieval path) and
+    the `modes_run` / `degraded` notes. An unknown mode is
+    `search.unknown_mode`; an un-indexed workspace is `search.not_indexed`.
+  - `index_status` — current generation, stage, file/symbol counts.
+  - `Runtime::reindex` — explicit whole-workspace index + graph build, the
+    entry point for the client's "build index" action and first-run.
+
 - **Protocol 1.1.0 — per-task autonomy and config writes** (desktop-client
   gap closure G1, G6; additive, backward compatible).
   - `task_create` gains an optional `permission_mode` (`manual` |
