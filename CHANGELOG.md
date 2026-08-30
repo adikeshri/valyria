@@ -15,6 +15,27 @@ Work toward the first release. Phases refer to
 
 ### Added
 
+- **Protocol 1.9.0 — Windows named-pipe transport** (desktop-client gap
+  closure G9; additive; runtime capabilities `daemon`, `windows`).
+  - `SocketClient` and `daemon::serve` now speak a **Windows named pipe**
+    (`\\.\pipe\valyria-<id>`) as well as a Unix-domain socket, behind the
+    same `Client` trait — `valyria serve` and `--connect` work on Windows.
+    The frame handling is shared (`daemon::framed::serve_connection`);
+    only the listener and the peer check differ. `SocketClient::new`
+    accepts either a socket path or a pipe name.
+  - The peer boundary on Windows is the pipe's default ACL (creating
+    user's token — the `SO_PEERCRED` analogue); the per-frame `auth_token`
+    (G10) applies identically.
+  - `hello` now advertises `daemon` where the IPC transport exists and
+    `windows` on a Windows build (both runtime-conditional, not in
+    `capability::ALL`).
+  - The whole workspace cross-compiles for `x86_64-pc-windows-*`; the
+    named-pipe daemon test runs on the `windows-latest` CI matrix.
+  - **Not** in scope: a Windows *access* sandbox (Job Objects / restricted
+    tokens). `detect_platform_launcher` still returns `PermissiveSandbox`
+    on Windows — `Confinement::None`, surfaced honestly by `doctor_run`.
+    Tracked as follow-up (needs a Windows CI runner to verify).
+
 - **Protocol 1.8.0 — approval identity & scope** (desktop-client gap
   closure G2; additive, backward compatible; capability `approval_scope`).
   - `approval_requested` now carries a stable `request_id` (the pending

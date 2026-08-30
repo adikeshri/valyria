@@ -240,11 +240,23 @@ fn model_inspect_wire(v: crate::runtime::ModelInspectView) -> ModelInspectRespon
 impl Client for EmbeddedClient {
     async fn call(&self, req: Request) -> Response {
         match req {
-            Request::Hello(_) => Response::Hello(HelloResponse {
-                protocol_version: PROTOCOL_VERSION.to_string(),
-                runtime_version: env!("CARGO_PKG_VERSION").to_string(),
-                capabilities: capability::ALL.iter().map(|s| s.to_string()).collect(),
-            }),
+            Request::Hello(_) => {
+                let mut capabilities: Vec<String> =
+                    capability::ALL.iter().map(|s| s.to_string()).collect();
+                // Advertised only where the daemon can actually serve on
+                // this platform's IPC transport (G9).
+                if cfg!(any(unix, windows)) {
+                    capabilities.push(capability::DAEMON.to_string());
+                }
+                if cfg!(windows) {
+                    capabilities.push(capability::WINDOWS.to_string());
+                }
+                Response::Hello(HelloResponse {
+                    protocol_version: PROTOCOL_VERSION.to_string(),
+                    runtime_version: env!("CARGO_PKG_VERSION").to_string(),
+                    capabilities,
+                })
+            }
             Request::TaskCreate(r) => {
                 let mode = match r.permission_mode.as_deref().map(parse_permission_mode) {
                     Some(Ok(m)) => Some(m),
