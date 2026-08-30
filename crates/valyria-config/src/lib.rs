@@ -15,9 +15,11 @@ pub mod merge;
 pub mod origin;
 pub mod resolver;
 pub mod settings;
+pub mod writer;
 
 pub use error::{ConfigError, Result};
 pub use floor::PolicyFloor;
 pub use origin::{ConfigOrigin, OriginMap};
 pub use resolver::{ConfigResolver, Resolved};
 pub use settings::{LogFormat, LogSettings, PermissionSettings, Settings};
+pub use writer::{is_writable_key, write_key, write_key_with_floor, WRITABLE_KEYS};

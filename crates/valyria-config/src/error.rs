@@ -20,6 +20,13 @@ pub enum ConfigError {
         #[source]
         source: toml::de::Error,
     },
+    #[error("could not serialize the edited config document: {source}")]
+    Serialize {
+        #[source]
+        source: toml::ser::Error,
+    },
+    #[error("`{key}` is not a writable config key")]
+    UnknownKey { key: String },
     #[error("policy floor violation at `{key}`: configured value `{configured}` exceeds the floor `{floor}`")]
     PolicyFloorViolation {
         key: &'static str,
@@ -34,6 +41,8 @@ impl ErrorCode for ConfigError {
             ConfigError::Io { .. } => "config.io",
             ConfigError::Toml { .. } => "config.toml",
             ConfigError::Deserialize { .. } => "config.deserialize",
+            ConfigError::Serialize { .. } => "config.serialize",
+            ConfigError::UnknownKey { .. } => "config.unknown_key",
             ConfigError::PolicyFloorViolation { .. } => "config.policy_floor_violation",
         }
     }

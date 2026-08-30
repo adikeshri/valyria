@@ -26,9 +26,15 @@ pub struct HelloResponse {
     pub capabilities: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct TaskCreateRequest {
     pub objective: String,
+    /// Optional per-task autonomy override (§25). One of `manual` |
+    /// `assisted` | `autonomous`. When absent, the task inherits the
+    /// daemon's start-time mode. Additive as of protocol 1.1.0 — an older
+    /// client omits it and gets the daemon default, unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -203,6 +209,25 @@ pub struct ConfigShowResponse {
     pub entries: Vec<ConfigEntryWire>,
 }
 
+/// Write one dotted config leaf to a Core-owned config file, then report
+/// the re-resolved effective view (§24). Additive as of protocol 1.1.0.
+///
+/// The write is validated against the policy floor
+/// (`valyria_config::validate_floor`) *before* it touches disk: a value
+/// that would loosen access past the compiled-in ceiling is rejected with
+/// `config.policy_floor_violation` and nothing is written.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ConfigSetRequest {
+    /// Dotted key, e.g. `permission.mode`, `log.format`,
+    /// `network.internet`. Must be a key `config_show` already reports.
+    pub key: String,
+    /// The new value, as the string form `config_show` would display.
+    pub value: String,
+    /// `workspace` writes `<repo>/.valyria/config.toml`; `user` writes
+    /// `~/.valyria/config.toml`. Anything else is `config.invalid_scope`.
+    pub scope: String,
+}
+
 // --- memory (§4.19, §32) ---
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -315,5 +340,39 @@ mod tests {
     fn storage_purge_request_dry_run_defaults_false() {
         let req: StoragePurgeRequest = serde_json::from_str(r#"{"scope":"cache"}"#).unwrap();
         assert!(!req.dry_run);
+    }
+
+    #[test]
+    fn task_create_request_permission_mode_defaults_none_and_is_omitted() {
+        // An older client that sends only `objective` still parses.
+        let req: TaskCreateRequest =
+            serde_json::from_str(r#"{"objective":"add a function"}"#).unwrap();
+        assert_eq!(req.permission_mode, None);
+        // And a None mode does not serialize a null key back onto the wire.
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, r#"{"objective":"add a function"}"#);
+    }
+
+    #[test]
+    fn task_create_request_carries_permission_mode_when_set() {
+        let req = TaskCreateRequest {
+            objective: "x".into(),
+            permission_mode: Some("manual".into()),
+        };
+        let back: TaskCreateRequest =
+            serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
+        assert_eq!(back, req);
+    }
+
+    #[test]
+    fn config_set_request_round_trips() {
+        let req = ConfigSetRequest {
+            key: "log.format".into(),
+            value: "json".into(),
+            scope: "workspace".into(),
+        };
+        let back: ConfigSetRequest =
+            serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
+        assert_eq!(back, req);
     }
 }

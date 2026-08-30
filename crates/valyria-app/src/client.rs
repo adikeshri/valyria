@@ -16,7 +16,7 @@ use valyria_protocol::{
     TaskRollbackResponse, TaskStatusResponse, TaskSummary, VerifiedClaimWire, WireError, WireEvent,
     WorkspaceStatusResponse, PROTOCOL_VERSION,
 };
-use valyria_types::{CheckpointId, ErrorCode, TaskId};
+use valyria_types::{CheckpointId, ErrorCode, PermissionMode, TaskId};
 
 use crate::doctor::CheckStatus;
 use crate::runtime::Runtime;
@@ -29,6 +29,19 @@ pub struct EmbeddedClient {
 impl EmbeddedClient {
     pub fn new(runtime: Arc<Runtime>) -> Self {
         Self { runtime }
+    }
+}
+
+fn parse_permission_mode(raw: &str) -> Result<PermissionMode, Response> {
+    match raw {
+        "manual" => Ok(PermissionMode::Manual),
+        "assisted" => Ok(PermissionMode::Assisted),
+        "autonomous" => Ok(PermissionMode::Autonomous),
+        other => Err(error_response_raw(
+            "protocol.invalid_permission_mode",
+            format!("unknown permission_mode `{other}` (expected: manual, assisted, autonomous)"),
+            false,
+        )),
     }
 }
 
@@ -77,12 +90,23 @@ impl Client for EmbeddedClient {
                 runtime_version: env!("CARGO_PKG_VERSION").to_string(),
                 capabilities: capability::ALL.iter().map(|s| s.to_string()).collect(),
             }),
-            Request::TaskCreate(r) => match self.runtime.create_and_start_task(r.objective).await {
-                Ok(task_id) => Response::TaskCreate(TaskCreateResponse {
-                    task_id: task_id.to_string(),
-                }),
-                Err(e) => error_response(e),
-            },
+            Request::TaskCreate(r) => {
+                let mode = match r.permission_mode.as_deref().map(parse_permission_mode) {
+                    Some(Ok(m)) => Some(m),
+                    Some(Err(resp)) => return resp,
+                    None => None,
+                };
+                match self
+                    .runtime
+                    .create_and_start_task_with_mode(r.objective, mode)
+                    .await
+                {
+                    Ok(task_id) => Response::TaskCreate(TaskCreateResponse {
+                        task_id: task_id.to_string(),
+                    }),
+                    Err(e) => error_response(e),
+                }
+            }
             Request::TaskStatus(r) => {
                 let task_id = match parse_task_id(&r.task_id) {
                     Ok(id) => id,
@@ -319,6 +343,27 @@ impl Client for EmbeddedClient {
                 }),
                 Err(e) => error_response(e),
             },
+            Request::ConfigSet(r) => {
+                let Some(scope) = crate::runtime::ConfigWriteScope::parse(&r.scope) else {
+                    return error_response_raw(
+                        "config.invalid_scope",
+                        format!(
+                            "unknown config scope `{}` (expected: workspace, user)",
+                            r.scope
+                        ),
+                        false,
+                    );
+                };
+                match self.runtime.config_set(&r.key, &r.value, scope) {
+                    Ok(entries) => Response::ConfigShow(ConfigShowResponse {
+                        entries: entries
+                            .into_iter()
+                            .map(|(key, value, origin)| ConfigEntryWire { key, value, origin })
+                            .collect(),
+                    }),
+                    Err(e) => error_response(e),
+                }
+            }
             Request::MemoryList(MemoryListRequest { query, limit }) => {
                 let limit = limit.unwrap_or(20).min(200) as usize;
                 match self.runtime.memory_list(query.as_deref(), limit).await {

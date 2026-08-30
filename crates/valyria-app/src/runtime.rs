@@ -33,6 +33,26 @@ use crate::global::GlobalStore;
 use crate::migrations::workspace_migrations;
 use crate::storage::{PurgeOutcome, PurgeScope, StorageInspector, StorageReport};
 
+/// Which Core-owned config file a [`Runtime::config_set`] write targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigWriteScope {
+    /// `<repo>/.valyria/config.toml`.
+    Workspace,
+    /// `~/.valyria/config.toml`.
+    User,
+}
+
+impl ConfigWriteScope {
+    /// Parse the wire string (`"workspace"` | `"user"`).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "workspace" => Some(Self::Workspace),
+            "user" => Some(Self::User),
+            _ => None,
+        }
+    }
+}
+
 /// Loads a scenario TOML file into a `Scenario` `RuntimeConfig` can be
 /// built with, without the caller needing to depend on
 /// `valyria-runtime-fake` directly — kept here specifically so
@@ -119,6 +139,7 @@ pub struct Runtime {
     verification_log: Arc<VerificationLog>,
     memory: Arc<MemoryStore>,
     global: Arc<GlobalStore>,
+    engine: Arc<PermissionEngine>,
     permission_mode: PermissionMode,
 }
 
@@ -165,6 +186,7 @@ impl Runtime {
             engine.clone(),
             clock.clone(),
         ));
+        let engine_handle = engine.clone();
 
         let mut orchestrator = Orchestrator::new();
         orchestrator.bind(
@@ -228,6 +250,7 @@ impl Runtime {
             verification_log,
             memory,
             global,
+            engine: engine_handle,
             permission_mode: config.permission_mode,
         })
     }
@@ -241,10 +264,25 @@ impl Runtime {
     }
 
     pub async fn create_and_start_task(&self, objective: String) -> Result<TaskId> {
+        self.create_and_start_task_with_mode(objective, None).await
+    }
+
+    /// Create a task, optionally pinned to a per-task autonomy mode (§25,
+    /// G1). With `None` the task runs at the daemon's start-time mode,
+    /// exactly as before. The override is dropped when the task terminates
+    /// (see [`Self::spawn_driver`]).
+    pub async fn create_and_start_task_with_mode(
+        &self,
+        objective: String,
+        permission_mode: Option<PermissionMode>,
+    ) -> Result<TaskId> {
         let task = self
             .tasks
             .create(self.workspace_id, objective, Budget::default())
             .await?;
+        if let Some(mode) = permission_mode {
+            self.engine.set_task_mode(task.id, mode);
+        }
         self.spawn_driver(task.id);
         Ok(task.id)
     }
@@ -399,7 +437,10 @@ impl Runtime {
     }
 
     /// `(key, value, origin)` for every effective config leaf `valyria
-    /// config` shows (§4.3).
+    /// config` shows (§4.3). Every key here is round-trippable through
+    /// [`Self::config_set`] (G6) — the `network` policy is reported as its
+    /// five individual leaves rather than one debug blob so a write and a
+    /// re-read line up.
     pub fn config_show(&self) -> Result<Vec<(String, String, String)>> {
         let resolved = valyria_config::ConfigResolver::new()
             .global_path(self.global.root().join("config.toml"))
@@ -413,6 +454,8 @@ impl Runtime {
                 .map(|o| format!("{o:?}").to_lowercase())
                 .unwrap_or_else(|| "default".to_string())
         };
+        let net = &resolved.settings.network;
+        let access = |a: valyria_types::Access| format!("{a:?}").to_lowercase();
         Ok(vec![
             (
                 "permission.mode".to_string(),
@@ -425,11 +468,50 @@ impl Runtime {
                 origin("log.format"),
             ),
             (
-                "network".to_string(),
-                format!("{:?}", resolved.settings.network).to_lowercase(),
-                origin("network"),
+                "network.repository".to_string(),
+                access(net.repository),
+                origin("network.repository"),
+            ),
+            (
+                "network.workspace_filesystem".to_string(),
+                access(net.workspace_filesystem),
+                origin("network.workspace_filesystem"),
+            ),
+            (
+                "network.local_commands".to_string(),
+                access(net.local_commands),
+                origin("network.local_commands"),
+            ),
+            (
+                "network.internet".to_string(),
+                access(net.internet),
+                origin("network.internet"),
+            ),
+            (
+                "network.credentials".to_string(),
+                access(net.credentials),
+                origin("network.credentials"),
             ),
         ])
+    }
+
+    /// Write one config leaf to a Core-owned file, then return the
+    /// re-resolved [`Self::config_show`] view (§24, G6). `scope` is
+    /// `workspace` (→ `<repo>/.valyria/config.toml`) or `user`
+    /// (→ `~/.valyria/config.toml`). The write is policy-floor validated
+    /// before it touches disk; on any error nothing is written.
+    pub fn config_set(
+        &self,
+        key: &str,
+        value: &str,
+        scope: ConfigWriteScope,
+    ) -> Result<Vec<(String, String, String)>> {
+        let path = match scope {
+            ConfigWriteScope::Workspace => self.data_dir.join("config.toml"),
+            ConfigWriteScope::User => self.global.root().join("config.toml"),
+        };
+        valyria_config::write_key(&path, key, value).map_err(AppError::ConfigWrite)?;
+        self.config_show()
     }
 
     /// Relevance-ranked memory entries for `query` (§4.19). With no query,
@@ -479,9 +561,19 @@ impl Runtime {
 
     fn spawn_driver(&self, task_id: TaskId) {
         let driver = self.driver.clone();
+        let tasks = self.tasks.clone();
+        let engine = self.engine.clone();
         tokio::spawn(async move {
             if let Err(error) = driver.run(task_id, CancellationToken::new()).await {
                 tracing::error!(%task_id, %error, "agent driver exited with an error");
+            }
+            // Release any per-task autonomy override once the task is
+            // *terminal* — not on a mere pause / waiting-for-permission
+            // yield, which also returns from `driver.run` (§25, G1).
+            if let Ok(task) = tasks.get(task_id).await {
+                if task.state.is_terminal() {
+                    engine.clear_task_mode(task_id);
+                }
             }
         });
     }

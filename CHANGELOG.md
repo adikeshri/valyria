@@ -15,6 +15,28 @@ Work toward the first release. Phases refer to
 
 ### Added
 
+- **Protocol 1.1.0 — per-task autonomy and config writes** (desktop-client
+  gap closure G1, G6; additive, backward compatible).
+  - `task_create` gains an optional `permission_mode` (`manual` |
+    `assisted` | `autonomous`). A task created with it runs at that
+    autonomy level regardless of the daemon's start-time mode, so a client
+    can offer a Manual/Assisted/Autonomous switch without restarting the
+    workspace daemon (§25). `PermissionEngine` now carries per-task mode
+    overrides (`set_task_mode` / `clear_task_mode` / `effective_mode`),
+    resolved per decision and released when the task terminates. Omitting
+    the field is exactly the old behaviour.
+  - `config_set { key, value, scope }` writes one dotted leaf to a
+    Core-owned file (`workspace` → `<repo>/.valyria/config.toml`, `user` →
+    `~/.valyria/config.toml`) and returns the re-resolved `config_show`
+    view. The write is policy-floor validated before it touches disk — a
+    value that would loosen access past the compiled ceiling is refused
+    with `config.policy_floor_violation` and nothing changes — and is
+    atomic (temp file + rename). New `valyria_config::write_key` /
+    `WRITABLE_KEYS`. `config_show` now reports the `network` policy as its
+    five individual leaves (`network.internet`, …) rather than one debug
+    blob, so a write and a re-read line up.
+  - New `hello` capabilities: `config_write`, `task_permission_mode`.
+
 - **Phase 11 — hardening and evaluation.** The runtime now grades itself:
   an executable-oracle benchmark harness, an offline fixture suite that is
   a CI regression gate, property/fuzz suites for the parser surfaces, and

@@ -14,8 +14,10 @@
 //! rather than implemented here, so this engine's `Deny` for that category
 //! is unconditional today.
 
+use std::collections::HashMap;
+
 use parking_lot::RwLock;
-use valyria_types::{PermissionCategory, PermissionMode, SessionId, Timestamp};
+use valyria_types::{PermissionCategory, PermissionMode, SessionId, TaskId, Timestamp};
 use valyria_util::Clock;
 
 use crate::authorization::{Authorization, AuthorizationKey};
@@ -49,6 +51,12 @@ pub struct DecisionRecord {
 
 pub struct PermissionEngine {
     mode: RwLock<PermissionMode>,
+    /// Per-task autonomy overrides (§25, G1). A task created with an
+    /// explicit `permission_mode` gets an entry here; its decisions resolve
+    /// against this instead of the workspace-global `mode`, so two tasks
+    /// running concurrently can sit at different autonomy levels without a
+    /// daemon restart. Cleared when the task reaches a terminal state.
+    task_modes: RwLock<HashMap<TaskId, PermissionMode>>,
     grants: GrantStore,
     clock: std::sync::Arc<dyn Clock>,
     session: Option<SessionId>,
@@ -59,6 +67,7 @@ impl PermissionEngine {
     pub fn new(mode: PermissionMode, clock: std::sync::Arc<dyn Clock>) -> Self {
         Self {
             mode: RwLock::new(mode),
+            task_modes: RwLock::new(HashMap::new()),
             grants: GrantStore::new(),
             clock,
             session: None,
@@ -71,12 +80,33 @@ impl PermissionEngine {
         self
     }
 
+    /// The workspace-global default mode (the daemon start-time value).
     pub fn mode(&self) -> PermissionMode {
         *self.mode.read()
     }
 
     pub fn set_mode(&self, mode: PermissionMode) {
         *self.mode.write() = mode;
+    }
+
+    /// Pin `task` to `mode` for the life of that task (§25, G1).
+    pub fn set_task_mode(&self, task: TaskId, mode: PermissionMode) {
+        self.task_modes.write().insert(task, mode);
+    }
+
+    /// Drop any per-task override for `task` (call when it terminates).
+    pub fn clear_task_mode(&self, task: TaskId) {
+        self.task_modes.write().remove(&task);
+    }
+
+    /// The mode a decision for `task` resolves against: its per-task
+    /// override if it has one, else the workspace-global default.
+    pub fn effective_mode(&self, task: TaskId) -> PermissionMode {
+        self.task_modes
+            .read()
+            .get(&task)
+            .copied()
+            .unwrap_or_else(|| self.mode())
     }
 
     /// Evaluate `req` against existing grants, then the default decision
@@ -92,7 +122,7 @@ impl PermissionEngine {
             return Decision::Allow(auth);
         }
 
-        match default_decision(self.mode(), &req) {
+        match default_decision(self.effective_mode(req.task_id), &req) {
             DefaultDecision::Allow => {
                 let auth = self.mint(&req, now, None);
                 self.record(&req, "allow", DecisionSource::DefaultRule, now);
@@ -290,5 +320,36 @@ mod tests {
         assert_eq!(e.mode(), PermissionMode::Manual);
         e.set_mode(PermissionMode::Autonomous);
         assert_eq!(e.mode(), PermissionMode::Autonomous);
+    }
+
+    #[test]
+    fn a_per_task_override_beats_the_global_mode_for_that_task_only() {
+        // Workspace-global default is Autonomous.
+        let e = engine(PermissionMode::Autonomous);
+        let pinned = req(PermissionCategory::Filesystem, ActionKind::Write, true);
+        let other = req(PermissionCategory::Filesystem, ActionKind::Write, true);
+
+        // Pin just the first task to Manual.
+        e.set_task_mode(pinned.task_id, PermissionMode::Manual);
+        assert_eq!(e.effective_mode(pinned.task_id), PermissionMode::Manual);
+        assert_eq!(e.effective_mode(other.task_id), PermissionMode::Autonomous);
+
+        // The pinned task now has to ask; the other still auto-allows.
+        assert!(matches!(e.evaluate(pinned), Decision::Ask { .. }));
+        assert!(matches!(e.evaluate(other), Decision::Allow(_)));
+    }
+
+    #[test]
+    fn clearing_a_task_override_falls_back_to_the_global_mode() {
+        let e = engine(PermissionMode::Autonomous);
+        let r = req(PermissionCategory::Filesystem, ActionKind::Write, true);
+        let task = r.task_id;
+
+        e.set_task_mode(task, PermissionMode::Manual);
+        assert_eq!(e.effective_mode(task), PermissionMode::Manual);
+
+        e.clear_task_mode(task);
+        assert_eq!(e.effective_mode(task), PermissionMode::Autonomous);
+        assert!(matches!(e.evaluate(r), Decision::Allow(_)));
     }
 }

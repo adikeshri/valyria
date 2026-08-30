@@ -22,8 +22,8 @@ pub mod version;
 pub use client::Client;
 pub use envelope::{Request, Response};
 pub use messages::{
-    ConfigEntryWire, ConfigShowResponse, DoctorCheckWire, DoctorRunResponse, Empty,
-    EventsSubscribeRequest, HelloRequest, HelloResponse, MemoryEntryWire, MemoryListRequest,
+    ConfigEntryWire, ConfigSetRequest, ConfigShowResponse, DoctorCheckWire, DoctorRunResponse,
+    Empty, EventsSubscribeRequest, HelloRequest, HelloResponse, MemoryEntryWire, MemoryListRequest,
     MemoryListResponse, ModelListResponse, ModelSummaryWire, PermissionResolveRequest,
     PlanGetResponse, PlanStepSummary, PurgeResponse, StorageEntryWire, StorageInspectResponse,
     StoragePurgeRequest, TaskCreateRequest, TaskCreateResponse, TaskIdRequest, TaskListResponse,

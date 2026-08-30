@@ -7,8 +7,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::messages::{
-    ConfigShowResponse, DoctorRunResponse, Empty, EventsSubscribeRequest, HelloRequest,
-    HelloResponse, MemoryListRequest, MemoryListResponse, ModelListResponse,
+    ConfigSetRequest, ConfigShowResponse, DoctorRunResponse, Empty, EventsSubscribeRequest,
+    HelloRequest, HelloResponse, MemoryListRequest, MemoryListResponse, ModelListResponse,
     PermissionResolveRequest, PlanGetResponse, PurgeResponse, StorageInspectResponse,
     StoragePurgeRequest, TaskCreateRequest, TaskCreateResponse, TaskIdRequest, TaskListResponse,
     TaskReportResponse, TaskRollbackRequest, TaskRollbackResponse, TaskStatusRequest,
@@ -35,6 +35,7 @@ pub enum Request {
     StorageInspect(Empty),
     StoragePurge(StoragePurgeRequest),
     ConfigShow(Empty),
+    ConfigSet(ConfigSetRequest),
     MemoryList(MemoryListRequest),
     ModelList(Empty),
 }
@@ -76,6 +77,7 @@ mod tests {
     fn request_serde_round_trip_preserves_variant() {
         let req = Request::TaskCreate(TaskCreateRequest {
             objective: "add a function".into(),
+            permission_mode: None,
         });
         let json = serde_json::to_string(&req).unwrap();
         let back: Request = serde_json::from_str(&json).unwrap();
