@@ -14,11 +14,16 @@ keep it that way.
 > [acceptance mapping](docs/ACCEPTANCE.md) — a run against a *real* local model
 > and the large-repo performance corpus remain). The end-to-end agent loop runs
 > today against a deterministic **fake** model; the real model runtimes
-> (llama.cpp, MLX) landed as documented scaffolds in Phase 9, behind a working
-> OpenAI-compatible adapter. The runtime is drivable through a frozen v1
-> protocol — embedded, over a Unix-socket daemon, from the full CLI, or from the
-> TUI (`valyria` with no arguments). See [docs/ROADMAP.md](docs/ROADMAP.md) for
-> what is and is not built.
+> (llama.cpp, MLX, OpenAI-compatible) exist as crates but nothing in the shipped
+> `valyria` binary constructs one yet. The runtime is drivable — embedded, over
+> a Unix-socket (or Windows named-pipe) daemon, from the full CLI, or from the
+> TUI (`valyria` with no arguments) — through a protocol that started at v1.0.0
+> and has taken **additive minor bumps to 1.10.0** to serve the desktop client
+> ([`valyria-app`](https://github.com/adikeshri/valyria-app)): the repository
+> read surface, hardware probe, model lifecycle, config writes, context
+> provenance, the change ledger, per-task autonomy, client auth, and
+> `index_build`. See [docs/ROADMAP.md](docs/ROADMAP.md) for what is and is not
+> built.
 
 ---
 
@@ -40,11 +45,14 @@ binary against a real git fixture repo
 Around it sits the full interface: `valyria task list|status|report|plan|rollback`,
 `valyria doctor` (a ten-check environment diagnosis), `valyria clean` and
 `valyria status` (storage inspection), `valyria config` / `model list` /
-`memory list`, a `valyria serve` daemon that speaks the same frozen v1 protocol
-over a Unix socket (`--connect <socket>` on any command), and an interactive
-TUI (`valyria` with no arguments). The wire contract is exported as JSON Schema
-under [docs/protocol/](docs/protocol/) and a CI gate fails any unversioned
-change to it.
+`memory list`, a `valyria serve` daemon that speaks the protocol over a Unix
+socket or Windows named pipe (`--connect <socket>` on any command,
+`--auth-token-file <path>` to require a per-daemon token), and an interactive
+TUI (`valyria` with no arguments). The same protocol drives
+[`valyria-app`](https://github.com/adikeshri/valyria-app), the Tauri desktop
+client. The wire contract is exported as JSON Schema under
+[docs/protocol/](docs/protocol/) and a CI gate fails any change to it that did
+not also bump `PROTOCOL_VERSION`.
 
 Underneath it, the repository-intelligence layer understands the code rather
 than just its bytes:
@@ -85,19 +93,27 @@ re-verify) under a loop detector — exact repeat, `A→B→A` oscillation, repe
 failure, no-change, stalled frontier — that escalates and then hands off rather
 than spinning silently.
 
-Not yet built: planning and every real model adapter. Retrieval into the
-*live* agent loop is a `Retriever` seam with a search-backed implementation
-ready but not yet wired in — nothing calls the index bootstrap during a task
-yet, the `search` tool is still a stub, and the repair loop's suspect-ranking
-sees the change ledger but not yet the graph.
+Since then the wire surface has grown, additively, to what the desktop client
+needs: `git_status` / `git_diff` / `git_log` / `git_branches`, the fused
+`search_query` with per-hit score explanations, `index_status` and a
+synchronous `index_build`, `hardware_probe` and `model_recommend`, the model
+lifecycle (`model_install` with progress events, `model_remove`,
+`model_activate`, `model_inspect`), `config_set`, `ledger_changes`, per-task
+`permission_mode`, a `context_retrieved` event per Discovery step, structured
+`tool_*` and verification-failure payloads, a per-daemon client-auth token, and
+a Windows named-pipe transport.
+
+Not yet wired: a real model runtime in the `valyria` binary (the crates exist;
+`Runtime::open` constructs the fake one), and model-authored planning.
 
 ## Requirements
 
 - Rust `1.97.1` (pinned in [rust-toolchain.toml](rust-toolchain.toml); `rustup`
   picks it up automatically)
 - `git` on `PATH`
-- macOS or Linux. macOS aarch64 and Linux x86_64 are tier 1; Windows builds and
-  tests in CI but has no sandbox implementation yet (see
+- macOS aarch64 and Linux x86_64 are tier 1. Windows is tier 1 for transport
+  (`serve` speaks a named pipe) and builds/tests in CI, but still has **no
+  access sandbox** — `doctor_run` reports the permissive confinement (see
   [SECURITY.md](SECURITY.md)).
 
 ## Build and run
@@ -115,6 +131,14 @@ cargo run -p valyria-cli -- run "add a function" --workspace /path/to/repo --eve
 The default scenario tells the fake model to read `src/lib.rs`, append a
 function to it, run a command, and finish. Point `--workspace` at a throwaway
 git repo — the agent really does edit files.
+
+To drive the runtime from the desktop client, build just the binary and run the
+daemon (or let `valyria-app` spawn it — set `VALYRIA_BIN` to this path):
+
+```bash
+cargo build --release --bin valyria
+./target/release/valyria serve --workspace /path/to/repo --socket /tmp/valyria.sock
+```
 
 ### CLI surface
 
@@ -172,7 +196,7 @@ docs/ROADMAP.md    per-phase status
 ## Development
 
 ```bash
-cargo test --workspace              # 1087 tests as of Phase 11
+cargo test --workspace              # ~1,100 tests across ~115 suites
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p xtask -- check-layering
