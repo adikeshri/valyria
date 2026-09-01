@@ -363,6 +363,25 @@
       }
     },
     {
+      "description": "Result of [`Request::IndexBuild`] — the freshly built generation, same shape as [`Self::IndexStatus`]. Protocol 1.10.0.",
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "index_build"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/IndexStatusResponse"
+        }
+      }
+    },
+    {
       "type": "object",
       "required": [
         "result",

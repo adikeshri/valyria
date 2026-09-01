@@ -15,6 +15,14 @@ Work toward the first release. Phases refer to
 
 ### Added
 
+- **Protocol 1.10.0 — `index_build`** (additive; minor bump). A new
+  `Request::IndexBuild` / `Response::IndexBuild` (same shape as
+  `IndexStatus`) that runs `Runtime::reindex` — the whole-workspace index +
+  graph build — synchronously and returns the finished generation. The
+  desktop client's "Build index" action calls it so `search_query` /
+  `index_status` have something to serve on a fresh workspace. No new
+  capability; part of the existing `repo` surface.
+
 - **Protocol 1.9.0 — Windows named-pipe transport** (desktop-client gap
   closure G9; additive; runtime capabilities `daemon`, `windows`).
   - `SocketClient` and `daemon::serve` now speak a **Windows named pipe**

@@ -48,6 +48,10 @@ pub enum Request {
     GitBranches(Empty),
     SearchQuery(SearchQueryRequest),
     IndexStatus(Empty),
+    /// Build (or rebuild) the whole-workspace index + graph so `search_query`
+    /// and `index_status` have something to serve. Synchronous — the response
+    /// carries the finished generation. Protocol 1.10.0.
+    IndexBuild(Empty),
     HardwareProbe(Empty),
     ModelRecommend(ModelRecommendRequest),
     ModelInstall(ModelIdRequest),
@@ -80,6 +84,9 @@ pub enum Response {
     GitBranches(GitBranchesResponse),
     SearchQuery(SearchQueryResponse),
     IndexStatus(IndexStatusResponse),
+    /// Result of [`Request::IndexBuild`] — the freshly built generation, same
+    /// shape as [`Self::IndexStatus`]. Protocol 1.10.0.
+    IndexBuild(IndexStatusResponse),
     HardwareProbe(HardwareProbeResponse),
     ModelRecommend(ModelRecommendResponse),
     ModelRemove(ModelRemoveResponse),

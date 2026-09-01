@@ -781,6 +781,16 @@ impl Client for EmbeddedClient {
                 }),
                 Err(e) => error_response(e),
             },
+            Request::IndexBuild(_) => match self.runtime.reindex().await {
+                Ok(g) => Response::IndexBuild(IndexStatusResponse {
+                    generation: Some(g.generation.0),
+                    stage: Some(format!("{:?}", g.stage).to_lowercase()),
+                    file_count: g.file_count,
+                    symbol_count: g.symbol_count,
+                    created_at_ms: Some(g.created_at_ms),
+                }),
+                Err(e) => error_response(e),
+            },
             Request::EventsSubscribe(_) => error_response_raw(
                 "protocol.use_subscribe_events",
                 "events.subscribe must be issued via Client::subscribe_events, not call"

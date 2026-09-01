@@ -471,6 +471,25 @@
       }
     },
     {
+      "description": "Build (or rebuild) the whole-workspace index + graph so `search_query` and `index_status` have something to serve. Synchronous — the response carries the finished generation. Protocol 1.10.0.",
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "index_build"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/Empty"
+        }
+      }
+    },
+    {
       "type": "object",
       "required": [
         "method",

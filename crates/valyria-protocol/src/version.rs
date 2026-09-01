@@ -12,7 +12,7 @@
 //!   field (backward compatible: old clients ignore it);
 //! - **major** — a removed/renamed variant or field, or a changed type
 //!   (breaking: old clients misparse).
-pub const PROTOCOL_VERSION: &str = "1.9.0";
+pub const PROTOCOL_VERSION: &str = "1.10.0";
 
 /// Capability tokens a `HelloResponse` advertises (§4.27). A client
 /// negotiates against these, not the version string — a runtime built
