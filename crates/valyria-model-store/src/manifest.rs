@@ -24,6 +24,12 @@ pub struct Manifest {
     /// `verify_integrity` compares measured-then vs measured-now.
     pub content_hash: String,
     pub installed_at_ms: i64,
+    /// Unix ms at which the user accepted `card.license_name`, recorded by
+    /// the daemon when a `model_install { accept_license: true }` began.
+    /// `None` for installs made without a distinct license-acceptance step
+    /// (the CLI's `--yes`, older manifests).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license_accepted_at_ms: Option<i64>,
     /// `None` if the model was installed with a `NullProber`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probe: Option<ProbeResult>,

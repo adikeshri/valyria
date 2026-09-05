@@ -15,6 +15,32 @@ Work toward the first release. Phases refer to
 
 ### Added
 
+- **Protocol 1.11.0 — model install is license-gated and cancellable**
+  (additive; minor bump; `model_manage` surface). A user can now choose and
+  set up a model entirely from the desktop client:
+  - `ModelInstallRequest` replaces the bare id on `Request::ModelInstall`
+    and carries `accept_license: bool`. Core refuses the install with
+    `model.license_not_accepted` (non-retryable) until it is `true`, so no
+    weights are fetched without an explicit acknowledgement (§4.21).
+  - `Request::ModelInstallCancel { id }` cancels an in-flight download —
+    the background task stops at its next chunk boundary, emits
+    `model_install_failed` with code `model_store.cancelled`, and leaves a
+    `.part` file so a later install resumes. Idempotent (`Ack` when nothing
+    is in flight). `Runtime` now tracks in-flight installs by id.
+  - `ModelInspectResponse` gains `license_text` (the full license body,
+    bundled offline for every catalog license — Apache-2.0, MIT,
+    Llama-3.1-Community) and `license_accepted_at_ms` (from the install
+    manifest / `installed_model` DB row, new migration 902).
+  - `ModelSummaryWire` (from `model_list`) gains `display_name`,
+    `parameters_b`, `context_length`, and `active_roles`, so the client's
+    model manager and first-run "set up a model" step read one call and no
+    longer infer the active model from config keys. `model_list` already
+    returned the whole embedded catalog; this makes it self-sufficient.
+  - `valyria model` grew `recommend`, `inspect`, `install`
+    (`--accept-license`), `cancel`, `activate`, and `remove` subcommands;
+    `model install <id>` with no flag prints the license and exits
+    non-zero.
+
 - **Protocol 1.10.0 — `index_build`** (additive; minor bump). A new
   `Request::IndexBuild` / `Response::IndexBuild` (same shape as
   `IndexStatus`) that runs `Runtime::reindex` — the whole-workspace index +

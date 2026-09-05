@@ -21,12 +21,14 @@
 pub mod card;
 pub mod catalog;
 pub mod error;
+pub mod license;
 pub mod role;
 pub mod select;
 
 pub use card::{ModelCard, Quantization, TransportPreference};
 pub use catalog::Catalog;
 pub use error::{RegistryError, Result};
+pub use license::{has_license_text, license_text};
 pub use role::ModelRole;
 pub use select::{score_card_for_role, select_for_role, CardScore, RoleAssignment, RoleBinding};
 

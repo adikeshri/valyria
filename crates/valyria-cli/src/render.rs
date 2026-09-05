@@ -12,7 +12,7 @@ pub fn to_json(response: &Response) -> String {
     serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "null".to_string())
 }
 
-fn bytes(n: u64) -> String {
+pub fn bytes(n: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut v = n as f64;
     let mut u = 0;
@@ -87,14 +87,87 @@ pub fn model_list(response: &Response) {
         } else {
             "        -"
         };
+        let roles = if m.active_roles.is_empty() {
+            String::new()
+        } else {
+            format!("  [{}]", m.active_roles.join(", "))
+        };
         println!(
-            "{flag}  {:<40} {:<8} {:>10}  {}",
+            "{flag}  {:<40} {:<8} {:>10}  {}{roles}",
             m.id,
             m.quantization,
             bytes(m.size_bytes),
             m.license
         );
     }
+}
+
+pub fn model_recommend(response: &Response) {
+    let Response::ModelRecommend(r) = response else {
+        return;
+    };
+    println!("role: {}", r.role);
+    match &r.recommended {
+        Some(c) => println!("recommended: {} ({})", c.display_name, c.id),
+        None => println!("recommended: (nothing on this machine fits)"),
+    }
+    println!();
+    for c in &r.candidates {
+        let mark = if c.installed { "*" } else { " " };
+        let detail = c.fit_detail.as_deref().unwrap_or("");
+        println!(
+            "{mark} {:<40} {:>10}  {:<13} {:<20} suit {}",
+            c.id,
+            bytes(c.size_bytes),
+            c.fit_kind,
+            detail,
+            c.suitability
+        );
+    }
+}
+
+pub fn model_inspect(response: &Response) {
+    let Response::ModelInspect(m) = response else {
+        return;
+    };
+    println!("{} ({})", m.display_name, m.id);
+    println!("  family        {}", m.family);
+    println!("  parameters    {:.1} B", m.parameters_b);
+    println!("  quantization  {}", m.quantization);
+    println!("  context       {}", m.context_length);
+    println!("  size          {}", bytes(m.size_bytes));
+    println!("  license       {}", m.license_name);
+    if let Some(url) = &m.license_url {
+        println!("                {url}");
+    }
+    println!(
+        "  license text  {}",
+        if m.license_text.is_some() {
+            "bundled (shown at install)"
+        } else {
+            "not bundled"
+        }
+    );
+    println!("  installed     {}", m.installed);
+    if let Some(ts) = m.installed_at_ms {
+        println!("  installed at  {ts} ms");
+    }
+    if let Some(ts) = m.license_accepted_at_ms {
+        println!("  license ok at {ts} ms");
+    }
+    if let Some(tps) = m.probe_tokens_per_sec {
+        println!("  probe         {tps:.1} tok/s");
+    }
+    if !m.active_roles.is_empty() {
+        println!("  active roles  {}", m.active_roles.join(", "));
+    }
+}
+
+pub fn model_remove(response: &Response) {
+    let Response::ModelRemove(r) = response else {
+        return;
+    };
+    println!("removed — {} reclaimed", bytes(r.freed_bytes));
 }
 
 pub fn memory_list(response: &Response) {

@@ -140,6 +140,32 @@ async fn happy_path_downloads_verifies_probes_and_writes_manifest() {
     assert_eq!(store.manifest(&card.id).unwrap(), manifest);
     // Integrity check passes on the freshly written file.
     store.verify_integrity(&card.id).unwrap();
+    // `.confirm()` records no license acceptance.
+    assert!(manifest.license_accepted_at_ms.is_none());
+}
+
+#[tokio::test]
+async fn accept_license_is_recorded_in_the_manifest() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ModelStore::new(dir.path());
+    let card = good_card();
+    let fetcher = InMemoryFetcher::new().with_object(URL, weights_bytes());
+
+    let plan = store
+        .plan_install(&card, &hw(64_000_000_000))
+        .accept_license(1_726_000_000_000);
+    assert_eq!(plan.accepted_license_at_ms(), Some(1_726_000_000_000));
+
+    let manifest = store
+        .install(&plan, &fetcher, &NullProber, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(manifest.license_accepted_at_ms, Some(1_726_000_000_000));
+    // And it round-trips from disk.
+    assert_eq!(
+        store.manifest(&card.id).unwrap().license_accepted_at_ms,
+        Some(1_726_000_000_000)
+    );
 }
 
 #[tokio::test]
@@ -330,10 +356,31 @@ async fn installed_model_db_index_records_and_lists() {
     assert_eq!(row.content_hash, manifest.content_hash);
     assert_eq!(row.license_name, "Apache-2.0");
     assert!(row.probe_json.is_some());
+    assert!(row.license_accepted_at_ms.is_none());
 
     assert_eq!(db.list().await.unwrap().len(), 1);
     db.delete(&card.id).await.unwrap();
     assert!(db.get(&card.id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn installed_model_db_index_records_license_acceptance() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ModelStore::new(dir.path());
+    let card = good_card();
+    let fetcher = InMemoryFetcher::new().with_object(URL, weights_bytes());
+    let plan = store
+        .plan_install(&card, &hw(64_000_000_000))
+        .accept_license(1_726_000_000_000);
+    let manifest = store
+        .install(&plan, &fetcher, &NullProber, &CancellationToken::new())
+        .await
+        .unwrap();
+
+    let db = InstalledModelStore::new(Arc::new(Store::open_in_memory(MIGRATIONS).unwrap()));
+    db.record(&manifest).await.unwrap();
+    let row = db.get(&card.id).await.unwrap().expect("row present");
+    assert_eq!(row.license_accepted_at_ms, Some(1_726_000_000_000));
 }
 
 #[tokio::test]

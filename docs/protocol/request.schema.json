@@ -539,6 +539,25 @@
           ]
         },
         "params": {
+          "$ref": "#/definitions/ModelInstallRequest"
+        }
+      }
+    },
+    {
+      "description": "Cancel an in-flight `model_install` for this id. The background task stops at its next checkpoint and emits `model_install_failed` with code `model_store.cancelled`; a `.part` file is kept so a later install resumes. Ack even when nothing was in flight. Protocol 1.11.0.",
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "model_install_cancel"
+          ]
+        },
+        "params": {
           "$ref": "#/definitions/ModelIdRequest"
         }
       }
@@ -759,6 +778,22 @@
         "id"
       ],
       "properties": {
+        "id": {
+          "type": "string"
+        }
+      }
+    },
+    "ModelInstallRequest": {
+      "description": "`model_install` — begin a download. `accept_license` is the wire record of the user's acceptance of the model's license (its text is on `ModelInspectResponse::license_text`). Core **refuses** the install with `model.license_not_accepted` when it is `false`, so no weights are ever fetched without an explicit acknowledgement (§4.21).",
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "accept_license": {
+          "default": false,
+          "type": "boolean"
+        },
         "id": {
           "type": "string"
         }

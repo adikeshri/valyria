@@ -9,8 +9,8 @@ use std::time::Duration;
 use futures::StreamExt;
 use valyria_app::{EmbeddedClient, Runtime, RuntimeConfig};
 use valyria_protocol::{
-    Client as _, Empty, ModelActivateRequest, ModelIdRequest, ModelRecommendRequest, Request,
-    Response,
+    Client as _, Empty, ModelActivateRequest, ModelIdRequest, ModelInstallRequest,
+    ModelRecommendRequest, Request, Response,
 };
 
 /// A catalog id known to exist in `Catalog::embedded()`.
@@ -116,6 +116,14 @@ async fn model_inspect_reports_card_detail_for_an_uninstalled_model() {
     assert!(m.active_roles.is_empty());
     assert!(m.parameters_b > 0.0);
     assert!(!m.source_url.is_empty());
+    // The license body is bundled for every catalog model, so the client
+    // can show it in the acceptance prompt without a network fetch.
+    let text = m
+        .license_text
+        .expect("catalog models bundle their license text");
+    assert!(text.len() > 200);
+    // Nothing accepted yet — it is not installed.
+    assert!(m.license_accepted_at_ms.is_none());
 
     let Response::Error(e) = client
         .call(Request::ModelInspect(ModelIdRequest { id: "nope".into() }))
@@ -124,6 +132,59 @@ async fn model_inspect_reports_card_detail_for_an_uninstalled_model() {
         panic!("expected an error for an unknown id");
     };
     assert_eq!(e.code, "app.repo");
+}
+
+#[tokio::test]
+async fn model_list_returns_the_whole_catalog_with_local_state() {
+    let (rt, _t) = runtime().await;
+    let client = EmbeddedClient::new(rt);
+
+    let Response::ModelList(r) = client.call(Request::ModelList(Empty {})).await else {
+        panic!("expected ModelList");
+    };
+    // The catalog ships embedded — a clean machine still lists every model.
+    assert!(r.models.len() >= 3, "embedded catalog is non-trivial");
+    let mine = r
+        .models
+        .iter()
+        .find(|m| m.id == CATALOG_ID)
+        .expect("catalog id present");
+    assert!(!mine.installed);
+    assert!(mine.active_roles.is_empty());
+    assert!(!mine.display_name.is_empty());
+    assert!(mine.parameters_b > 0.0);
+    assert!(mine.context_length > 0);
+}
+
+#[tokio::test]
+async fn install_without_license_acceptance_is_refused_synchronously() {
+    let (rt, _t) = runtime().await;
+    let client = EmbeddedClient::new(rt);
+
+    let Response::Error(e) = client
+        .call(Request::ModelInstall(ModelInstallRequest {
+            id: CATALOG_ID.into(),
+            accept_license: false,
+        }))
+        .await
+    else {
+        panic!("expected a synchronous refusal");
+    };
+    assert_eq!(e.code, "model.license_not_accepted");
+    assert!(!e.retryable);
+}
+
+#[tokio::test]
+async fn install_cancel_acks_even_when_nothing_is_in_flight() {
+    let (rt, _t) = runtime().await;
+    let client = EmbeddedClient::new(rt);
+
+    let resp = client
+        .call(Request::ModelInstallCancel(ModelIdRequest {
+            id: CATALOG_ID.into(),
+        }))
+        .await;
+    assert!(matches!(resp, Response::Ack), "cancel is idempotent");
 }
 
 #[tokio::test]
@@ -162,10 +223,15 @@ async fn install_returns_immediately_and_reports_failure_on_the_event_stream() {
 
     // An empty in-memory fetcher: HEAD fails, so the background install
     // task fails fast and emits `model_install_failed` — exercising the
-    // full Ack → spawn → channel → event path with no network.
-    rt.model_install_with(CATALOG_ID, valyria_model_store::InMemoryFetcher::new())
-        .await
-        .expect("model_install_with returns immediately");
+    // full Ack → spawn → channel → event path with no network. The license
+    // must be accepted or Core refuses before spawning anything.
+    rt.model_install_with(
+        CATALOG_ID,
+        true,
+        valyria_model_store::InMemoryFetcher::new(),
+    )
+    .await
+    .expect("model_install_with returns immediately");
 
     let mut saw_failed = false;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -191,8 +257,9 @@ async fn install_returns_immediately_and_reports_failure_on_the_event_stream() {
 
     // And an unknown catalog id is rejected synchronously.
     let Response::Error(e) = client
-        .call(Request::ModelInstall(ModelIdRequest {
+        .call(Request::ModelInstall(ModelInstallRequest {
             id: "not-a-real-model".into(),
+            accept_license: true,
         }))
         .await
     else {

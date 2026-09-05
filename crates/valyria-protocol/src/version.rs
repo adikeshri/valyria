@@ -12,7 +12,7 @@
 //!   field (backward compatible: old clients ignore it);
 //! - **major** — a removed/renamed variant or field, or a changed type
 //!   (breaking: old clients misparse).
-pub const PROTOCOL_VERSION: &str = "1.10.0";
+pub const PROTOCOL_VERSION: &str = "1.11.0";
 
 /// Capability tokens a `HelloResponse` advertises (§4.27). A client
 /// negotiates against these, not the version string — a runtime built
@@ -41,8 +41,10 @@ pub mod capability {
     /// (§22, §37), so the client need not invent a heuristic.
     pub const HARDWARE: &str = "hardware";
     /// The model lifecycle is served, not just `model_list`:
-    /// `model_install` (with `model_install_progress` events),
-    /// `model_remove`, `model_activate`, `model_inspect` (§20, §21).
+    /// `model_install` (license-gated, with `model_install_progress`
+    /// events), `model_install_cancel`, `model_remove`, `model_activate`,
+    /// `model_inspect` — the last carrying the license body and the
+    /// recorded acceptance timestamp (§20, §21).
     pub const MODEL_MANAGE: &str = "model_manage";
     /// Context provenance is emitted: a `context_retrieved` event per
     /// Discovery step, carrying the retrieved items with reason / trust /

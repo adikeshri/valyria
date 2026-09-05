@@ -228,6 +228,9 @@ fn model_inspect_wire(v: crate::runtime::ModelInspectView) -> ModelInspectRespon
         size_bytes: v.card.file_size_bytes,
         license_name: v.card.license_name.clone(),
         license_url: v.card.license_url.clone(),
+        license_text: valyria_model_registry::license_text(&v.card.license_name)
+            .map(str::to_string),
+        license_accepted_at_ms: v.license_accepted_at_ms,
         source_url: v.card.source_url.clone(),
         installed: v.installed,
         installed_at_ms: v.installed_at_ms,
@@ -601,16 +604,20 @@ impl Client for EmbeddedClient {
                 }
             }
             Request::ModelList(_) => match self.runtime.model_list().await {
-                Ok(pairs) => Response::ModelList(ModelListResponse {
-                    models: pairs
+                Ok(entries) => Response::ModelList(ModelListResponse {
+                    models: entries
                         .into_iter()
-                        .map(|(c, installed)| ModelSummaryWire {
-                            id: c.id,
-                            family: c.family,
-                            quantization: c.quantization.as_str().to_string(),
-                            size_bytes: c.file_size_bytes,
-                            installed,
-                            license: c.license_name,
+                        .map(|e| ModelSummaryWire {
+                            id: e.card.id,
+                            family: e.card.family,
+                            display_name: e.card.display_name,
+                            quantization: e.card.quantization.as_str().to_string(),
+                            parameters_b: e.card.parameters_b as f64,
+                            context_length: e.card.context_length,
+                            size_bytes: e.card.file_size_bytes,
+                            installed: e.installed,
+                            license: e.card.license_name,
+                            active_roles: e.active_roles,
                         })
                         .collect(),
                 }),
@@ -718,10 +725,18 @@ impl Client for EmbeddedClient {
                     Err(e) => error_response(e),
                 }
             }
-            Request::ModelInstall(r) => match self.runtime.model_install(&r.id).await {
-                Ok(()) => Response::Ack,
-                Err(e) => error_response(e),
-            },
+            Request::ModelInstall(r) => {
+                match self.runtime.model_install(&r.id, r.accept_license).await {
+                    Ok(()) => Response::Ack,
+                    Err(e) => error_response(e),
+                }
+            }
+            Request::ModelInstallCancel(r) => {
+                match self.runtime.model_install_cancel(&r.id).await {
+                    Ok(()) => Response::Ack,
+                    Err(e) => error_response(e),
+                }
+            }
             Request::ModelRemove(r) => match self.runtime.model_remove(&r.id).await {
                 Ok(freed_bytes) => Response::ModelRemove(ModelRemoveResponse { freed_bytes }),
                 Err(e) => error_response(e),

@@ -36,6 +36,11 @@ pub const MIGRATIONS: &[Migration] = &[
         bound_at_ms INTEGER NOT NULL
     );",
     },
+    Migration {
+        version: 902,
+        description: "record license acceptance on installed models",
+        sql: "ALTER TABLE installed_model ADD COLUMN license_accepted_at_ms INTEGER;",
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +51,10 @@ pub struct InstalledModelRow {
     pub size_bytes: u64,
     pub license_name: String,
     pub installed_at_ms: i64,
+    /// Unix ms at which the user accepted `license_name` (mirrors the
+    /// model's `manifest.json`). `None` for installs with no distinct
+    /// license-acceptance step.
+    pub license_accepted_at_ms: Option<i64>,
     pub probe_json: Option<String>,
 }
 
@@ -72,6 +81,7 @@ impl InstalledModelStore {
         let size_bytes = manifest.size_bytes as i64;
         let license_name = manifest.card.license_name.clone();
         let installed_at_ms = manifest.installed_at_ms;
+        let license_accepted_at_ms = manifest.license_accepted_at_ms;
         let probe_json = manifest
             .probe
             .as_ref()
@@ -81,8 +91,8 @@ impl InstalledModelStore {
             .call(move |conn| {
                 conn.execute(
                     "INSERT OR REPLACE INTO installed_model
-                     (id, weights_file, content_hash, size_bytes, license_name, installed_at_ms, probe_json)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                     (id, weights_file, content_hash, size_bytes, license_name, installed_at_ms, license_accepted_at_ms, probe_json)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
                     params![
                         id,
                         weights_file,
@@ -90,6 +100,7 @@ impl InstalledModelStore {
                         size_bytes,
                         license_name,
                         installed_at_ms,
+                        license_accepted_at_ms,
                         probe_json
                     ],
                 )?;
@@ -106,7 +117,7 @@ impl InstalledModelStore {
             .call(move |conn| {
                 let row = conn
                     .query_row(
-                        "SELECT id, weights_file, content_hash, size_bytes, license_name, installed_at_ms, probe_json
+                        "SELECT id, weights_file, content_hash, size_bytes, license_name, installed_at_ms, license_accepted_at_ms, probe_json
                          FROM installed_model WHERE id = ?1",
                         params![id],
                         map_row,
@@ -123,7 +134,7 @@ impl InstalledModelStore {
             .store
             .call(move |conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT id, weights_file, content_hash, size_bytes, license_name, installed_at_ms, probe_json
+                    "SELECT id, weights_file, content_hash, size_bytes, license_name, installed_at_ms, license_accepted_at_ms, probe_json
                      FROM installed_model ORDER BY id",
                 )?;
                 let rows = stmt
@@ -225,7 +236,8 @@ fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<InstalledModelRow> {
         size_bytes: row.get::<_, i64>(3)? as u64,
         license_name: row.get(4)?,
         installed_at_ms: row.get(5)?,
-        probe_json: row.get(6)?,
+        license_accepted_at_ms: row.get(6)?,
+        probe_json: row.get(7)?,
     })
 }
 
@@ -245,6 +257,15 @@ mod tests {
         let applied = valyria_store::applied_versions(&conn).unwrap();
         assert!(applied.contains(&900));
         assert!(applied.contains(&901));
+        assert!(applied.contains(&902));
+    }
+
+    #[test]
+    fn migration_block_is_in_the_900s_and_ordered() {
+        let versions: Vec<i64> = MIGRATIONS.iter().map(|m| m.version).collect();
+        let mut sorted = versions.clone();
+        sorted.sort_unstable();
+        assert_eq!(versions, sorted, "migrations must be version-ordered");
     }
 
     #[tokio::test]

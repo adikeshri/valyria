@@ -472,7 +472,7 @@
       }
     },
     {
-      "description": "A request that succeeded with nothing to return (`task.pause`, `task.resume`, `task.cancel`, `permission.resolve`, `model.install`, `model.activate`).",
+      "description": "A request that succeeded with nothing to return (`task.pause`, `task.resume`, `task.cancel`, `permission.resolve`, `model.install`, `model.install_cancel`, `model.activate`).",
       "type": "object",
       "required": [
         "result"
@@ -1094,7 +1094,7 @@
       }
     },
     "ModelInspectResponse": {
-      "description": "Full detail for one model — mirrors the `ModelCard` plus, when installed, its `manifest.json` (§4.21). `license_text` is the license body when Core has it locally, for the acceptance prompt.",
+      "description": "Full detail for one model — mirrors the `ModelCard` plus, when installed, its `manifest.json` (§4.21).",
       "type": "object",
       "required": [
         "active_roles",
@@ -1142,8 +1142,23 @@
           ],
           "format": "int64"
         },
+        "license_accepted_at_ms": {
+          "description": "Unix ms at which the user accepted this model's license, from its install manifest. `None` when not installed, or installed before the acceptance step existed.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
         "license_name": {
           "type": "string"
+        },
+        "license_text": {
+          "description": "The full license body when Core bundles it locally (it does for every catalog model), for the install acceptance prompt. `None` falls back to `license_url`.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "license_url": {
           "type": [
@@ -1234,16 +1249,38 @@
       }
     },
     "ModelSummaryWire": {
+      "description": "One row of `model_list` — a catalog card joined with local state. The catalog ships embedded, so `model_list` is the full \"what can I run\" surface (not just what is installed): the client's model manager and first-run \"set up a model\" step read it directly, and `installed` / `active_roles` say what is on this machine.",
       "type": "object",
       "required": [
+        "context_length",
+        "display_name",
         "family",
         "id",
         "installed",
         "license",
+        "parameters_b",
         "quantization",
         "size_bytes"
       ],
       "properties": {
+        "active_roles": {
+          "description": "`ModelRole` names this model is currently bound to (e.g. `[\"primary_coder\", \"planner\"]`). Empty when it serves no role. The client reads this instead of guessing the active model from config keys.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "context_length": {
+          "description": "Maximum context window the weights support.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "display_name": {
+          "description": "Human-facing name, e.g. `Qwen2.5-Coder 7B Instruct (Q4_K_M)`.",
+          "type": "string"
+        },
         "family": {
           "type": "string"
         },
@@ -1255,6 +1292,11 @@
         },
         "license": {
           "type": "string"
+        },
+        "parameters_b": {
+          "description": "Parameter count in billions (`7.0`, `1.5`, `0.137`).",
+          "type": "number",
+          "format": "double"
         },
         "quantization": {
           "type": "string"

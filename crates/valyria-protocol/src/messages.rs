@@ -276,14 +276,31 @@ pub struct MemoryListResponse {
 
 // --- models (§4.21) ---
 
+/// One row of `model_list` — a catalog card joined with local state. The
+/// catalog ships embedded, so `model_list` is the full "what can I run"
+/// surface (not just what is installed): the client's model manager and
+/// first-run "set up a model" step read it directly, and `installed` /
+/// `active_roles` say what is on this machine.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ModelSummaryWire {
     pub id: String,
     pub family: String,
+    /// Human-facing name, e.g. `Qwen2.5-Coder 7B Instruct (Q4_K_M)`.
+    pub display_name: String,
     pub quantization: String,
+    /// Parameter count in billions (`7.0`, `1.5`, `0.137`).
+    pub parameters_b: f64,
+    /// Maximum context window the weights support.
+    pub context_length: u32,
     pub size_bytes: u64,
     pub installed: bool,
     pub license: String,
+    /// `ModelRole` names this model is currently bound to (e.g.
+    /// `["primary_coder", "planner"]`). Empty when it serves no role.
+    /// The client reads this instead of guessing the active model from
+    /// config keys.
+    #[serde(default)]
+    pub active_roles: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -549,6 +566,18 @@ pub struct ModelIdRequest {
     pub id: String,
 }
 
+/// `model_install` — begin a download. `accept_license` is the wire record
+/// of the user's acceptance of the model's license (its text is on
+/// `ModelInspectResponse::license_text`). Core **refuses** the install with
+/// `model.license_not_accepted` when it is `false`, so no weights are ever
+/// fetched without an explicit acknowledgement (§4.21).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelInstallRequest {
+    pub id: String,
+    #[serde(default)]
+    pub accept_license: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ModelActivateRequest {
     pub id: String,
@@ -562,8 +591,7 @@ pub struct ModelRemoveResponse {
 }
 
 /// Full detail for one model — mirrors the `ModelCard` plus, when
-/// installed, its `manifest.json` (§4.21). `license_text` is the license
-/// body when Core has it locally, for the acceptance prompt.
+/// installed, its `manifest.json` (§4.21).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ModelInspectResponse {
     pub id: String,
@@ -575,6 +603,14 @@ pub struct ModelInspectResponse {
     pub size_bytes: u64,
     pub license_name: String,
     pub license_url: Option<String>,
+    /// The full license body when Core bundles it locally (it does for
+    /// every catalog model), for the install acceptance prompt. `None`
+    /// falls back to `license_url`.
+    pub license_text: Option<String>,
+    /// Unix ms at which the user accepted this model's license, from its
+    /// install manifest. `None` when not installed, or installed before
+    /// the acceptance step existed.
+    pub license_accepted_at_ms: Option<i64>,
     pub source_url: String,
     pub installed: bool,
     /// Present only when installed.

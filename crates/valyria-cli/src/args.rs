@@ -21,6 +21,10 @@ pub struct ParsedArgs {
     /// `--plan`: run `Planning` as a model-authored, validated plan
     /// (Phase 8) instead of the pass-through.
     pub plan: bool,
+    /// `--accept-license` (alias `--yes`): for `valyria model install`,
+    /// the acknowledgement of the model's license that Core requires
+    /// before it fetches any weights.
+    pub accept_license: bool,
     /// `--scope <memory|cache|tasks|logs>` for `valyria clean`.
     pub scope: Option<String>,
     /// `--connect <path>`: talk to a running daemon over its Unix socket
@@ -84,6 +88,7 @@ pub fn parse(raw: &[String]) -> Result<ParsedArgs, String> {
             "--json" => parsed.json = true,
             "--dry-run" => parsed.dry_run = true,
             "--plan" => parsed.plan = true,
+            "--accept-license" | "--yes" => parsed.accept_license = true,
             "--allow" => parsed.allow = true,
             "--deny" => parsed.deny = true,
             other => parsed.positional.push(other.to_string()),

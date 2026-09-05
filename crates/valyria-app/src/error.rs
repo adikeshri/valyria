@@ -50,6 +50,13 @@ pub enum AppError {
     Plan(String),
     #[error("repository surface error: {0}")]
     Repo(String),
+    #[error(
+        "install of model {0:?} needs the license accepted first — call model_inspect \
+         for its text, then model_install with accept_license = true"
+    )]
+    LicenseNotAccepted(String),
+    #[error("model {0:?} is already being installed")]
+    InstallInFlight(String),
 }
 
 impl ErrorCode for AppError {
@@ -77,6 +84,8 @@ impl ErrorCode for AppError {
             AppError::NotPaused(_) => "app.not_paused",
             AppError::Plan(_) => "app.plan",
             AppError::Repo(_) => "app.repo",
+            AppError::LicenseNotAccepted(_) => "model.license_not_accepted",
+            AppError::InstallInFlight(_) => "model.install_in_flight",
         }
     }
 
@@ -104,6 +113,8 @@ impl ErrorCode for AppError {
             AppError::NotPaused(_) => false,
             AppError::Plan(_) => false,
             AppError::Repo(_) => false,
+            AppError::LicenseNotAccepted(_) => false,
+            AppError::InstallInFlight(_) => false,
         }
     }
 }

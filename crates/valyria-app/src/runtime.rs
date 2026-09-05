@@ -3,8 +3,9 @@
 //! root — the one place in the whole workspace allowed to know about every
 //! layer at once, so that `valyria-cli` never has to.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use rusqlite::OptionalExtension;
 use valyria_agent::{AgentDriver, PlanningMode};
@@ -84,7 +85,19 @@ pub struct ModelInspectView {
     pub card: ModelCard,
     pub installed: bool,
     pub installed_at_ms: Option<i64>,
+    /// Unix ms the user accepted `card.license_name`, from the install
+    /// manifest. `None` when not installed or installed pre-acceptance.
+    pub license_accepted_at_ms: Option<i64>,
     pub probe_tokens_per_sec: Option<f64>,
+    pub active_roles: Vec<String>,
+}
+
+/// One row of [`Runtime::model_list`] — a catalog card with local state.
+#[derive(Debug, Clone)]
+pub struct ModelListEntryView {
+    pub card: ModelCard,
+    pub installed: bool,
+    /// `ModelRole` names this model is bound to, sorted.
     pub active_roles: Vec<String>,
 }
 
@@ -178,6 +191,11 @@ pub struct Runtime {
     global: Arc<GlobalStore>,
     engine: Arc<PermissionEngine>,
     permission_mode: PermissionMode,
+    /// Cancel handles for `model_install` downloads currently in flight,
+    /// keyed by catalog id. An entry exists only while the background task
+    /// runs; `model_install_cancel` fires the token and the task's next
+    /// checkpoint stops it.
+    installs: Arc<Mutex<HashMap<String, CancellationToken>>>,
 }
 
 impl Runtime {
@@ -291,6 +309,7 @@ impl Runtime {
             global,
             engine: engine_handle,
             permission_mode: config.permission_mode,
+            installs: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -770,8 +789,10 @@ impl Runtime {
     }
 
     /// The catalog, each card tagged with whether its weights are
-    /// installed in the global store (§4.21).
-    pub async fn model_list(&self) -> Result<Vec<(valyria_model_registry::ModelCard, bool)>> {
+    /// installed in the global store and which roles it is bound to
+    /// (§4.21). This is the full "what can I run" surface — the catalog
+    /// ships embedded, so a clean machine still lists every model.
+    pub async fn model_list(&self) -> Result<Vec<ModelListEntryView>> {
         let catalog = Catalog::embedded().map_err(|e| AppError::Plan(e.to_string()))?;
         let installed: std::collections::BTreeSet<String> = self
             .global
@@ -781,13 +802,25 @@ impl Runtime {
             .into_iter()
             .map(|r| r.id)
             .collect();
+        let mut roles_by_model: HashMap<String, Vec<String>> = HashMap::new();
+        for (role, model_id) in self.global.models().role_bindings().await? {
+            roles_by_model.entry(model_id).or_default().push(role);
+        }
+        for roles in roles_by_model.values_mut() {
+            roles.sort();
+        }
         Ok(catalog
             .cards()
             .iter()
             .cloned()
             .map(|c| {
-                let is_installed = installed.contains(&c.id);
-                (c, is_installed)
+                let installed = installed.contains(&c.id);
+                let active_roles = roles_by_model.get(&c.id).cloned().unwrap_or_default();
+                ModelListEntryView {
+                    card: c,
+                    installed,
+                    active_roles,
+                }
             })
             .collect())
     }
@@ -857,16 +890,30 @@ impl Runtime {
     /// `model_install_progress` / `_completed` / `_failed` on the event
     /// stream (§20, §21). The weights land in `~/.valyria/models/<id>/`,
     /// Core-owned; nothing else fetches them.
-    pub async fn model_install(&self, id: &str) -> Result<()> {
-        self.model_install_with(id, HttpFetcher::new()?).await
+    ///
+    /// `accept_license` is the caller's record of the user having accepted
+    /// the model's license (its text is on [`Self::model_inspect`]). Core
+    /// refuses the install with `model.license_not_accepted` when it is
+    /// `false` — no weights are ever fetched without acknowledgement.
+    pub async fn model_install(&self, id: &str, accept_license: bool) -> Result<()> {
+        self.model_install_with(id, accept_license, HttpFetcher::new()?)
+            .await
     }
 
     /// [`Self::model_install`] with an injected [`Fetcher`](valyria_model_store::Fetcher)
     /// — production passes an `HttpFetcher`; tests pass an in-memory one.
-    pub async fn model_install_with<F>(&self, id: &str, fetcher: F) -> Result<()>
+    pub async fn model_install_with<F>(
+        &self,
+        id: &str,
+        accept_license: bool,
+        fetcher: F,
+    ) -> Result<()>
     where
         F: valyria_model_store::Fetcher + Send + Sync + 'static,
     {
+        if !accept_license {
+            return Err(AppError::LicenseNotAccepted(id.to_string()));
+        }
         let catalog = Catalog::embedded().map_err(|e| AppError::Plan(e.to_string()))?;
         let card = catalog
             .get(id)
@@ -878,16 +925,26 @@ impl Runtime {
                 valyria_model_store::ModelStoreError::AlreadyInstalled { id: id.to_string() },
             ));
         }
+
+        let cancel = CancellationToken::new();
+        {
+            let mut installs = self.installs.lock().expect("installs mutex");
+            if installs.contains_key(id) {
+                return Err(AppError::InstallInFlight(id.to_string()));
+            }
+            installs.insert(id.to_string(), cancel.clone());
+        }
+
+        let now_ms = SystemClock.now().as_millis() as i64;
         let hw = self.hardware_probe();
-        let plan = store.plan_install(&card, &hw).confirm();
+        let plan = store.plan_install(&card, &hw).accept_license(now_ms);
 
         let events = self.events.clone();
         let installed_index = self.global.models().clone();
+        let installs = self.installs.clone();
         let id_owned = id.to_string();
 
         tokio::spawn(async move {
-            let cancel = CancellationToken::new();
-
             // The progress callback is synchronous; funnel its updates
             // through a channel that a concurrent task turns into events.
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -920,6 +977,8 @@ impl Runtime {
             drop(progress); // close tx so the drainer finishes
             let _ = drainer.await;
 
+            installs.lock().expect("installs mutex").remove(&id_owned);
+
             match outcome {
                 Ok(manifest) => {
                     let _ = installed_index.record(&manifest).await;
@@ -948,6 +1007,31 @@ impl Runtime {
             }
         });
         Ok(())
+    }
+
+    /// Cancel an in-flight [`Self::model_install`] for `id`. Fires the
+    /// download's cancellation token; the background task stops at its next
+    /// chunk boundary and emits `model_install_failed` with code
+    /// `model_store.cancelled`, leaving a `.part` file so a later install
+    /// resumes. A no-op (still `Ok`) when nothing is installing `id`.
+    pub async fn model_install_cancel(&self, id: &str) -> Result<()> {
+        if let Some(token) = self.installs.lock().expect("installs mutex").get(id) {
+            token.cancel();
+        }
+        Ok(())
+    }
+
+    /// Ids of every model whose install is currently in flight.
+    pub fn installs_in_flight(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .installs
+            .lock()
+            .expect("installs mutex")
+            .keys()
+            .cloned()
+            .collect();
+        ids.sort();
+        ids
     }
 
     /// Remove installed model `id`, dropping any role bindings that named
@@ -989,7 +1073,7 @@ impl Runtime {
         } else {
             None
         };
-        let active_roles: Vec<String> = self
+        let mut active_roles: Vec<String> = self
             .global
             .models()
             .role_bindings()
@@ -998,10 +1082,12 @@ impl Runtime {
             .filter(|(_, m)| m == id)
             .map(|(role, _)| role)
             .collect();
+        active_roles.sort();
         Ok(ModelInspectView {
             card,
             installed,
             installed_at_ms: manifest.as_ref().map(|m| m.installed_at_ms),
+            license_accepted_at_ms: manifest.as_ref().and_then(|m| m.license_accepted_at_ms),
             probe_tokens_per_sec: manifest
                 .as_ref()
                 .and_then(|m| m.probe.as_ref())

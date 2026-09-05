@@ -17,8 +17,9 @@ use std::sync::Arc;
 use futures::StreamExt;
 use valyria_app::{load_scenario, serve, EmbeddedClient, Runtime, RuntimeConfig};
 use valyria_protocol::{
-    Client, Empty, MemoryListRequest, PermissionResolveRequest, Request, Response,
-    StoragePurgeRequest, TaskCreateRequest, TaskIdRequest, TaskRollbackRequest, TaskStatusRequest,
+    Client, Empty, MemoryListRequest, ModelActivateRequest, ModelIdRequest, ModelInstallRequest,
+    ModelRecommendRequest, PermissionResolveRequest, Request, Response, StoragePurgeRequest,
+    TaskCreateRequest, TaskIdRequest, TaskRollbackRequest, TaskStatusRequest,
 };
 use valyria_util::CancellationToken;
 
@@ -74,7 +75,10 @@ fn print_usage() {
     eprintln!(
         "    valyria config [--json]                 effective config + where each value came from"
     );
-    eprintln!("    valyria model list [--json]             catalog, with install state");
+    eprintln!(
+        "    valyria model <list|recommend <role>|inspect <id>|install <id> [--accept-license]"
+    );
+    eprintln!("                  |cancel <id>|activate <id> <role>|remove <id>> [--json]");
     eprintln!("    valyria memory list [<query>] [--json]  inspect stored memory");
     eprintln!("    valyria clean --scope <memory|cache|tasks|logs> [--dry-run] [--json]");
     eprintln!("    valyria serve [--socket <path>]         run the daemon");
@@ -190,19 +194,175 @@ async fn cmd_config(raw: Vec<String>) -> ExitCode {
 }
 
 async fn cmd_model(raw: Vec<String>) -> ExitCode {
-    // Only subcommand today: `model list`.
-    let rest: Vec<String> = raw
-        .iter()
-        .filter(|a| a.as_str() != "list")
-        .cloned()
-        .collect();
-    one_shot(
-        rest,
-        "model list",
-        |_| Request::ModelList(Empty {}),
-        render::model_list,
-    )
-    .await
+    let sub = raw.first().map(String::as_str).unwrap_or("list");
+    let rest: Vec<String> = raw.get(1..).unwrap_or(&[]).to_vec();
+
+    match sub {
+        "list" => {
+            one_shot(
+                rest,
+                "model list",
+                |_| Request::ModelList(Empty {}),
+                render::model_list,
+            )
+            .await
+        }
+        "recommend" => {
+            one_shot(
+                rest,
+                "model recommend",
+                |p| {
+                    Request::ModelRecommend(ModelRecommendRequest {
+                        role: p
+                            .positional
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| "primary_coder".to_string()),
+                    })
+                },
+                render::model_recommend,
+            )
+            .await
+        }
+        "inspect" => {
+            let Some(id) = rest.iter().find(|a| !a.starts_with("--")).cloned() else {
+                eprintln!("error: usage: valyria model inspect <id> [--json]");
+                return ExitCode::from(64);
+            };
+            one_shot(
+                rest,
+                "model inspect",
+                move |_| Request::ModelInspect(ModelIdRequest { id }),
+                render::model_inspect,
+            )
+            .await
+        }
+        "install" => cmd_model_install(rest).await,
+        "cancel" => {
+            let Some(id) = rest.iter().find(|a| !a.starts_with("--")).cloned() else {
+                eprintln!("error: usage: valyria model cancel <id>");
+                return ExitCode::from(64);
+            };
+            one_shot(
+                rest,
+                "model cancel",
+                move |_| Request::ModelInstallCancel(ModelIdRequest { id: id.clone() }),
+                |_| println!("cancel requested — watch the event stream for model_install_failed"),
+            )
+            .await
+        }
+        "activate" => {
+            let ids: Vec<String> = rest
+                .iter()
+                .filter(|a| !a.starts_with("--"))
+                .cloned()
+                .collect();
+            let (Some(id), Some(role)) = (ids.first().cloned(), ids.get(1).cloned()) else {
+                eprintln!("error: usage: valyria model activate <id> <role>");
+                return ExitCode::from(64);
+            };
+            one_shot(
+                rest,
+                "model activate",
+                move |_| {
+                    Request::ModelActivate(ModelActivateRequest {
+                        id: id.clone(),
+                        role: role.clone(),
+                    })
+                },
+                |_| println!("activated"),
+            )
+            .await
+        }
+        "remove" => {
+            let Some(id) = rest.iter().find(|a| !a.starts_with("--")).cloned() else {
+                eprintln!("error: usage: valyria model remove <id>");
+                return ExitCode::from(64);
+            };
+            one_shot(
+                rest,
+                "model remove",
+                move |_| Request::ModelRemove(ModelIdRequest { id: id.clone() }),
+                render::model_remove,
+            )
+            .await
+        }
+        other => {
+            eprintln!(
+                "error: unknown `model` subcommand `{other}` \
+                 (expected: list, recommend, inspect, install, cancel, activate, remove)"
+            );
+            ExitCode::from(64)
+        }
+    }
+}
+
+/// `valyria model install <id> [--accept-license]`. Without the flag this
+/// prints the license Core requires the user to accept and exits non-zero,
+/// so acceptance is always an explicit, informed act — Core refuses the
+/// install otherwise (`model.license_not_accepted`).
+async fn cmd_model_install(raw: Vec<String>) -> ExitCode {
+    let parsed = match parse(&raw) {
+        Ok(p) => p,
+        Err(e) => return print_error_and_fail("invalid arguments", &e),
+    };
+    let Some(id) = parsed.positional.first().cloned() else {
+        eprintln!("error: usage: valyria model install <id> [--accept-license]");
+        return ExitCode::from(64);
+    };
+    let client = match build_client(&parsed).await {
+        Ok(c) => c,
+        Err(e) => return print_error_and_fail("model install", &e),
+    };
+
+    if !parsed.accept_license {
+        let resp = client
+            .call(Request::ModelInspect(ModelIdRequest { id: id.clone() }))
+            .await;
+        match resp {
+            Response::ModelInspect(m) => {
+                println!("Model  : {} ({})", m.display_name, m.id);
+                println!("Size   : {}", render::bytes(m.size_bytes));
+                println!("License: {}", m.license_name);
+                if let Some(url) = &m.license_url {
+                    println!("         {url}");
+                }
+                println!();
+                match &m.license_text {
+                    Some(text) => {
+                        println!("{}", text.trim_end());
+                        println!();
+                    }
+                    None => println!("(full license text not bundled — see the URL above)\n"),
+                }
+                eprintln!(
+                    "To accept this license and start the download, re-run:\n\
+                     \n    valyria model install {id} --accept-license\n"
+                );
+                ExitCode::FAILURE
+            }
+            Response::Error(e) => print_error_and_fail("model install", &e.message),
+            _ => print_error_and_fail("model install", "unexpected response to model_inspect"),
+        }
+    } else {
+        let resp = client
+            .call(Request::ModelInstall(ModelInstallRequest {
+                id: id.clone(),
+                accept_license: true,
+            }))
+            .await;
+        match resp {
+            Response::Ack => {
+                println!(
+                    "install of {id} started — progress streams as model_install_progress events; \
+                     `valyria model list` shows it as installed when done"
+                );
+                ExitCode::SUCCESS
+            }
+            Response::Error(e) => print_error_and_fail("model install", &e.message),
+            _ => print_error_and_fail("model install", "unexpected response to model_install"),
+        }
+    }
 }
 
 async fn cmd_memory(raw: Vec<String>) -> ExitCode {

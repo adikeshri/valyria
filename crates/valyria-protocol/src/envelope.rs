@@ -11,12 +11,13 @@ use crate::messages::{
     GitBranchesResponse, GitDiffRequest, GitDiffResponse, GitLogRequest, GitLogResponse,
     GitStatusResponse, HardwareProbeResponse, HelloRequest, HelloResponse, IndexStatusResponse,
     LedgerChangesRequest, LedgerChangesResponse, MemoryListRequest, MemoryListResponse,
-    ModelActivateRequest, ModelIdRequest, ModelInspectResponse, ModelListResponse,
-    ModelRecommendRequest, ModelRecommendResponse, ModelRemoveResponse, PermissionResolveRequest,
-    PlanGetResponse, PurgeResponse, SearchQueryRequest, SearchQueryResponse,
-    StorageInspectResponse, StoragePurgeRequest, TaskCreateRequest, TaskCreateResponse,
-    TaskIdRequest, TaskListResponse, TaskReportResponse, TaskRollbackRequest, TaskRollbackResponse,
-    TaskStatusRequest, TaskStatusResponse, WireError, WorkspaceStatusResponse,
+    ModelActivateRequest, ModelIdRequest, ModelInspectResponse, ModelInstallRequest,
+    ModelListResponse, ModelRecommendRequest, ModelRecommendResponse, ModelRemoveResponse,
+    PermissionResolveRequest, PlanGetResponse, PurgeResponse, SearchQueryRequest,
+    SearchQueryResponse, StorageInspectResponse, StoragePurgeRequest, TaskCreateRequest,
+    TaskCreateResponse, TaskIdRequest, TaskListResponse, TaskReportResponse, TaskRollbackRequest,
+    TaskRollbackResponse, TaskStatusRequest, TaskStatusResponse, WireError,
+    WorkspaceStatusResponse,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -54,7 +55,12 @@ pub enum Request {
     IndexBuild(Empty),
     HardwareProbe(Empty),
     ModelRecommend(ModelRecommendRequest),
-    ModelInstall(ModelIdRequest),
+    ModelInstall(ModelInstallRequest),
+    /// Cancel an in-flight `model_install` for this id. The background task
+    /// stops at its next checkpoint and emits `model_install_failed` with
+    /// code `model_store.cancelled`; a `.part` file is kept so a later
+    /// install resumes. Ack even when nothing was in flight. Protocol 1.11.0.
+    ModelInstallCancel(ModelIdRequest),
     ModelRemove(ModelIdRequest),
     ModelActivate(ModelActivateRequest),
     ModelInspect(ModelIdRequest),
@@ -94,7 +100,7 @@ pub enum Response {
     LedgerChanges(LedgerChangesResponse),
     /// A request that succeeded with nothing to return (`task.pause`,
     /// `task.resume`, `task.cancel`, `permission.resolve`,
-    /// `model.install`, `model.activate`).
+    /// `model.install`, `model.install_cancel`, `model.activate`).
     Ack,
     Error(WireError),
 }

@@ -69,6 +69,12 @@ pub struct InstallPlan {
     pub destination: PathBuf,
     pub already_installed: bool,
     confirmed: bool,
+    /// When the caller recorded the user's acceptance of `license_name`
+    /// (unix ms). Written into the model's `manifest.json` on a successful
+    /// install so a later `model_inspect` can report it. `None` for callers
+    /// that acknowledge size/fit but not a distinct license step (the CLI's
+    /// `--yes`, tests).
+    accepted_license_at_ms: Option<i64>,
 }
 
 impl InstallPlan {
@@ -76,6 +82,20 @@ impl InstallPlan {
     pub fn confirm(mut self) -> Self {
         self.confirmed = true;
         self
+    }
+
+    /// Confirm the plan *and* record that the user accepted `license_name`
+    /// at `at_ms`. The recorded timestamp lands in the install manifest.
+    #[must_use]
+    pub fn accept_license(mut self, at_ms: i64) -> Self {
+        self.confirmed = true;
+        self.accepted_license_at_ms = Some(at_ms);
+        self
+    }
+
+    /// The license-acceptance timestamp carried by this plan, if any.
+    pub fn accepted_license_at_ms(&self) -> Option<i64> {
+        self.accepted_license_at_ms
     }
 
     pub fn is_confirmed(&self) -> bool {
@@ -172,6 +192,7 @@ impl ModelStore {
             destination: self.model_dir(&card.id),
             already_installed: self.is_installed(&card.id),
             confirmed: false,
+            accepted_license_at_ms: None,
             card: card.clone(),
         }
     }
@@ -316,6 +337,7 @@ impl ModelStore {
             size_bytes,
             content_hash: actual,
             installed_at_ms: now_ms(),
+            license_accepted_at_ms: plan.accepted_license_at_ms,
             probe: Some(probe),
             card: plan.card.clone(),
         };
