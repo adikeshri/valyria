@@ -122,6 +122,62 @@ async fn resume_task_recovers_only_the_task_it_was_asked_to_resume() {
 }
 
 #[tokio::test]
+async fn resuming_a_task_with_a_pending_cancel_actually_cancels_it() {
+    // Regression test for a real bug: a client asks to cancel a task
+    // whose driver already died (nothing running anywhere to notice the
+    // request), so it just sits in the row as `pending_signal`. Resuming
+    // that task used to silently drop the request — `recover_task`'s own
+    // recovery transition, and then `resume_task`'s Paused -> paused_from
+    // transition, each unconditionally clear `pending_signal` (by design,
+    // for the ordinary case where a transition really did consume it) —
+    // so a task that was supposed to be cancelled just kept running as if
+    // nothing had been asked of it.
+    let temp = tempfile::tempdir().unwrap();
+    let ws = valyria_testkit::TempWorkspace::new();
+    let data_dir = temp.path().join("data");
+    let config = RuntimeConfig::new(ws.path()).with_data_dir(data_dir.clone());
+
+    let workspace_id;
+    let task_id = valyria_types::TaskId::new();
+    {
+        let runtime = Runtime::open(config.clone()).await.unwrap();
+        workspace_id = runtime.workspace_id();
+    }
+    {
+        // The exact row shape a dead-driver task with an unhonored cancel
+        // request leaves behind: non-terminal state, `pending_signal` set.
+        let conn = rusqlite::Connection::open(data_dir.join("workspace.db")).unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, workspace_id, objective, state, pending_signal, \
+             plan_scope, created_at_ms, updated_at_ms) VALUES (?1, ?2, 'add a function', \
+             'IMPLEMENTING', 'CANCEL', '[]', 0, 0)",
+            rusqlite::params![task_id.to_string(), workspace_id.to_string()],
+        )
+        .unwrap();
+    }
+
+    let runtime2 = Runtime::open(config).await.unwrap();
+    runtime2.resume_task(task_id).await.unwrap();
+
+    // The spawned driver processes the (preserved) pending signal on its
+    // first loop iteration — poll briefly rather than assuming a fixed
+    // delay is enough.
+    let mut status = runtime2.task_status(task_id).await.unwrap();
+    for _ in 0..50 {
+        if status.state == AgentState::Cancelled {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        status = runtime2.task_status(task_id).await.unwrap();
+    }
+    assert_eq!(
+        status.state,
+        AgentState::Cancelled,
+        "a pending cancel must survive recovery + resume, not be silently dropped"
+    );
+}
+
+#[tokio::test]
 async fn subscribe_events_survives_a_manufactured_lag_with_no_gap() {
     let temp = tempfile::tempdir().unwrap();
     let ws = valyria_testkit::TempWorkspace::new();

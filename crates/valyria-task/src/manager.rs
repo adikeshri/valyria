@@ -524,6 +524,15 @@ impl TaskManager {
     }
 
     async fn recover_task(&self, id: TaskId, note: String) -> Result<()> {
+        // `transition` unconditionally clears `pending_signal` (deliberate —
+        // see its own comment: a transition "consumes" whatever signal was
+        // pending). But a signal that arrived while this task's driver was
+        // dead was never actually acted on — it was just sitting in the row
+        // waiting for a driver loop to notice it. Recovering the task must
+        // not be what silently consumes it; preserve it across this
+        // transition so a driver spawned after recovery still sees it.
+        let pending = self.get(id).await?.pending_signal;
+
         let id_str = id.to_string();
         let note_for_row = note.clone();
         self.store
@@ -538,6 +547,9 @@ impl TaskManager {
         self.append_journal(id, JournalEntryKind::RecoveryNote { note })
             .await?;
         self.transition(id, AgentState::Paused).await?;
+        if let Some(signal) = pending {
+            self.set_pending_signal(id, signal).await?;
+        }
         Ok(())
     }
 
@@ -902,6 +914,34 @@ mod tests {
         assert_eq!(
             mgr.get(waiting_for_user.id).await.unwrap().state,
             AgentState::WaitingForUser
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_task_if_active_preserves_a_pending_control_signal() {
+        // Regression test: `transition` unconditionally clears
+        // `pending_signal` (correct for the ordinary case — a transition
+        // really did consume it). But `recover_task_if_active`'s own
+        // recovery transition (-> Paused) must not be what silently
+        // consumes a cancel/pause that was requested while this task's
+        // driver was dead and never got a chance to honor it.
+        let mgr = manager();
+        let task = new_task(&mgr).await;
+        mgr.transition(task.id, AgentState::Understanding)
+            .await
+            .unwrap();
+        mgr.request_cancel(task.id).await.unwrap();
+
+        let recovered = mgr.recover_task_if_active(task.id).await.unwrap();
+        assert!(recovered);
+
+        let after = mgr.get(task.id).await.unwrap();
+        assert_eq!(after.state, AgentState::Paused);
+        assert_eq!(after.paused_from, Some(AgentState::Understanding));
+        assert_eq!(
+            after.pending_signal,
+            Some(ControlSignal::CancelRequested),
+            "the pending cancel must survive the recovery transition"
         );
     }
 
