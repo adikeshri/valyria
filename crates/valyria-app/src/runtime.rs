@@ -1411,6 +1411,31 @@ impl valyria_model_store::Prober for ServerProber {
         .await
         .map_err(|e| to_probe_err(e.to_string()))?;
 
+        // Embedder/reranker models have no chat-completion path at all —
+        // llama-server never answers a `/v1/chat/completions` request for
+        // one, so asking would just hang (found live: nomic-embed-text-v1.5
+        // sat past 200s). The server having loaded and answered `/health`
+        // (above) is already the meaningful integrity signal for those; a
+        // chat probe is only appropriate for a card that actually declares
+        // a chat-capable role.
+        let chat_capable = card
+            .role_suitability
+            .keys()
+            .any(|r| !matches!(r, ModelRole::Embedder | ModelRole::Reranker));
+        if !chat_capable {
+            rt.shutdown().await;
+            return Ok(valyria_model_store::ProbeResult {
+                loads: true,
+                working_transport: card.transport_preference,
+                tokens_per_sec: 0.0,
+                measured_ram_bytes: card.requirement.min_ram_bytes,
+            });
+        }
+
+        // Defense in depth for chat-capable models too: even a model that
+        // *should* answer must never be able to hang the install forever —
+        // bound the single probe generation.
+        const PROBE_GENERATE_TIMEOUT: Duration = Duration::from_secs(60);
         let req = GenerateRequest::new(vec![Message::user("Reply with one short word.")])
             .with_sampling(SamplingParams {
                 temperature: 0.0,
@@ -1419,11 +1444,23 @@ impl valyria_model_store::Prober for ServerProber {
                 stop: Vec::new(),
             });
         let started = std::time::Instant::now();
-        let result = rt.generate(req, CancellationToken::new()).await;
+        let result = tokio::time::timeout(
+            PROBE_GENERATE_TIMEOUT,
+            rt.generate(req, CancellationToken::new()),
+        )
+        .await;
         let elapsed = started.elapsed();
         rt.shutdown().await;
 
-        let completion = result.map_err(|e| to_probe_err(e.to_string()))?;
+        let completion = match result {
+            Ok(inner) => inner.map_err(|e| to_probe_err(e.to_string()))?,
+            Err(_) => {
+                return Err(to_probe_err(format!(
+                    "model did not answer a trivial prompt within {}s",
+                    PROBE_GENERATE_TIMEOUT.as_secs()
+                )))
+            }
+        };
         if completion.text.trim().is_empty() && completion.tool_calls.is_empty() {
             return Err(to_probe_err(
                 "model started but produced no output for a trivial prompt".into(),
