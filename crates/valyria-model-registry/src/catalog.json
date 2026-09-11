@@ -8,7 +8,7 @@
       "parameters_b": 7.0,
       "quantization": "q4_k_m",
       "context_length": 32768,
-      "file_size_bytes": 4683073856,
+      "file_size_bytes": 4683073536,
       "recommended_sampling": { "temperature": 0.2, "top_p": 0.9, "max_tokens": null, "stop": [] },
       "role_suitability": {
         "primary_coder": 92,
@@ -23,7 +23,7 @@
       "supports_native_tools": true,
       "supports_grammar": true,
       "source_url": "https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/qwen2.5-coder-7b-instruct-q4_k_m.gguf",
-      "content_hash": "4e38dc4a4a6a04977d1814ba13830dec90dd6e36bb6502f6a6ba48dde552821f",
+      "content_hash": "e0abfc1f71fa8f1454f3bc443f7608a63263ed2d41664f2820c3d92c45f3bd52",
       "license_name": "Apache-2.0",
       "license_url": "https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/blob/main/LICENSE"
     },
@@ -34,7 +34,7 @@
       "parameters_b": 1.5,
       "quantization": "q8_0",
       "context_length": 32768,
-      "file_size_bytes": 1646607872,
+      "file_size_bytes": 1894532160,
       "recommended_sampling": { "temperature": 0.1, "top_p": 0.9, "max_tokens": null, "stop": [] },
       "role_suitability": {
         "fast_coder": 82,
@@ -46,7 +46,7 @@
       "supports_native_tools": true,
       "supports_grammar": true,
       "source_url": "https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF/resolve/main/qwen2.5-coder-1.5b-instruct-q8_0.gguf",
-      "content_hash": "b26600e99c8e7de5477de901b6d8cdf5dd3151745921d465289f6396fd9cd6f0",
+      "content_hash": "2dad576a4eed22191803db74ae5750126fa88d28ef2b9a73c2377264191c0237",
       "license_name": "Apache-2.0",
       "license_url": null
     },
@@ -57,7 +57,7 @@
       "parameters_b": 8.0,
       "quantization": "q4_k_m",
       "context_length": 131072,
-      "file_size_bytes": 4920733696,
+      "file_size_bytes": 4920739232,
       "recommended_sampling": { "temperature": 0.3, "top_p": 0.9, "max_tokens": null, "stop": [] },
       "role_suitability": {
         "planner": 84,
@@ -71,7 +71,7 @@
       "supports_native_tools": false,
       "supports_grammar": true,
       "source_url": "https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
-      "content_hash": "28b67d8a7380b3071c6e7b1e6bee6adec03759efd93beffebc0c730685140c3f",
+      "content_hash": "cd186be125f276fd8161cbb4591acb504dfbe969eb26e4a600d0e157890abd7c",
       "license_name": "Llama-3.1-Community",
       "license_url": "https://www.llama.com/llama3_1/license/"
     },
@@ -82,7 +82,7 @@
       "parameters_b": 0.137,
       "quantization": "f16",
       "context_length": 8192,
-      "file_size_bytes": 274743296,
+      "file_size_bytes": 274290560,
       "recommended_sampling": { "temperature": 0.0, "top_p": 1.0, "max_tokens": null, "stop": [] },
       "role_suitability": { "embedder": 90 },
       "requirement": { "min_ram_bytes": 700000000, "min_vram_bytes": null },
@@ -90,7 +90,7 @@
       "supports_native_tools": false,
       "supports_grammar": false,
       "source_url": "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.f16.gguf",
-      "content_hash": "0de13970f8c4f69183ff526ca08b6c51d53470aaced7841753edfd1689419a70",
+      "content_hash": "357f239087b8c21c3858aa7bde421af89d9c120ef5e05a51c89ee0092795f9a9",
       "license_name": "Apache-2.0",
       "license_url": null
     },
@@ -101,15 +101,15 @@
       "parameters_b": 0.278,
       "quantization": "f16",
       "context_length": 512,
-      "file_size_bytes": 561889280,
+      "file_size_bytes": 563949920,
       "recommended_sampling": { "temperature": 0.0, "top_p": 1.0, "max_tokens": null, "stop": [] },
       "role_suitability": { "reranker": 88 },
       "requirement": { "min_ram_bytes": 1200000000, "min_vram_bytes": null },
       "transport_preference": "native",
       "supports_native_tools": false,
       "supports_grammar": false,
-      "source_url": "https://huggingface.co/BAAI/bge-reranker-base/resolve/main/model-f16.gguf",
-      "content_hash": "35228c372df6e86fa388c5ef11b560e2955deb5d51fd3917a0db3e1702e8bd08",
+      "source_url": "https://huggingface.co/sinjab/bge-reranker-base-F16-GGUF/resolve/main/bge-reranker-base-F16.gguf",
+      "content_hash": "db03d15627cf6d7e262fa793a7bffc12d276745b1ca37f7899f279d7ac6ab72e",
       "license_name": "MIT",
       "license_url": null
     }
