@@ -412,13 +412,52 @@ fn main() -> Result<()> {
         Some("check-protocol") => check_protocol(),
         Some("bench") => bench(args.iter().any(|a| a == "--bless")),
         Some("release-gates") => release_gates(),
+        Some("check-version-tag") => {
+            let tag = args
+                .get(1)
+                .ok_or_else(|| anyhow::anyhow!("usage: cargo xtask check-version-tag <tag>"))?;
+            check_version_tag(tag)
+        }
         Some(other) => bail!("unknown xtask command: {other}"),
         None => {
             println!(
-                "usage: cargo xtask <check-layering|schema|check-protocol|bench [--bless]|release-gates>"
+                "usage: cargo xtask <check-layering|schema|check-protocol|bench [--bless]|release-gates|check-version-tag <tag>>"
             );
             Ok(())
         }
+    }
+}
+
+/// release.yml's first gate: the pushed/dispatched tag must match
+/// `[workspace.package] version` in the root Cargo.toml, so a binary named
+/// `valyria-<version>-<triple>` and its release tag never disagree.
+fn check_version_tag(tag: &str) -> Result<()> {
+    let version = tag
+        .strip_prefix('v')
+        .ok_or_else(|| anyhow::anyhow!("tag {tag:?} does not start with 'v'"))?;
+
+    let root = workspace_root()?;
+    let cargo_path = root.join("Cargo.toml");
+    let text = fs::read_to_string(&cargo_path)
+        .with_context(|| format!("reading {}", cargo_path.display()))?;
+    let parsed: toml::Value =
+        toml::from_str(&text).with_context(|| format!("parsing {}", cargo_path.display()))?;
+    let workspace_version = parsed
+        .get("workspace")
+        .and_then(|w| w.get("package"))
+        .and_then(|p| p.get("version"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Cargo.toml: missing [workspace.package] version"))?;
+
+    if version == workspace_version {
+        println!(
+            "check-version-tag OK — {tag} matches [workspace.package] version {workspace_version}"
+        );
+        Ok(())
+    } else {
+        bail!(
+            "tag {tag} (version {version}) does not match [workspace.package] version {workspace_version} in Cargo.toml"
+        )
     }
 }
 
