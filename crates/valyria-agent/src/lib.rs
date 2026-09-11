@@ -14,6 +14,7 @@ pub mod error;
 pub mod loop_detect;
 pub mod plan_exec;
 pub mod repair;
+mod tool_specs;
 
 pub use action::ActionRequest;
 pub use driver::{AgentDriver, ApprovalDecision, PlanningMode, SUBMIT_PLAN_ACTION};

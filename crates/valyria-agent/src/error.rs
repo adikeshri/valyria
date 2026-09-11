@@ -8,6 +8,8 @@ pub enum AgentError {
     Orchestrator(#[from] valyria_orchestrator::OrchestratorError),
     #[error("context error: {0}")]
     Context(#[from] valyria_context::ContextError),
+    #[error("instruction discovery error: {0}")]
+    Instructions(#[from] valyria_instructions::InstructionError),
     #[error("malformed model completion: {detail}")]
     MalformedCompletion { detail: String },
     #[error("tool runtime returned unknown tool `{0}`, but the registry is closed")]
@@ -30,6 +32,7 @@ impl ErrorCode for AgentError {
             AgentError::Task(_) => "agent.task",
             AgentError::Orchestrator(_) => "agent.orchestrator",
             AgentError::Context(_) => "agent.context",
+            AgentError::Instructions(_) => "agent.instructions",
             AgentError::MalformedCompletion { .. } => "agent.malformed_completion",
             AgentError::UnknownTool(_) => "agent.unknown_tool",
             AgentError::NotWaitingForPermission(_) => "agent.not_waiting_for_permission",
