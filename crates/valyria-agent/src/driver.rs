@@ -29,14 +29,17 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use valyria_context::{AssembledContext, ContextAssembler, ContextQuery};
+use valyria_context::{
+    AssembledContext, ContextAssembler, ContextEngine, ContextQuery, EngineInput, StaticRetriever,
+};
+use valyria_instructions::Discovery;
 use valyria_ledger::Ledger;
-use valyria_model::{GenerateRequest, Message};
+use valyria_model::{GenerateRequest, Message, ToolSpec};
 use valyria_orchestrator::{Orchestrator, Role};
 use valyria_permissions::{GrantScope, PermissionEngine};
 use valyria_plan::PlanStore;
 use valyria_sandbox::{ProcessLauncher, SandboxProfile};
-use valyria_task::{kinds, ControlSignal, JournalEntryKind, TaskManager};
+use valyria_task::{kinds, ControlSignal, JournalEntryKind, JournalSeq, TaskManager};
 use valyria_tools::{InvocationResult, ToolCtx, ToolOutcome, ToolRuntime};
 use valyria_types::{AgentState, EffectId, ProvenanceSource, StepId, TaskId, Trust};
 use valyria_util::{CancellationToken, Clock, ContentHash};
@@ -50,6 +53,7 @@ use crate::action::ActionRequest;
 use crate::error::{AgentError, Result};
 use crate::loop_detect::{LoopDetector, LoopFinding, ProgressMetric, StepSignature};
 use crate::repair::{RepairAttempt, RepairDecision, RepairLedger, RepairOutcome};
+use crate::tool_specs::bound_tool_specs;
 
 /// Token budget for the Phase 3 explicit-file context stage. Arbitrary but
 /// generous — the real, configurable budget model is Phase 6's job.
@@ -57,6 +61,11 @@ const DEFAULT_CONTEXT_BUDGET_TOKENS: usize = 50_000;
 
 /// Cap on repair cycles before the loop gives up to the user (§8).
 const MAX_REPAIR_ATTEMPTS: u32 = 4;
+
+/// Bounded reformat-retries `generate_action` gets before giving up on a
+/// model that won't produce a parseable action — matches the value every
+/// existing `generate_action` test in `valyria-orchestrator` already uses.
+const MAX_REFORMAT_RETRIES: u32 = 2;
 
 /// Cap on plan-repair rounds before `Planning` fails to the user (§4.25:
 /// "bounded repair attempts").
@@ -135,6 +144,10 @@ pub struct AgentDriver {
     pub(crate) launcher: Arc<dyn ProcessLauncher>,
     pub(crate) sandbox_profile: SandboxProfile,
     verify_states: Mutex<HashMap<TaskId, VerifyState>>,
+    /// Every tool the model may call this turn — computed once from the
+    /// registry `tools` was built with; the registry is static after
+    /// construction so there's nothing to keep in sync.
+    tool_specs: Vec<ToolSpec>,
 }
 
 impl AgentDriver {
@@ -154,6 +167,7 @@ impl AgentDriver {
         launcher: Arc<dyn ProcessLauncher>,
         sandbox_profile: SandboxProfile,
     ) -> Self {
+        let tool_specs = bound_tool_specs(&tools);
         Self {
             tasks,
             tools,
@@ -170,6 +184,7 @@ impl AgentDriver {
             launcher,
             sandbox_profile,
             verify_states: Mutex::new(HashMap::new()),
+            tool_specs,
         }
     }
 
@@ -282,6 +297,119 @@ impl AgentDriver {
         }
     }
 
+    /// The system + task-intent messages every implementing/repairing turn
+    /// opens with: the runtime policy and any repo instructions
+    /// (`VALYRIA.md`/`AGENTS.md`/`CLAUDE.md`), then the objective. Rebuilt
+    /// fresh every call rather than cached — `Discovery::discover` reads a
+    /// handful of size-capped files, negligible next to a model call, and
+    /// it means an instruction file edited mid-task takes effect on the
+    /// very next turn. `StaticRetriever::empty()`: real semantic codebase
+    /// retrieval is `SearchRetriever`'s job, an explicit follow-up (this
+    /// call site is the one-line swap when that lands).
+    async fn system_and_task_messages(&self, task_id: TaskId) -> Result<Vec<Message>> {
+        let objective = self.tasks.get(task_id).await?.objective;
+        let instructions = Discovery::new(self.workspace_root.as_path()).discover()?;
+        let engine = ContextEngine::new(StaticRetriever::empty());
+        let input = EngineInput::new(objective, DEFAULT_CONTEXT_BUDGET_TOKENS)
+            .with_instructions(instructions);
+        Ok(engine.build(input).await?.messages)
+    }
+
+    /// Reconstruct this task's tool-call history as alternating
+    /// assistant/tool-result turns from the journal — the same durable
+    /// source of truth D1 crash-recovery already treats as authoritative,
+    /// rather than new in-memory-only state. Only *resolved* tool
+    /// effects are replayed (`TOOL_RESULT`/`TOOL_DENIED`); an
+    /// issued-but-unresolved effect can't reach this call — it's either
+    /// mid-crash-recovery (handled by the `interrupted_tool_call` check
+    /// at the top of `step_implementing`/`step_repairing`, which returns
+    /// before this runs) or mid-permission-ask (the task sits in
+    /// `WaitingForPermission` and never re-enters these steps).
+    ///
+    /// The assistant's own tool-call turn is synthesized as plain text
+    /// (`Message::assistant("Calling ...")`) rather than a structured
+    /// wire `tool_calls` array — the OpenAI-compat wire layer doesn't
+    /// serialize one for outgoing messages today, and extending it is out
+    /// of scope here. Worth revisiting once this is exercised against a
+    /// real model rather than the fake runtime.
+    async fn build_conversation(&self, task_id: TaskId) -> Result<Vec<Message>> {
+        let mut messages = self.system_and_task_messages(task_id).await?;
+
+        let entries = self.tasks.journal_since(task_id, JournalSeq::ZERO).await?;
+        let mut issued: HashMap<EffectId, (String, serde_json::Value)> = HashMap::new();
+        let mut resolved: HashMap<EffectId, (bool, String)> = HashMap::new(); // (denied, text)
+        let mut order: Vec<EffectId> = Vec::new();
+
+        for entry in &entries {
+            match &entry.kind {
+                JournalEntryKind::EffectIssued {
+                    effect_id,
+                    effect_kind,
+                    payload,
+                    ..
+                } if effect_kind == kinds::TOOL => {
+                    if !issued.contains_key(effect_id) {
+                        order.push(*effect_id);
+                    }
+                    let tool = payload
+                        .get("tool")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    issued.insert(
+                        *effect_id,
+                        (tool, payload.get("input").cloned().unwrap_or_default()),
+                    );
+                }
+                JournalEntryKind::EffectCompleted {
+                    effect_id,
+                    outcome_kind,
+                    payload,
+                    ..
+                } if outcome_kind == kinds::TOOL_RESULT => {
+                    let rendered = payload
+                        .get("rendered")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    resolved.insert(*effect_id, (false, rendered));
+                }
+                JournalEntryKind::EffectCompleted {
+                    effect_id,
+                    outcome_kind,
+                    payload,
+                    ..
+                } if outcome_kind == kinds::TOOL_DENIED => {
+                    let reason = payload
+                        .get("reason")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    resolved.insert(*effect_id, (true, reason));
+                }
+                _ => {}
+            }
+        }
+
+        for effect_id in order {
+            let Some((tool, input)) = issued.get(&effect_id) else {
+                continue;
+            };
+            let Some((denied, text)) = resolved.get(&effect_id) else {
+                continue;
+            };
+            messages.push(Message::assistant(format!("Calling `{tool}` with {input}")));
+            let body = if *denied {
+                format!("Denied: {text}")
+            } else {
+                text.clone()
+            };
+            messages.push(Message::tool_result(effect_id.to_string(), body));
+        }
+
+        Ok(messages)
+    }
+
     async fn step_implementing(&self, task_id: TaskId, cancel: &CancellationToken) -> Result<()> {
         // D1: re-issue any effect that was issued but never completed.
         if let Some(pending) = self.tasks.interrupted_tool_call(task_id).await? {
@@ -312,11 +440,18 @@ impl AgentDriver {
             )
             .await?;
 
-        let messages = vec![Message::user(self.tasks.get(task_id).await?.objective)];
-        let request = GenerateRequest::new(messages).with_turn_hint(turn_index);
+        let messages = self.build_conversation(task_id).await?;
+        let request = GenerateRequest::new(messages)
+            .with_tools(self.tool_specs.clone())
+            .with_turn_hint(turn_index);
         let completion = self
             .orchestrator
-            .generate(Role::PrimaryCoder, request, cancel.child())
+            .generate_action(
+                Role::PrimaryCoder,
+                request,
+                cancel.child(),
+                MAX_REFORMAT_RETRIES,
+            )
             .await?;
 
         self.tasks
@@ -709,15 +844,17 @@ impl AgentDriver {
             )
             .await?;
 
-        let objective = self.tasks.get(task_id).await?.objective;
-        let prompt = format!(
-            "{objective}\n\nA verification check just failed. Make the minimal edit that \
-             fixes it, then finish.\n\n{digest}"
-        );
-        let request = GenerateRequest::new(vec![Message::user(prompt)]).with_turn_hint(turn_index);
+        let mut messages = self.build_conversation(task_id).await?;
+        messages.push(Message::user(format!(
+            "A verification check just failed. Make the minimal edit that fixes it, \
+             then finish.\n\n{digest}"
+        )));
+        let request = GenerateRequest::new(messages)
+            .with_tools(self.tool_specs.clone())
+            .with_turn_hint(turn_index);
         let completion = self
             .orchestrator
-            .generate(role, request, cancel.child())
+            .generate_action(role, request, cancel.child(), MAX_REFORMAT_RETRIES)
             .await?;
 
         self.tasks

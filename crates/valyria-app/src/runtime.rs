@@ -25,7 +25,7 @@ use valyria_runtime_fake::{FakeModelRuntime, Scenario};
 use valyria_runtime_llamacpp::{LlamaServerRuntime, LocalModelServer};
 use valyria_sandbox::{detect_platform_launcher, ProcessLauncher, SandboxProfile};
 use valyria_store::Store;
-use valyria_task::{Budget, Task, TaskManager};
+use valyria_task::{Budget, ControlSignal, Task, TaskManager};
 use valyria_tools::ToolRuntime;
 use valyria_types::{AgentState, CheckpointId, ErrorCode, PermissionMode, TaskId, WorkspaceId};
 use valyria_util::{CancellationToken, Clock, ContentHash, SystemClock};
@@ -442,10 +442,22 @@ impl Runtime {
         self.tasks.recover_task_if_active(task_id).await?;
 
         let task = self.tasks.get(task_id).await?;
+        // `transition` unconditionally clears `pending_signal` — a cancel
+        // or pause requested against this task while its driver was dead
+        // (nothing running anywhere to notice it) must survive the
+        // Paused -> paused_from transition below, or resuming a task
+        // silently drops a pending cancel and just continues running it.
+        let pending_signal = task.pending_signal;
         if task.state == AgentState::Paused {
             let target = task.paused_from.ok_or(AppError::NotPaused(task_id))?;
             self.tasks.transition(task_id, target).await?;
         }
+        match pending_signal {
+            Some(ControlSignal::CancelRequested) => self.tasks.request_cancel(task_id).await?,
+            Some(ControlSignal::PauseRequested) => self.tasks.request_pause(task_id).await?,
+            None => {}
+        }
+        let task = self.tasks.get(task_id).await?;
         if !task.state.is_terminal() {
             self.spawn_driver(task_id);
         }
