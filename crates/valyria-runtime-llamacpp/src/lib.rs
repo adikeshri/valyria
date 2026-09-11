@@ -1,20 +1,29 @@
 //! `valyria-runtime-llamacpp` — layer 4 (Model).
 //!
-//! llama.cpp adapter (in-process FFI and/or server), GBNF constrained decoding.
+//! A managed `llama-server` subprocess behind a [`valyria_model::
+//! ModelRuntime`]. As the crate's original scaffold doc always said it
+//! would: llama.cpp's default mode is a managed server, so this crate is
+//! process supervision ([`server`]) plus a thin composition
+//! ([`runtime::LlamaServerRuntime`]) over
+//! `valyria_runtime_openai_compat::OpenAiCompatRuntime`, which owns every
+//! byte of the actual wire protocol.
 //!
-//! Status: **deferred within Phase 9** (open decision 5 — a solo build
-//! defers the MLX/CUDA adapters and FFI work). llama.cpp's default mode is
-//! a managed `llama-server` subprocess, which reuses
-//! `valyria_runtime_openai_compat::OpenAiCompatRuntime` wholesale once a
-//! concrete `HttpTransport` exists — so this crate becomes process
-//! supervision plus GBNF grammar compilation, not a second wire protocol.
-//! The crate compiles and is wired into the layering check until then.
+//! This crate resolves nothing on its own — it is handed an already
+//! fetched `llama-server` binary path and a model's weights path. Finding
+//! (and, the first time, downloading) that binary is `valyria-engine-
+//! store`'s job, orchestrated by the caller so it can emit its own
+//! progress events; `LlamaServerRuntime::start` just runs it.
 
-#![forbid(unsafe_code)]
+pub mod error;
+pub mod runtime;
+pub mod server;
 
-/// Marks this crate as present in the workspace topology for the given phase.
-/// Exists so the crate is non-empty and the layering/CI checks have something
-/// real to verify before the phase implementation lands.
+pub use error::{LlamaError, Result};
+pub use runtime::{LlamaServerRuntime, LocalModelServer};
+pub use server::{LlamaServer, LlamaServerConfig, DEFAULT_READY_TIMEOUT};
+
+/// Kept for backwards compatibility with the scaffold; the crate is now
+/// implemented.
 pub const PHASE: u8 = 9;
 
 #[cfg(test)]

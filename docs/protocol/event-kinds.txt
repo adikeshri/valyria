@@ -23,3 +23,10 @@ plan_checkpoint
 model_install_progress
 model_install_completed
 model_install_failed
+engine_install_progress
+engine_install_completed
+engine_install_failed
+model_server_starting
+model_server_ready
+model_server_failed
+model_server_stopped

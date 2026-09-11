@@ -33,7 +33,9 @@ valyria-verify = { workspace = true }
 valyria-model = { workspace = true }
 valyria-model-registry = { workspace = true }
 valyria-model-store = { workspace = true }
+valyria-engine-store = { workspace = true }
 valyria-runtime-fake = { workspace = true }
+valyria-runtime-llamacpp = { workspace = true }
 valyria-orchestrator = { workspace = true }
 valyria-context = { workspace = true }
 valyria-instructions = { workspace = true }

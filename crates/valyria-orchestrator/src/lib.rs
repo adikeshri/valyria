@@ -21,6 +21,7 @@
 
 pub mod error;
 pub mod orchestrator;
+pub mod placeholder;
 pub mod pool;
 pub mod role;
 pub mod router;
@@ -28,7 +29,11 @@ pub mod structured;
 
 pub use error::{OrchestratorError, Result};
 pub use orchestrator::Orchestrator;
+pub use placeholder::NoModelRuntime;
 pub use pool::{EvictReason, ModelPool, PoolError, PoolEvent};
 pub use role::Role;
 pub use router::{RoleBinding, RoleRouter, RoutedCompletion};
-pub use structured::{extract, recover_from_text, resolve_tool_calls, ExtractError, Extraction};
+pub use structured::{
+    extract, recover_from_text, resolve_action, resolve_tool_calls, ExtractError, Extraction,
+    ResolvedAction,
+};

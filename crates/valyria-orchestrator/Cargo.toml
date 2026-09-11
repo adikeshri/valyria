@@ -20,10 +20,10 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
 
 [dev-dependencies]
 valyria-testkit = { workspace = true }
 valyria-runtime-fake = { workspace = true }
-async-trait = { workspace = true }
-futures = { workspace = true }
 tokio = { workspace = true }

@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ModelServerStoppedPayload",
+  "description": "`model_server_stopped` — a per-role server was stopped.",
+  "type": "object",
+  "required": [
+    "id",
+    "reason",
+    "role"
+  ],
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "reason": {
+      "description": "`model_removed` | `re_pointed` | `shutdown`.",
+      "type": "string"
+    },
+    "role": {
+      "type": "string"
+    }
+  }
+}

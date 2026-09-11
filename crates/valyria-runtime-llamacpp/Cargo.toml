@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
-description = "llama.cpp adapter (in-process FFI and/or server), GBNF constrained decoding."
+description = "A managed llama-server subprocess (fetched by valyria-engine-store) behind the OpenAI-compatible ModelRuntime adapter."
 
 [package.metadata.valyria]
 layer = 4
@@ -14,9 +14,23 @@ phase = 9
 [dependencies]
 valyria-types = { workspace = true }
 valyria-util = { workspace = true }
+valyria-model = { workspace = true }
+valyria-model-registry = { workspace = true }
+valyria-runtime-openai-compat = { workspace = true }
+valyria-process = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 tracing = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 valyria-testkit = { workspace = true }
+valyria-hardware = { workspace = true }
+valyria-engine-store = { workspace = true }
+tempfile = { workspace = true }

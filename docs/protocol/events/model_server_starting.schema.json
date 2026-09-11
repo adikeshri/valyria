@@ -1,0 +1,20 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ModelServerStartingPayload",
+  "description": "`model_server_starting` — a per-role `llama-server` is being launched.",
+  "type": "object",
+  "required": [
+    "id",
+    "role"
+  ],
+  "properties": {
+    "id": {
+      "description": "The installed model id backing it.",
+      "type": "string"
+    },
+    "role": {
+      "description": "The role the server will serve, e.g. `primary_coder`.",
+      "type": "string"
+    }
+  }
+}

@@ -21,6 +21,7 @@ pub mod doctor;
 pub mod error;
 pub mod global;
 pub mod migrations;
+pub mod model_runtimes;
 pub mod runtime;
 pub mod storage;
 

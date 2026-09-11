@@ -46,6 +46,13 @@ pub const EVENT_KINDS: &[&str] = &[
     "model_install_progress",
     "model_install_completed",
     "model_install_failed",
+    "engine_install_progress",
+    "engine_install_completed",
+    "engine_install_failed",
+    "model_server_starting",
+    "model_server_ready",
+    "model_server_failed",
+    "model_server_stopped",
 ];
 
 /// `state_changed` — an `AgentState` transition.
@@ -144,6 +151,71 @@ pub struct ModelInstallFailedPayload {
     pub message: String,
 }
 
+/// `engine_install_progress` — an in-flight inference-engine download.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct EngineInstallProgressPayload {
+    /// The engine family, e.g. `llama.cpp`.
+    pub component: String,
+    /// The pinned release identifier being fetched.
+    pub version: String,
+    /// `downloading` | `verifying` | `unpacking`.
+    pub phase: String,
+    pub downloaded_bytes: u64,
+    pub total_bytes: u64,
+}
+
+/// `engine_install_completed`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct EngineInstallCompletedPayload {
+    pub component: String,
+    pub version: String,
+}
+
+/// `engine_install_failed`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct EngineInstallFailedPayload {
+    pub component: String,
+    pub version: String,
+    pub code: String,
+    pub message: String,
+}
+
+/// `model_server_starting` — a per-role `llama-server` is being launched.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelServerStartingPayload {
+    /// The role the server will serve, e.g. `primary_coder`.
+    pub role: String,
+    /// The installed model id backing it.
+    pub id: String,
+}
+
+/// `model_server_ready` — a per-role server is up and serving.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelServerReadyPayload {
+    pub role: String,
+    pub id: String,
+    /// Loopback port the server bound.
+    pub port: u16,
+}
+
+/// `model_server_failed` — a per-role server failed to start.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelServerFailedPayload {
+    pub role: String,
+    pub id: String,
+    pub code: String,
+    pub message: String,
+}
+
+/// `model_server_stopped` — a per-role server was stopped.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelServerStoppedPayload {
+    pub role: String,
+    pub id: String,
+    /// `model_removed` | `re_pointed` | `shutdown`.
+    pub reason: String,
+}
+
 /// A parsed verification failure location (§19, §35, G15).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct FailureLocationPayload {
@@ -197,6 +269,19 @@ pub fn payload_schemas() -> Vec<(&'static str, String)> {
             s::<ModelInstallCompletedPayload>(),
         ),
         ("model_install_failed", s::<ModelInstallFailedPayload>()),
+        (
+            "engine_install_progress",
+            s::<EngineInstallProgressPayload>(),
+        ),
+        (
+            "engine_install_completed",
+            s::<EngineInstallCompletedPayload>(),
+        ),
+        ("engine_install_failed", s::<EngineInstallFailedPayload>()),
+        ("model_server_starting", s::<ModelServerStartingPayload>()),
+        ("model_server_ready", s::<ModelServerReadyPayload>()),
+        ("model_server_failed", s::<ModelServerFailedPayload>()),
+        ("model_server_stopped", s::<ModelServerStoppedPayload>()),
         ("verification_evidence", s::<VerificationEvidencePayload>()),
         ("test_failed", s::<VerificationEvidencePayload>()),
     ]

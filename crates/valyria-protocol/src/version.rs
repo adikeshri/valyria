@@ -12,7 +12,7 @@
 //!   field (backward compatible: old clients ignore it);
 //! - **major** — a removed/renamed variant or field, or a changed type
 //!   (breaking: old clients misparse).
-pub const PROTOCOL_VERSION: &str = "1.11.0";
+pub const PROTOCOL_VERSION: &str = "1.12.0";
 
 /// Capability tokens a `HelloResponse` advertises (§4.27). A client
 /// negotiates against these, not the version string — a runtime built
@@ -83,6 +83,12 @@ pub mod capability {
     /// This build serves the daemon over a **Windows named pipe** (G9).
     /// Runtime-advertised on Windows only.
     pub const WINDOWS: &str = "windows";
+    /// Real local inference is wired: an activated model role boots a
+    /// managed `llama-server` (fetching the engine itself if needed) and
+    /// `PrimaryCoder` generations run against it instead of a scripted
+    /// fake. `model_server_{starting,ready,failed,stopped}` and
+    /// `engine_install_*` events are emitted (Phase 9 follow-up).
+    pub const MODEL_INFERENCE: &str = "model_inference";
 
     /// The full set an embedded runtime supports.
     pub const ALL: &[&str] = &[
@@ -104,5 +110,6 @@ pub mod capability {
         CLIENT_AUTH,
         STREAM_FILTER,
         APPROVAL_SCOPE,
+        MODEL_INFERENCE,
     ];
 }

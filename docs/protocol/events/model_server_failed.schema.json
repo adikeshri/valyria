@@ -1,0 +1,26 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ModelServerFailedPayload",
+  "description": "`model_server_failed` — a per-role server failed to start.",
+  "type": "object",
+  "required": [
+    "code",
+    "id",
+    "message",
+    "role"
+  ],
+  "properties": {
+    "code": {
+      "type": "string"
+    },
+    "id": {
+      "type": "string"
+    },
+    "message": {
+      "type": "string"
+    },
+    "role": {
+      "type": "string"
+    }
+  }
+}

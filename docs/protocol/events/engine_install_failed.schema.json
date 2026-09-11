@@ -1,0 +1,26 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "EngineInstallFailedPayload",
+  "description": "`engine_install_failed`.",
+  "type": "object",
+  "required": [
+    "code",
+    "component",
+    "message",
+    "version"
+  ],
+  "properties": {
+    "code": {
+      "type": "string"
+    },
+    "component": {
+      "type": "string"
+    },
+    "message": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    }
+  }
+}
