@@ -1,0 +1,167 @@
+name: Release
+
+# Publishes the `valyria` CLI/daemon binary to a GitHub Release, per platform.
+# This is the ONLY supported way valyria-app's release pipeline obtains a
+# Core binary — see docs/RELEASING.md and valyria-app's core.lock.json
+# `release` block.
+#
+# Never creates or pushes a tag itself: `push: tags` builds/publishes a tag
+# that already exists, and `workflow_dispatch`'s `tag` input must also name
+# an existing tag (used to repair/re-run a release without re-tagging).
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build and publish (e.g. v0.2.0)"
+        required: true
+
+permissions:
+  contents: write # gh release create
+
+env:
+  RUST_TOOLCHAIN: "1.97.1"
+
+jobs:
+  check:
+    name: Version/tag consistency
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+      prerelease: ${{ steps.tag.outputs.prerelease }}
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          TAG="${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          case "$TAG" in
+            *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
+            *)   echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - run: cargo run -p xtask -- check-version-tag "${{ steps.tag.outputs.tag }}"
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-14
+          # Cross-compiled from the same arm64 runner: valyria-runtime-mlx is
+          # a pure-Rust stub (#![forbid(unsafe_code)], no native Metal/Obj-C
+          # linkage today — it manages mlx-lm as a subprocess), so there is
+          # no native dependency to cross-link. Revisit once a real native
+          # MLX adapter lands (Apple-Silicon-only) — see docs/RELEASING.md.
+          - target: x86_64-apple-darwin
+            os: macos-14
+          # Pinned to 22.04, not ubuntu-latest: an older glibc keeps the
+          # shipped binary running on a broader range of Linux systems.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}
+
+      - run: cargo build --release --locked -p valyria-cli --target ${{ matrix.target }}
+
+      # Signing hooks — no-op until MACOS_SIGN_IDENTITY / WINDOWS_SIGN_PFX
+      # secrets exist (docs/RELEASING.md §Signing). Ship unsigned for now;
+      # activating these later needs no pipeline redesign.
+      - name: Codesign (macOS)
+        if: runner.os == 'macOS' && env.MACOS_SIGN_IDENTITY != ''
+        env:
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: |
+          echo "TODO: codesign --sign \"$MACOS_SIGN_IDENTITY\" --options runtime target/${{ matrix.target }}/release/valyria"
+          echo "TODO: notarize (needs a zip/dmg container even for a lone binary) + staple"
+      - name: signtool (Windows)
+        if: runner.os == 'Windows' && env.WINDOWS_SIGN_PFX != ''
+        env:
+          WINDOWS_SIGN_PFX: ${{ secrets.WINDOWS_SIGN_PFX }}
+        shell: bash
+        run: |
+          echo "TODO: signtool sign /f \"$WINDOWS_SIGN_PFX\" target/${{ matrix.target }}/release/valyria.exe"
+
+      - name: Stage artifact + checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.check.outputs.version }}"
+          TARGET="${{ matrix.target }}"
+          EXT=""
+          [ "$TARGET" = "x86_64-pc-windows-msvc" ] && EXT=".exe"
+          SRC="target/$TARGET/release/valyria$EXT"
+          NAME="valyria-$VERSION-$TARGET$EXT"
+          mkdir -p dist
+          cp "$SRC" "dist/$NAME"
+          cd dist
+          if command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "$NAME" > "$NAME.sha256"
+          else
+            sha256sum "$NAME" > "$NAME.sha256"
+          fi
+          cat "$NAME.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: core-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check.outputs.tag }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: core-*
+          path: collected
+          merge-multiple: true
+
+      - name: Assemble SHA256SUMS
+        working-directory: collected
+        run: cat -- *.sha256 > SHA256SUMS
+
+      - name: Publish (gh release create)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.check.outputs.tag }}
+          PRERELEASE: ${{ needs.check.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          FLAGS=()
+          [ "$PRERELEASE" = "true" ] && FLAGS+=(--prerelease)
+          gh release create "$TAG" collected/* \
+            --title "valyria $TAG" \
+            --notes "$(printf '%s\n\n%s' \
+              "Core (valyria) $TAG — the CLI/daemon binary valyria-app's release pipeline downloads and verifies (see core.lock.json)." \
+              "Signing: unsigned (no MACOS_SIGN_IDENTITY / WINDOWS_SIGN_PFX secrets configured yet — see docs/RELEASING.md).")" \
+            "${FLAGS[@]}"
