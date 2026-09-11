@@ -1,36 +1,37 @@
 [package]
-name = "valyria-runtime-openai-compat"
+name = "valyria-engine-store"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
-description = "Local OpenAI-compatible servers (llama-server, vLLM, Ollama, LM Studio)."
+description = "Download, verify, and unpack the local inference engine (llama.cpp) so a user never runs `brew install`."
 
 [package.metadata.valyria]
 layer = 4
 phase = 9
 
 [features]
-# The real reqwest + rustls transport (`ReqwestTransport`). On by default;
-# `--no-default-features` drops the TLS stack entirely and leaves only the
-# offline-testable `MockTransport`.
+# The real reqwest + rustls download transport (`HttpFetcher`). On by
+# default; `--no-default-features` drops the TLS stack entirely and leaves
+# only the offline-testable `InMemoryFetcher`.
 default = ["http"]
 http = ["dep:reqwest"]
 
 [dependencies]
 valyria-types = { workspace = true }
 valyria-util = { workspace = true }
-valyria-model = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
-futures = { workspace = true }
-tokio = { workspace = true }
-reqwest = { workspace = true, optional = true, features = ["json", "stream"] }
+reqwest = { workspace = true, optional = true }
+tar = { workspace = true }
+flate2 = { workspace = true }
+zip = { workspace = true }
 
 [dev-dependencies]
 valyria-testkit = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tempfile = { workspace = true }

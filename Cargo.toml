@@ -27,6 +27,7 @@ members = [
     "crates/valyria-model",
     "crates/valyria-model-registry",
     "crates/valyria-model-store",
+    "crates/valyria-engine-store",
     "crates/valyria-runtime-llamacpp",
     "crates/valyria-runtime-mlx",
     "crates/valyria-runtime-openai-compat",
@@ -97,8 +98,14 @@ gix = { version = "0.66", default-features = false, features = ["max-performance
 # Unified-diff generation (already in the tree transitively via gix's blob-diff).
 imara-diff = "0.1"
 
-# --- http (model-weight downloads only; behind valyria-model-store's `http` feature) ---
+# --- http (model-weight / engine-binary downloads only; behind each
+# crate's own `http` feature) ---
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
+
+# --- archive unpacking (engine binaries ship as .tar.gz / .zip releases) ---
+tar = "0.4"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # --- syscalls (daemon peer-uid check) ---
 rustix = { version = "0.38", features = ["process"] }
@@ -147,6 +154,7 @@ valyria-verify = { path = "crates/valyria-verify" }
 valyria-model = { path = "crates/valyria-model" }
 valyria-model-registry = { path = "crates/valyria-model-registry" }
 valyria-model-store = { path = "crates/valyria-model-store" }
+valyria-engine-store = { path = "crates/valyria-engine-store" }
 valyria-runtime-llamacpp = { path = "crates/valyria-runtime-llamacpp" }
 valyria-runtime-mlx = { path = "crates/valyria-runtime-mlx" }
 valyria-runtime-openai-compat = { path = "crates/valyria-runtime-openai-compat" }

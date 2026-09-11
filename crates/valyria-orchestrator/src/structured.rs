@@ -14,7 +14,9 @@
 //!    `max_reformat_retries` times, before failing the turn.
 
 use serde_json::Value;
-use valyria_model::{Capabilities, Completion, GenerateRequest, Message, ModelRuntime, ToolCall};
+use valyria_model::{
+    Capabilities, Completion, FinishReason, GenerateRequest, Message, ModelRuntime, ToolCall,
+};
 use valyria_util::CancellationToken;
 
 use crate::error::{OrchestratorError, Result};
@@ -96,6 +98,79 @@ pub async fn resolve_tool_calls<M: ModelRuntime + ?Sized>(
         match extract(&completion, &caps) {
             Ok(Extraction::Calls(calls)) => return Ok(calls),
             Ok(Extraction::NoCall) => return Ok(Vec::new()),
+            Err(ExtractError(detail)) => {
+                if attempts > max_reformat_retries {
+                    return Err(OrchestratorError::UnparseableToolCall { attempts, detail });
+                }
+                tracing::warn!(attempt = attempts, %detail, "reformat-retrying tool call");
+                req.messages
+                    .push(Message::assistant(completion.text.clone()));
+                req.messages.push(Message::user(format!(
+                    "That was not a valid tool call: {detail}. Respond with exactly one JSON \
+                     object of the form {{\"name\": \"<tool>\", \"arguments\": {{ ... }}}} and \
+                     nothing else."
+                )));
+                if let Some(hint) = req.turn_hint {
+                    req.turn_hint = Some(hint + 1);
+                }
+            }
+        }
+    }
+}
+
+/// What a turn resolved to — the completion-preserving sibling of
+/// [`resolve_tool_calls`]. Where that function discards everything but a
+/// `Vec<ToolCall>`, [`resolve_action`] keeps enough to answer the driver's
+/// actual question: "run a tool, or is the agent finished/asking?"
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResolvedAction {
+    ToolCalls(Vec<ToolCall>),
+    Answer { text: String, ask: bool },
+}
+
+/// [`resolve_tool_calls`]'s ladder, but keeping the shape `Orchestrator::
+/// generate_action` needs to synthesize a normal [`Completion`] afterward
+/// (`Finish` vs `Ask` vs a tool call) instead of collapsing everything
+/// that isn't a call to an empty `Vec`.
+///
+/// The fast path — a clean native `ToolCalls` with exactly one call, or
+/// `Ask` — returns after the single `generate` with **no** call into
+/// [`extract`] and no possibility of a retry `generate`. A well-behaved
+/// adapter (the fake included) always takes this path, so wiring this in
+/// changes nothing observable for it.
+pub async fn resolve_action<M: ModelRuntime + ?Sized>(
+    model: &M,
+    mut req: GenerateRequest,
+    cancel: &CancellationToken,
+    max_reformat_retries: u32,
+) -> Result<ResolvedAction> {
+    let caps = model.capabilities();
+    let mut attempts = 0u32;
+    loop {
+        attempts += 1;
+        let completion = model.generate(req.clone(), cancel.child()).await?;
+
+        match completion.finish_reason {
+            FinishReason::Ask => {
+                return Ok(ResolvedAction::Answer {
+                    text: completion.text,
+                    ask: true,
+                })
+            }
+            FinishReason::ToolCalls if completion.tool_calls.len() == 1 => {
+                return Ok(ResolvedAction::ToolCalls(completion.tool_calls));
+            }
+            _ => {}
+        }
+
+        match extract(&completion, &caps) {
+            Ok(Extraction::Calls(calls)) => return Ok(ResolvedAction::ToolCalls(calls)),
+            Ok(Extraction::NoCall) => {
+                return Ok(ResolvedAction::Answer {
+                    text: completion.text,
+                    ask: false,
+                })
+            }
             Err(ExtractError(detail)) => {
                 if attempts > max_reformat_retries {
                     return Err(OrchestratorError::UnparseableToolCall { attempts, detail });

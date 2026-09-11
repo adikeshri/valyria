@@ -183,6 +183,14 @@ impl ModelStore {
         Ok(serde_json::from_str(&text)?)
     }
 
+    /// The full path to `id`'s weights file on disk. A convenience over
+    /// `manifest(id)` + join for callers (a runtime adapter, the prober)
+    /// that just want to open the file.
+    pub fn weights_path(&self, id: &str) -> Result<PathBuf> {
+        let manifest = self.manifest(id)?;
+        Ok(self.model_dir(id).join(&manifest.weights_file))
+    }
+
     pub fn plan_install(&self, card: &ModelCard, hw: &HardwareReport) -> InstallPlan {
         InstallPlan {
             download_bytes: card.file_size_bytes,

@@ -49,6 +49,28 @@ pub enum EventKind {
     /// A `model_install` failed or was cancelled — payload `{ id, code,
     /// message }`.
     ModelInstallFailed,
+    /// Progress of an in-flight inference-engine download (llama.cpp) —
+    /// payload `{ component, version, phase, downloaded_bytes,
+    /// total_bytes }` (`valyria-app` owns the shape).
+    EngineInstallProgress,
+    /// The inference engine was downloaded and unpacked — payload
+    /// `{ component, version }`.
+    EngineInstallCompleted,
+    /// The inference-engine download failed — payload `{ component,
+    /// version, code, message }`.
+    EngineInstallFailed,
+    /// A per-role model server (`llama-server`) is being started —
+    /// payload `{ role, id }`.
+    ModelServerStarting,
+    /// A per-role model server is up and serving — payload `{ role, id,
+    /// port }`.
+    ModelServerReady,
+    /// A per-role model server failed to start — payload `{ role, id,
+    /// code, message }`.
+    ModelServerFailed,
+    /// A per-role model server was stopped — payload `{ role, id,
+    /// reason }`.
+    ModelServerStopped,
 }
 
 impl EventKind {
@@ -81,6 +103,13 @@ impl EventKind {
         EventKind::ModelInstallProgress,
         EventKind::ModelInstallCompleted,
         EventKind::ModelInstallFailed,
+        EventKind::EngineInstallProgress,
+        EventKind::EngineInstallCompleted,
+        EventKind::EngineInstallFailed,
+        EventKind::ModelServerStarting,
+        EventKind::ModelServerReady,
+        EventKind::ModelServerFailed,
+        EventKind::ModelServerStopped,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -110,6 +139,13 @@ impl EventKind {
             EventKind::ModelInstallProgress => "model_install_progress",
             EventKind::ModelInstallCompleted => "model_install_completed",
             EventKind::ModelInstallFailed => "model_install_failed",
+            EventKind::EngineInstallProgress => "engine_install_progress",
+            EventKind::EngineInstallCompleted => "engine_install_completed",
+            EventKind::EngineInstallFailed => "engine_install_failed",
+            EventKind::ModelServerStarting => "model_server_starting",
+            EventKind::ModelServerReady => "model_server_ready",
+            EventKind::ModelServerFailed => "model_server_failed",
+            EventKind::ModelServerStopped => "model_server_stopped",
         }
     }
 }
@@ -146,7 +182,7 @@ mod tests {
         for k in EventKind::ALL {
             let _: &str = k.as_str();
         }
-        assert_eq!(EventKind::ALL.len(), 25);
+        assert_eq!(EventKind::ALL.len(), 32);
     }
 
     #[test]
@@ -157,6 +193,16 @@ mod tests {
             (EventKind::ModelInstallProgress, "model_install_progress"),
             (EventKind::ModelInstallCompleted, "model_install_completed"),
             (EventKind::ModelInstallFailed, "model_install_failed"),
+            (EventKind::EngineInstallProgress, "engine_install_progress"),
+            (
+                EventKind::EngineInstallCompleted,
+                "engine_install_completed",
+            ),
+            (EventKind::EngineInstallFailed, "engine_install_failed"),
+            (EventKind::ModelServerStarting, "model_server_starting"),
+            (EventKind::ModelServerReady, "model_server_ready"),
+            (EventKind::ModelServerFailed, "model_server_failed"),
+            (EventKind::ModelServerStopped, "model_server_stopped"),
         ] {
             assert_eq!(kind.as_str(), s);
             assert_eq!(serde_json::to_string(&kind).unwrap(), format!("\"{s}\""));

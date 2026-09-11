@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "engines": [
+    {
+      "component": "llama.cpp",
+      "release": "b10901",
+      "targets": [
+        {
+          "os": "macos",
+          "arch": "aarch64",
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b10901/llama-b10901-bin-macos-arm64.tar.gz",
+          "archive_kind": "tar_gz",
+          "archive_size_bytes": 11140410,
+          "archive_hash": "422242c945a7b64b803b49d0ffd869a9d97927d078172fafb55c02f3a88c6f0c",
+          "binary_member": "llama-b10901/llama-server"
+        },
+        {
+          "os": "linux",
+          "arch": "x86_64",
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b10901/llama-b10901-bin-ubuntu-x64.tar.gz",
+          "archive_kind": "tar_gz",
+          "archive_size_bytes": 16812707,
+          "archive_hash": "8cbafa14c61aee09bdee01e1a379ec242063cc0ebf6e604321e0456595e90154",
+          "binary_member": "llama-b10901/llama-server"
+        },
+        {
+          "os": "windows",
+          "arch": "x86_64",
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b10901/llama-b10901-bin-win-cpu-x64.zip",
+          "archive_kind": "zip",
+          "archive_size_bytes": 18423640,
+          "archive_hash": "59e1a8fb43b5b51674efb98a45b1b5174a406ffc361c0342d43eb5de00886f70",
+          "binary_member": "llama-server.exe"
+        }
+      ]
+    }
+  ]
+}

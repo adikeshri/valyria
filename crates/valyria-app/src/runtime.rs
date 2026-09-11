@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use rusqlite::OptionalExtension;
 use valyria_agent::{AgentDriver, PlanningMode};
@@ -14,12 +15,14 @@ use valyria_events::{EventBus, EventKind, NewEvent};
 use valyria_index::IndexStore;
 use valyria_ledger::Ledger;
 use valyria_memory::{MemoryStore, RetrievalRequest};
+use valyria_model::{GenerateRequest, Message, ModelRuntime, SamplingParams};
 use valyria_model_registry::{score_card_for_role, CardScore, Catalog, ModelCard, ModelRole};
 use valyria_model_store::{HttpFetcher, ModelStore, NullProber};
-use valyria_orchestrator::{Orchestrator, Role};
+use valyria_orchestrator::{NoModelRuntime, Orchestrator, Role};
 use valyria_permissions::PermissionEngine;
 use valyria_plan::{PlanRevision, PlanStore, RollbackError, RollbackReport};
 use valyria_runtime_fake::{FakeModelRuntime, Scenario};
+use valyria_runtime_llamacpp::{LlamaServerRuntime, LocalModelServer};
 use valyria_sandbox::{detect_platform_launcher, ProcessLauncher, SandboxProfile};
 use valyria_store::Store;
 use valyria_task::{Budget, Task, TaskManager};
@@ -33,6 +36,7 @@ use crate::doctor::{Doctor, DoctorReport};
 use crate::error::{AppError, Result};
 use crate::global::GlobalStore;
 use crate::migrations::workspace_migrations;
+use crate::model_runtimes::ModelRuntimeRegistry;
 use crate::storage::{PurgeOutcome, PurgeScope, StorageInspector, StorageReport};
 
 /// Which Core-owned config file a [`Runtime::config_set`] write targets.
@@ -111,6 +115,25 @@ pub fn load_scenario(path: &std::path::Path) -> Result<Scenario> {
     Ok(Scenario::load_toml(path)?)
 }
 
+/// Which `ModelRuntime` backs `Role::PrimaryCoder` (and, once more than
+/// one role is bound, every other role too). `Fake` is what the whole
+/// existing test suite, the walking-skeleton demo, and `--scenario` run
+/// against — a `RuntimeConfig` defaults to it so nothing that doesn't ask
+/// for `Local` ever touches a subprocess or the network. `Local` is real
+/// inference: `Runtime::open` reads `model_role_binding` and boots a
+/// managed `llama-server` per installed, bound model.
+#[derive(Debug, Clone)]
+pub enum ModelBackend {
+    Fake(Scenario),
+    Local,
+}
+
+impl ModelBackend {
+    pub fn is_fake(&self) -> bool {
+        matches!(self, ModelBackend::Fake(_))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
     pub workspace_path: PathBuf,
@@ -118,7 +141,7 @@ pub struct RuntimeConfig {
     /// layout) if left as `None` by `RuntimeConfig::new`.
     pub data_dir: PathBuf,
     pub permission_mode: PermissionMode,
-    pub scenario: Scenario,
+    pub model_backend: ModelBackend,
     /// Whether `Planning` asks the model for a plan (Phase 8) or is the
     /// Phase 3 pass-through. Defaults to pass-through.
     pub planning_mode: PlanningMode,
@@ -136,7 +159,7 @@ impl RuntimeConfig {
             workspace_path,
             data_dir,
             permission_mode: PermissionMode::default(),
-            scenario: Scenario::default_walking_skeleton(),
+            model_backend: ModelBackend::Fake(Scenario::default_walking_skeleton()),
             planning_mode: PlanningMode::default(),
             global_dir: GlobalStore::default_root(),
         }
@@ -170,7 +193,15 @@ impl RuntimeConfig {
     }
 
     pub fn with_scenario(mut self, scenario: Scenario) -> Self {
-        self.scenario = scenario;
+        self.model_backend = ModelBackend::Fake(scenario);
+        self
+    }
+
+    /// Drive real local inference instead of the fake: `Runtime::open`
+    /// reads `model_role_binding` and boots a managed `llama-server` per
+    /// installed, bound model, fetching the engine itself the first time.
+    pub fn with_local_models(mut self) -> Self {
+        self.model_backend = ModelBackend::Local;
         self
     }
 }
@@ -196,6 +227,18 @@ pub struct Runtime {
     /// runs; `model_install_cancel` fires the token and the task's next
     /// checkpoint stops it.
     installs: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    /// The same `Arc<Orchestrator>` the driver holds — `model_activate` /
+    /// `model_remove` rebind through this handle, which is why it must be
+    /// the *same* `Arc`, not a fresh `Orchestrator`.
+    orchestrator: Arc<Orchestrator>,
+    /// The live `llama-server` handles this `Runtime` has started. Empty
+    /// (and untouched) when `model_backend` is `Fake`.
+    model_runtimes: Arc<ModelRuntimeRegistry>,
+    /// `true` when `model_backend` was `Fake` — `model_activate` /
+    /// `model_remove` skip all server lifecycle work and stay pure DB
+    /// writes, matching the pre-Phase-9 behaviour every existing test
+    /// depends on.
+    use_fake_model: bool,
 }
 
 impl Runtime {
@@ -243,12 +286,14 @@ impl Runtime {
         ));
         let engine_handle = engine.clone();
 
-        let mut orchestrator = Orchestrator::new();
-        orchestrator.bind(
-            Role::PrimaryCoder,
-            Arc::new(FakeModelRuntime::from_scenario(config.scenario)),
-        );
-        let orchestrator = Arc::new(orchestrator);
+        let use_fake_model = config.model_backend.is_fake();
+        let orchestrator = Arc::new(Orchestrator::new());
+        if let ModelBackend::Fake(scenario) = &config.model_backend {
+            orchestrator.bind(
+                Role::PrimaryCoder,
+                Arc::new(FakeModelRuntime::from_scenario(scenario.clone())),
+            );
+        }
 
         let context = Arc::new(ContextAssembler::new(tool_runtime.clone()));
         let verification_log = Arc::new(VerificationLog::new(store.clone()));
@@ -264,6 +309,39 @@ impl Runtime {
                 clock.now().as_millis() as i64,
             )
             .await?;
+
+        let model_runtimes = Arc::new(ModelRuntimeRegistry::new());
+        if matches!(config.model_backend, ModelBackend::Local) {
+            let model_store = ModelStore::new(global.root());
+            let bindings = global.models().role_bindings().await?;
+            let mut primary_bound = false;
+            for (role_str, model_id) in bindings {
+                let Ok(role) = role_str.parse::<ModelRole>() else {
+                    tracing::warn!(role = %role_str, "unknown role in model_role_binding, skipping");
+                    continue;
+                };
+                if !model_store.is_installed(&model_id) {
+                    continue;
+                }
+                if role == Role::PrimaryCoder {
+                    primary_bound = true;
+                }
+                orchestrator.bind(role, Arc::new(NoModelRuntime::starting(&model_id)));
+                spawn_model_boot(
+                    role,
+                    model_id,
+                    global.root().to_path_buf(),
+                    model_store.clone(),
+                    orchestrator.clone(),
+                    model_runtimes.clone(),
+                    events.clone(),
+                );
+            }
+            if !primary_bound {
+                orchestrator.bind(Role::PrimaryCoder, Arc::new(NoModelRuntime::none_bound()));
+            }
+        }
+
         let hash_cache = Arc::new(valyria_vfs::HashCache::new());
         let launcher: Arc<dyn ProcessLauncher> = Arc::from(detect_platform_launcher());
         let sandbox_profile = SandboxProfile::new().allow_write(workspace_root.as_path());
@@ -278,7 +356,7 @@ impl Runtime {
             AgentDriver::new(
                 tasks.clone(),
                 tool_runtime,
-                orchestrator,
+                orchestrator.clone(),
                 context,
                 ledger.clone(),
                 engine,
@@ -310,6 +388,9 @@ impl Runtime {
             engine: engine_handle,
             permission_mode: config.permission_mode,
             installs: Arc::new(Mutex::new(HashMap::new())),
+            orchestrator,
+            model_runtimes,
+            use_fake_model,
         })
     }
 
@@ -943,6 +1024,8 @@ impl Runtime {
         let installed_index = self.global.models().clone();
         let installs = self.installs.clone();
         let id_owned = id.to_string();
+        let use_fake_model = self.use_fake_model;
+        let global_root = self.global.root().to_path_buf();
 
         tokio::spawn(async move {
             // The progress callback is synchronous; funnel its updates
@@ -971,9 +1054,24 @@ impl Runtime {
                 }
             });
 
-            let outcome = store
-                .install_with_progress(&plan, &fetcher, &NullProber, &cancel, &progress)
-                .await;
+            // The fake backend never has a real engine to probe with (and
+            // must stay network-free for its own test suite); real local
+            // inference gets the genuine load-and-generate check so a
+            // download that hashes correctly but can't actually load a
+            // model is still caught (§4.21's "never partial-on-success").
+            let outcome = if use_fake_model {
+                store
+                    .install_with_progress(&plan, &fetcher, &NullProber, &cancel, &progress)
+                    .await
+            } else {
+                let prober = ServerProber {
+                    global_root,
+                    events: events.clone(),
+                };
+                store
+                    .install_with_progress(&plan, &fetcher, &prober, &cancel, &progress)
+                    .await
+            };
             drop(progress); // close tx so the drainer finishes
             let _ = drainer.await;
 
@@ -1035,15 +1133,45 @@ impl Runtime {
     }
 
     /// Remove installed model `id`, dropping any role bindings that named
-    /// it. Returns bytes reclaimed.
+    /// it. Stops any server currently serving it *before* the weights are
+    /// deleted out from under it. Returns bytes reclaimed.
     pub async fn model_remove(&self, id: &str) -> Result<u64> {
+        if !self.use_fake_model {
+            for role in self.model_runtimes.roles_for_model(id).await {
+                self.orchestrator
+                    .rebind(role, Arc::new(NoModelRuntime::none_bound()));
+                if let Some(old) = self.model_runtimes.take(role).await {
+                    old.shutdown().await; // awaited: files are about to go away
+                }
+                let _ = self
+                    .events
+                    .append(NewEvent::new(
+                        EventKind::ModelServerStopped,
+                        serde_json::json!({
+                            "role": role.as_str(),
+                            "id": id,
+                            "reason": "model_removed",
+                        }),
+                    ))
+                    .await;
+            }
+        }
+
         let freed = self.model_store().remove(id)?;
         let _ = self.global.models().delete(id).await;
         let _ = self.global.models().clear_bindings_for(id).await;
         Ok(freed)
     }
 
-    /// Bind installed model `id` to `role` (§38). Persisted in `global.db`.
+    /// Bind installed model `id` to `role` (§38), persisted in `global.db`
+    /// **unconditionally and first** — a boot failure below still leaves a
+    /// binding `Runtime::open` retries on the next process, and the DB
+    /// write is declarative intent, not a liveness claim. With the fake
+    /// backend that persistence is the whole operation, matching every
+    /// existing test's expectations. With real inference, this then starts
+    /// (or re-points) the server for `role` and waits for it to answer
+    /// `/health` before returning — an explicit user action, so unlike the
+    /// background boot loop, blocking here is the right trade.
     pub async fn model_activate(&self, id: &str, role: ModelRole) -> Result<()> {
         if !self.model_store().is_installed(id) {
             return Err(AppError::ModelStore(
@@ -1055,7 +1183,64 @@ impl Runtime {
             .models()
             .set_role_binding(role.as_str(), id, now)
             .await?;
-        Ok(())
+
+        if self.use_fake_model {
+            return Ok(());
+        }
+
+        let _ = self
+            .events
+            .append(NewEvent::new(
+                EventKind::ModelServerStarting,
+                serde_json::json!({ "role": role.as_str(), "id": id }),
+            ))
+            .await;
+
+        let model_store = self.model_store();
+        match boot_model_server(self.global.root(), id, &model_store, &self.events).await {
+            Ok(handle) => {
+                let port = handle.port();
+                self.orchestrator
+                    .rebind(role, handle.clone() as Arc<dyn ModelRuntime>);
+                if let Some(old) = self.model_runtimes.swap(role, id.to_string(), handle).await {
+                    tokio::spawn(async move { old.shutdown().await });
+                }
+                let _ = self
+                    .events
+                    .append(NewEvent::new(
+                        EventKind::ModelServerReady,
+                        serde_json::json!({ "role": role.as_str(), "id": id, "port": port }),
+                    ))
+                    .await;
+                Ok(())
+            }
+            Err(e) => {
+                self.orchestrator
+                    .rebind(role, Arc::new(NoModelRuntime::failed(id, &e.to_string())));
+                let _ = self
+                    .events
+                    .append(NewEvent::new(
+                        EventKind::ModelServerFailed,
+                        serde_json::json!({
+                            "role": role.as_str(),
+                            "id": id,
+                            "code": ErrorCode::code(&e),
+                            "message": e.to_string(),
+                        }),
+                    ))
+                    .await;
+                Err(AppError::ModelServerStart {
+                    id: id.to_string(),
+                    role: role.as_str().to_string(),
+                    source: match e {
+                        AppError::LlamaCpp(inner) => inner,
+                        other => valyria_runtime_llamacpp::LlamaError::EngineUnavailable(
+                            other.to_string(),
+                        ),
+                    },
+                })
+            }
+        }
     }
 
     /// Full detail for model `id`: its catalog card, its manifest when
@@ -1103,6 +1288,27 @@ impl Runtime {
         tokio::spawn(async move {
             if let Err(error) = driver.run(task_id, CancellationToken::new()).await {
                 tracing::error!(%task_id, %error, "agent driver exited with an error");
+                // `driver.run`'s own `?`-propagation only ever transitions
+                // a task on the *happy* exits it recognizes (repair
+                // give-up, approval denial, ...); an error it doesn't
+                // otherwise handle — a model that's `Unavailable` because
+                // nothing is activated chief among them — must still not
+                // leave the task silently wedged in whatever step it was
+                // mid-way through forever. Answer §36 here if nothing else
+                // already did.
+                if let Ok(task) = tasks.get(task_id).await {
+                    if !task.state.is_terminal() {
+                        let _ = tasks
+                            .append_journal(
+                                task_id,
+                                valyria_task::JournalEntryKind::RecoveryNote {
+                                    note: format!("agent driver exited with an error: {error}"),
+                                },
+                            )
+                            .await;
+                        let _ = tasks.transition(task_id, AgentState::Failed).await;
+                    }
+                }
             }
             // Release any per-task autonomy override once the task is
             // *terminal* — not on a mere pause / waiting-for-permission
@@ -1147,4 +1353,259 @@ async fn load_or_create_workspace_id(store: &Store) -> Result<WorkspaceId> {
         })
         .await?;
     Ok(id)
+}
+
+// --- real local inference (Phase 9 follow-up): boot a `llama-server` per
+// installed, bound model. Free functions (not `impl Runtime` methods)
+// because the background boot loop in `open()` needs to run before `Self`
+// exists, and `model_activate` reuses the same two building blocks. ---
+
+/// A real load-and-generate post-install probe (replaces `NullProber`
+/// for the `Local` backend): spin the just-downloaded weights up on a
+/// managed `llama-server`, ask for one short completion, and tear it
+/// down. If the *engine* itself can't be resolved (offline, first run
+/// with no network), that is treated as **skip, not fail** — the model
+/// still installs, just unverified, exactly like `NullProber` would have
+/// left it; a corrupted or unloadable *model* is still a hard failure per
+/// `ModelStore::install_with_progress`'s existing contract.
+struct ServerProber {
+    global_root: PathBuf,
+    events: Arc<EventBus>,
+}
+
+#[async_trait::async_trait]
+impl valyria_model_store::Prober for ServerProber {
+    async fn probe(
+        &self,
+        weights: &std::path::Path,
+        card: &ModelCard,
+    ) -> valyria_model_store::Result<valyria_model_store::ProbeResult> {
+        let binary = match resolve_or_install_engine(&self.global_root, &self.events).await {
+            Ok(bin) => bin,
+            Err(_) => {
+                return Ok(valyria_model_store::ProbeResult {
+                    loads: true,
+                    working_transport: card.transport_preference,
+                    tokens_per_sec: 0.0,
+                    measured_ram_bytes: card.requirement.min_ram_bytes,
+                });
+            }
+        };
+
+        let log_path = self
+            .global_root
+            .join("logs")
+            .join(format!("llama-probe-{}.log", card.id));
+        let to_probe_err = |detail: String| valyria_model_store::ModelStoreError::Probe {
+            id: card.id.clone(),
+            detail,
+        };
+
+        let rt = LlamaServerRuntime::start_with_timeout(
+            binary,
+            weights.to_path_buf(),
+            card,
+            log_path,
+            Duration::from_secs(180),
+        )
+        .await
+        .map_err(|e| to_probe_err(e.to_string()))?;
+
+        let req = GenerateRequest::new(vec![Message::user("Reply with one short word.")])
+            .with_sampling(SamplingParams {
+                temperature: 0.0,
+                top_p: 1.0,
+                max_tokens: Some(8),
+                stop: Vec::new(),
+            });
+        let started = std::time::Instant::now();
+        let result = rt.generate(req, CancellationToken::new()).await;
+        let elapsed = started.elapsed();
+        rt.shutdown().await;
+
+        let completion = result.map_err(|e| to_probe_err(e.to_string()))?;
+        if completion.text.trim().is_empty() && completion.tool_calls.is_empty() {
+            return Err(to_probe_err(
+                "model started but produced no output for a trivial prompt".into(),
+            ));
+        }
+        let tokens_per_sec = if elapsed.as_secs_f32() > 0.0 {
+            completion.usage.completion_tokens as f32 / elapsed.as_secs_f32()
+        } else {
+            0.0
+        };
+
+        Ok(valyria_model_store::ProbeResult {
+            loads: true,
+            working_transport: card.transport_preference,
+            tokens_per_sec,
+            measured_ram_bytes: card.requirement.min_ram_bytes,
+        })
+    }
+}
+
+/// Resolve the inference engine, downloading and unpacking it the first
+/// time (emitting `engine_install_progress` / `_completed` / `_failed`) if
+/// [`valyria_engine_store::EngineStore::resolve`] comes back empty.
+async fn resolve_or_install_engine(
+    global_root: &std::path::Path,
+    events: &Arc<EventBus>,
+) -> Result<PathBuf> {
+    let engine_store = valyria_engine_store::EngineStore::new(global_root);
+    if let Some(bin) = engine_store.resolve("llama.cpp") {
+        return Ok(bin);
+    }
+
+    let catalog = valyria_engine_store::Catalog::embedded()?;
+    let release = catalog
+        .entry("llama.cpp")
+        .map(|e| e.release.clone())
+        .unwrap_or_default();
+    let fetcher = valyria_engine_store::HttpFetcher::new()?;
+    let cancel = CancellationToken::new();
+
+    // Same synchronous-callback-to-event-stream pattern as
+    // `model_install_with`'s download progress.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let progress = move |p: valyria_engine_store::InstallProgress| {
+        let _ = tx.send(p);
+    };
+    let drain_events = events.clone();
+    let drain_release = release.clone();
+    let drainer = tokio::spawn(async move {
+        while let Some(p) = rx.recv().await {
+            let _ = drain_events
+                .append(NewEvent::new(
+                    EventKind::EngineInstallProgress,
+                    serde_json::json!({
+                        "component": "llama.cpp",
+                        "version": drain_release.clone(),
+                        "phase": p.phase.as_str(),
+                        "downloaded_bytes": p.downloaded_bytes,
+                        "total_bytes": p.total_bytes,
+                    }),
+                ))
+                .await;
+        }
+    });
+
+    let outcome = engine_store
+        .install_with_progress(&catalog, "llama.cpp", &fetcher, &cancel, &progress)
+        .await;
+    drop(progress); // close tx so the drainer finishes
+    let _ = drainer.await;
+
+    match outcome {
+        Ok(bin) => {
+            let _ = events
+                .append(NewEvent::new(
+                    EventKind::EngineInstallCompleted,
+                    serde_json::json!({ "component": "llama.cpp", "version": release }),
+                ))
+                .await;
+            Ok(bin)
+        }
+        Err(e) => {
+            let _ = events
+                .append(NewEvent::new(
+                    EventKind::EngineInstallFailed,
+                    serde_json::json!({
+                        "component": "llama.cpp",
+                        "version": release,
+                        "code": e.code(),
+                        "message": e.to_string(),
+                    }),
+                ))
+                .await;
+            Err(AppError::EngineStore(e))
+        }
+    }
+}
+
+/// Resolve the engine (installing it if needed) and boot a `llama-server`
+/// for `model_id`, waiting until it answers `/health`. Touches neither the
+/// orchestrator nor the registry — the caller (the background boot loop,
+/// or `Runtime::model_activate`) decides what "ready" means for it.
+async fn boot_model_server(
+    global_root: &std::path::Path,
+    model_id: &str,
+    model_store: &ModelStore,
+    events: &Arc<EventBus>,
+) -> Result<Arc<dyn LocalModelServer>> {
+    let catalog = Catalog::embedded().map_err(|e| AppError::Plan(e.to_string()))?;
+    let card = catalog
+        .get(model_id)
+        .ok_or_else(|| AppError::Repo(format!("no catalog model `{model_id}`")))?
+        .clone();
+    let weights = model_store.weights_path(model_id)?;
+    let binary = resolve_or_install_engine(global_root, events).await?;
+    let log_path = global_root
+        .join("logs")
+        .join(format!("llama-{model_id}.log"));
+
+    let rt = LlamaServerRuntime::start(binary, weights, &card, log_path)
+        .await
+        .map_err(AppError::LlamaCpp)?;
+    Ok(Arc::new(rt))
+}
+
+/// The background half of booting a model at `Runtime::open` time:
+/// `model_server_starting` immediately, then `boot_model_server`, then
+/// `rebind` the orchestrator to the result (a real server on success, a
+/// `NoModelRuntime::failed` on failure) and emit `model_server_ready` /
+/// `_failed`. `open()` never awaits this — it returns as soon as the task
+/// is spawned, with the role already pointed at `NoModelRuntime::starting`.
+fn spawn_model_boot(
+    role: Role,
+    model_id: String,
+    global_root: PathBuf,
+    model_store: ModelStore,
+    orchestrator: Arc<Orchestrator>,
+    model_runtimes: Arc<ModelRuntimeRegistry>,
+    events: Arc<EventBus>,
+) {
+    tokio::spawn(async move {
+        let _ = events
+            .append(NewEvent::new(
+                EventKind::ModelServerStarting,
+                serde_json::json!({ "role": role.as_str(), "id": model_id }),
+            ))
+            .await;
+
+        match boot_model_server(&global_root, &model_id, &model_store, &events).await {
+            Ok(handle) => {
+                let port = handle.port();
+                orchestrator.rebind(role, handle.clone() as Arc<dyn ModelRuntime>);
+                if let Some(old) = model_runtimes.swap(role, model_id.clone(), handle).await {
+                    // Drain in place rather than block this task: an
+                    // in-flight generate against the old server still
+                    // holds its own `Arc` clone and finishes regardless.
+                    tokio::spawn(async move { old.shutdown().await });
+                }
+                let _ = events
+                    .append(NewEvent::new(
+                        EventKind::ModelServerReady,
+                        serde_json::json!({ "role": role.as_str(), "id": model_id, "port": port }),
+                    ))
+                    .await;
+            }
+            Err(e) => {
+                orchestrator.rebind(
+                    role,
+                    Arc::new(NoModelRuntime::failed(&model_id, &e.to_string())),
+                );
+                let _ = events
+                    .append(NewEvent::new(
+                        EventKind::ModelServerFailed,
+                        serde_json::json!({
+                            "role": role.as_str(),
+                            "id": model_id,
+                            "code": ErrorCode::code(&e),
+                            "message": e.to_string(),
+                        }),
+                    ))
+                    .await;
+            }
+        }
+    });
 }

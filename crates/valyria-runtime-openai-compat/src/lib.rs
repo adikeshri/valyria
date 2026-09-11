@@ -9,17 +9,22 @@
 //! response parsing (`/v1/chat/completions`, both buffered and SSE),
 //! native tool-call extraction, and mid-request / mid-stream cancellation
 //! are all covered offline against [`MockTransport`]. The concrete
-//! `reqwest`-backed transport is a small isolated impl left out of the
-//! offline build (Phase 9 scope note; see `docs/ROADMAP.md`).
+//! `reqwest`-backed [`ReqwestTransport`] is compiled by the default `http`
+//! feature; turn it off (`--no-default-features`) for a build with no TLS
+//! stack at all.
 
 #![forbid(unsafe_code)]
 
 pub mod runtime;
 pub mod transport;
+#[cfg(feature = "http")]
+pub mod transport_reqwest;
 pub mod wire;
 
 pub use runtime::OpenAiCompatRuntime;
 pub use transport::{HttpError, HttpResult, HttpTransport, MockTransport};
+#[cfg(feature = "http")]
+pub use transport_reqwest::ReqwestTransport;
 
 /// Kept for backwards compatibility with the scaffold; the crate is now
 /// implemented.

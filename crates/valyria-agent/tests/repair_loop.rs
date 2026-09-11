@@ -78,7 +78,7 @@ fn build_driver(backing: &Backing, scenario: Scenario) -> (Arc<TaskManager>, Age
         engine.clone(),
         clock.clone(),
     ));
-    let mut orch = Orchestrator::new();
+    let orch = Orchestrator::new();
     orch.bind(
         Role::PrimaryCoder,
         Arc::new(FakeModelRuntime::from_scenario(scenario)),

@@ -70,6 +70,27 @@ impl TestEnv {
     fn ws_str(&self) -> String {
         self.ws.display().to_string()
     }
+
+    /// A minimal always-finishes fake-model scenario. This suite drives
+    /// CLI/protocol plumbing (task list, task report, the daemon socket),
+    /// not model behavior, so it runs against the fake — real local
+    /// inference (the default since Phase 9) is exercised separately in
+    /// `crates/valyria-app/tests/local_model_e2e.rs`.
+    fn scenario_path(&self) -> String {
+        let path = self._work.path().join("finish_scenario.toml");
+        std::fs::write(
+            &path,
+            r#"
+name = "finish"
+
+[[turns]]
+kind = "finish"
+summary = "done"
+"#,
+        )
+        .unwrap();
+        path.display().to_string()
+    }
 }
 
 fn json(out: &std::process::Output) -> serde_json::Value {
@@ -161,7 +182,15 @@ fn status_and_config_and_model_list_work_through_the_protocol() {
 #[test]
 fn run_then_list_and_report_over_the_embedded_client() {
     let env = setup();
-    let run = env.run(&["run", "add a function", "--workspace", &env.ws_str()]);
+    let scenario = env.scenario_path();
+    let run = env.run(&[
+        "run",
+        "add a function",
+        "--workspace",
+        &env.ws_str(),
+        "--scenario",
+        &scenario,
+    ]);
     assert!(
         run.status.success(),
         "{}",
@@ -230,6 +259,7 @@ fn clean_dry_run_reports_without_deleting() {
 fn daemon_serves_the_same_protocol_over_a_unix_socket() {
     let env = setup();
     let sock = env._work.path().join("valyria.sock");
+    let scenario = env.scenario_path();
 
     let mut daemon = env
         .cmd()
@@ -239,6 +269,8 @@ fn daemon_serves_the_same_protocol_over_a_unix_socket() {
             &env.ws_str(),
             "--socket",
             &sock.display().to_string(),
+            "--scenario",
+            &scenario,
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())

@@ -88,7 +88,9 @@ fn print_usage() {
     eprintln!("    --connect <socket>     talk to a running daemon instead of an embedded runtime");
     eprintln!("    --json                 machine-readable output");
     eprintln!("    --events               (run) also print the raw event stream");
-    eprintln!("    --scenario <file.toml> (run) drive with a fake-model scenario");
+    eprintln!("    --scenario <file.toml> (run) drive with a fake-model scenario instead of");
+    eprintln!("                           real local inference (the default — whatever `model");
+    eprintln!("                           activate` last bound to each role)");
     eprintln!("    --permission-mode <manual|assisted|autonomous>");
     eprintln!("    --plan                 (run) model-authored, validated plan (Phase 8)");
 }
@@ -120,6 +122,13 @@ async fn build_client(parsed: &ParsedArgs) -> Result<Arc<dyn Client>, String> {
     if let Some(path) = &parsed.scenario {
         let scenario = load_scenario(path).map_err(|e| format!("failed to load scenario: {e}"))?;
         config = config.with_scenario(scenario);
+    } else {
+        // No `--scenario` given: drive real local inference. Whatever is
+        // bound in `model_role_binding` boots for real; with nothing
+        // activated yet, `PrimaryCoder` reports a clear "activate a
+        // model" error instead of quietly running the walking-skeleton
+        // fake, which is what would otherwise happen forever.
+        config = config.with_local_models();
     }
     if parsed.plan {
         config = config.with_planning_mode(valyria_app::PlanningMode::ModelAuthored);
@@ -426,6 +435,17 @@ async fn cmd_serve(raw: Vec<String>) -> ExitCode {
     }
     let workspace_path = resolve_workspace(&parsed);
     let mut config = RuntimeConfig::new(workspace_path);
+    config = if let Some(path) = &parsed.scenario {
+        let scenario = match load_scenario(path) {
+            Ok(s) => s,
+            Err(e) => {
+                return print_error_and_fail("serve", &format!("failed to load scenario: {e}"))
+            }
+        };
+        config.with_scenario(scenario)
+    } else {
+        config.with_local_models()
+    };
     if let Some(mode) = parsed.permission_mode {
         config = config.with_permission_mode(mode);
     }

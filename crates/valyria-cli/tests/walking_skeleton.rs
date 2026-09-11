@@ -75,8 +75,40 @@ fn fixture_content(ws: &Path) -> String {
     std::fs::read_to_string(ws.join("src/lib.rs")).unwrap()
 }
 
+/// This suite drives CLI/protocol plumbing (task lifecycle, kill/resume,
+/// pause/cancel racing, permission-ask flows) with the *fake* model, whose
+/// deterministic, near-instant turns are what makes those timing-sensitive
+/// tests possible at all. Since real local inference (the default from
+/// Phase 9 on) took over the implicit no-`--scenario` default, every
+/// `valyria` invocation below must opt back into the fake explicitly — one
+/// process at a time, since a kill/resume/pause/cancel test's whole point
+/// is driving the *same* task from more than one freshly-invoked process,
+/// each of which resolves its own model backend independently. Centralized
+/// here (`valyria`/`spawn_run` both funnel through this) rather than at
+/// every call site, so a call site can't silently regress by omission.
+fn bundled_scenario_path() -> String {
+    PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../valyria-runtime-fake/scenarios/walking_skeleton.toml"
+    ))
+    .display()
+    .to_string()
+}
+
+fn with_default_scenario(args: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    if !args.contains(&"--scenario") {
+        out.push("--scenario".to_string());
+        out.push(bundled_scenario_path());
+    }
+    out
+}
+
 fn valyria(args: &[&str]) -> std::process::Output {
-    cli_command().args(args).output().unwrap()
+    cli_command()
+        .args(with_default_scenario(args))
+        .output()
+        .unwrap()
 }
 
 /// Spawns `valyria run` with stdout piped, reads (and returns) exactly the
@@ -92,7 +124,7 @@ fn spawn_run(
         .arg("add a function")
         .arg("--workspace")
         .arg(workspace)
-        .args(extra_args)
+        .args(with_default_scenario(extra_args))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = cmd.spawn().unwrap();

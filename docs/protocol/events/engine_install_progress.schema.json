@@ -1,0 +1,37 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "EngineInstallProgressPayload",
+  "description": "`engine_install_progress` — an in-flight inference-engine download.",
+  "type": "object",
+  "required": [
+    "component",
+    "downloaded_bytes",
+    "phase",
+    "total_bytes",
+    "version"
+  ],
+  "properties": {
+    "component": {
+      "description": "The engine family, e.g. `llama.cpp`.",
+      "type": "string"
+    },
+    "downloaded_bytes": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "phase": {
+      "description": "`downloading` | `verifying` | `unpacking`.",
+      "type": "string"
+    },
+    "total_bytes": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "version": {
+      "description": "The pinned release identifier being fetched.",
+      "type": "string"
+    }
+  }
+}
