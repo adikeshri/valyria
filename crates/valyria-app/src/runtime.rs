@@ -443,19 +443,24 @@ impl Runtime {
 
         let task = self.tasks.get(task_id).await?;
         // `transition` unconditionally clears `pending_signal` — a cancel
-        // or pause requested against this task while its driver was dead
-        // (nothing running anywhere to notice it) must survive the
-        // Paused -> paused_from transition below, or resuming a task
-        // silently drops a pending cancel and just continues running it.
+        // requested against this task while its driver was dead (nothing
+        // running anywhere to notice it) must survive the Paused ->
+        // paused_from transition below, or resuming a task silently drops
+        // a pending cancel and just continues running it. `PauseRequested`
+        // is deliberately NOT carried the same way: unlike a cancel, a
+        // stale-or-racing pause has no reason to outlive an explicit
+        // resume — re-arming it here would make the driver's very first
+        // pending-signal check (`AgentDriver::run`) re-pause before the
+        // resumed step does any work, so a pause that merely raced with
+        // this resume call would silently turn "resume" into a no-op
+        // instead of continuing the task.
         let pending_signal = task.pending_signal;
         if task.state == AgentState::Paused {
             let target = task.paused_from.ok_or(AppError::NotPaused(task_id))?;
             self.tasks.transition(task_id, target).await?;
         }
-        match pending_signal {
-            Some(ControlSignal::CancelRequested) => self.tasks.request_cancel(task_id).await?,
-            Some(ControlSignal::PauseRequested) => self.tasks.request_pause(task_id).await?,
-            None => {}
+        if pending_signal == Some(ControlSignal::CancelRequested) {
+            self.tasks.request_cancel(task_id).await?;
         }
         let task = self.tasks.get(task_id).await?;
         if !task.state.is_terminal() {
