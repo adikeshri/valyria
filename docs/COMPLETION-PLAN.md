@@ -855,7 +855,7 @@ immediately without a Core change.
 
 ---
 
-### M6 — Model platform  🟡 partially shipped 2026-09-15
+### M6 — Model platform  🟡 partially shipped 2026-09-16
 
 **Already shipped before this milestone (found during M6's own survey,
 recorded here since the plan text above still described it as open work)**
@@ -1217,6 +1217,31 @@ recorded here since the plan text above still described it as open work)**
   A CLI surface shipped alongside it: `valyria catalog-refresh
   <catalog_url> <signature_url>`.
 
+- App UI for both of the above (`valyria-app` — a sibling repo, synced
+  to this pin in its own commit): `CoreClient` gained `model_endpoint_
+  add/remove/list` and `catalog_refresh`, dispatched through `valyria-
+  bridge-host`'s JSON-RPC table and declared in the extension's protocol
+  contract. User-facing as four Command Palette entries (Add/Remove/List
+  Model Endpoint, Refresh Catalog) using an `InputBox`/`QuickPick` prompt
+  sequence — the same shape `modelInstall.ts`'s license-acceptance flow
+  already uses for an occasional admin action, not a new persistent
+  webview form (the "Settings" and "a button" framing this bullet used
+  to have was a guess made before any of the app's actual UI
+  conventions were looked at; Command Palette matches how the app
+  already does *every* comparable action, install included). A real
+  dispatch-reachability test proves the four new RPC methods are
+  genuine match arms, not dead code the extension side merely declares.
+
+  Re-vendoring the protocol schemas for this sync surfaced a real,
+  previously-invisible gap on the app side: two event kinds this repo
+  added back at protocol 1.13.1 (`model_loaded`, `model_evicted` —
+  `ModelPool` admission/eviction) were never wired into the app's TS
+  event-decoder registry, because the app's pin had stayed at 1.13.0
+  the whole time those kinds existed. The app's own protocol test suite
+  caught it immediately once the pin moved far enough to actually
+  exercise it; fixed there with real decoders matching this repo's real
+  payload shapes.
+
 **Deliberately deferred, with reasons**
 
 - Hardware accelerator-variant detection and engine-variant selection
@@ -1224,7 +1249,12 @@ recorded here since the plan text above still described it as open work)**
   only has an Apple-Silicon heuristic and macOS-only GPU enumeration) —
   needed before M2's "chosen from `valyria-hardware`, fallback recorded"
   can mean anything on Linux/Windows, and CUDA/ROCm can't be verified at
-  all without that hardware.
+  all without that hardware. Deliberately not attempted this session:
+  this machine is Apple Silicon macOS and has no way to test CUDA/ROCm/
+  Vulkan detection against real hardware, and every other M6 chunk this
+  session shipped was validated against something real running on this
+  machine — writing unverifiable detection code for hardware that can't
+  be checked was judged worse than leaving it honestly deferred.
 - An actual canonical catalog-hosting/signing pipeline (where a
   production `catalog.json` + its `.sig` would be published, who holds
   the real private key, how often it's refreshed) — the client-side
@@ -1239,9 +1269,8 @@ recorded here since the plan text above still described it as open work)**
   than waiting for the rest of 1.18 to be ready together; the
   event-kind half of 1.18 shipped earlier still, as 1.13.1, once the
   pool wiring needed it.
-- App UI (backend/pool-memory-meter in the Models panel, endpoints under
-  Settings, a catalog-refresh button): waits on the protocol surface
-  above existing to display.
+- A pool-memory-meter in the Models panel: waits on `pool_status`
+  (protocol 1.18's remaining piece, above) to have anything to display.
 
 **Exit (partial):**
 - Forced memory pressure evicts the embedder and not the coder — proven
