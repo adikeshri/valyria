@@ -18,7 +18,9 @@ use valyria_memory::{MemoryStore, RetrievalRequest};
 use valyria_model::{GenerateRequest, Message, ModelRuntime, SamplingParams};
 use valyria_model_registry::{score_card_for_role, CardScore, Catalog, ModelCard, ModelRole};
 use valyria_model_store::{HttpFetcher, ModelStore, NullProber};
-use valyria_orchestrator::{NoModelRuntime, Role, RoleRouter};
+use valyria_orchestrator::{
+    EvictReason, ModelPool, NoModelRuntime, PoolError, PoolEvent, Role, RoleRouter,
+};
 use valyria_permissions::PermissionEngine;
 use valyria_plan::{PlanRevision, PlanStore, RollbackError, RollbackReport, StoredArtifact};
 use valyria_runtime_fake::{FakeModelRuntime, Scenario};
@@ -243,6 +245,15 @@ pub struct Runtime {
     /// writes, matching the pre-Phase-9 behaviour every existing test
     /// depends on.
     use_fake_model: bool,
+    /// M6: the memory budget every real model activation is admitted
+    /// against before its server boots — `None` for the `Fake` backend
+    /// (matching `model_runtimes`, nothing here is ever touched). Sized
+    /// once, at `open()`, from `valyria_hardware::probe()`'s measured
+    /// available RAM; not re-probed live (a machine's available RAM
+    /// shifts constantly from unrelated processes, and re-sizing the
+    /// budget under an admission already in flight would make eviction
+    /// decisions non-reproducible).
+    pool: Option<Arc<tokio::sync::Mutex<ModelPool>>>,
 }
 
 impl Runtime {
@@ -316,7 +327,17 @@ impl Runtime {
             .await?;
 
         let model_runtimes = Arc::new(ModelRuntimeRegistry::new());
+        let mut pool: Option<Arc<tokio::sync::Mutex<ModelPool>>> = None;
         if matches!(config.model_backend, ModelBackend::Local) {
+            // M6: sized from measured available RAM, reserving headroom for
+            // the OS and this process's own working set rather than
+            // claiming every last byte as loadable — 80% is a documented,
+            // simple heuristic, not a hardware-verified ceiling.
+            let hw = valyria_hardware::probe();
+            let budget_bytes = (hw.ram_available_bytes as f64 * 0.8) as u64;
+            let model_pool = Arc::new(tokio::sync::Mutex::new(ModelPool::new(budget_bytes)));
+            pool = Some(model_pool.clone());
+
             let model_store = ModelStore::new(global.root());
             let bindings = global.models().role_bindings().await?;
             let mut primary_bound = false;
@@ -341,9 +362,12 @@ impl Runtime {
                     model_id,
                     global.root().to_path_buf(),
                     model_store.clone(),
-                    orchestrator.clone(),
-                    model_runtimes.clone(),
-                    events.clone(),
+                    ModelBootHandles {
+                        orchestrator: orchestrator.clone(),
+                        model_runtimes: model_runtimes.clone(),
+                        pool: model_pool.clone(),
+                        events: events.clone(),
+                    },
                 );
             }
             if !primary_bound {
@@ -432,6 +456,7 @@ impl Runtime {
             orchestrator,
             model_runtimes,
             use_fake_model,
+            pool,
         })
     }
 
@@ -1283,6 +1308,47 @@ impl Runtime {
             return Ok(());
         }
 
+        let model_store = self.model_store();
+        let Some(pool) = &self.pool else {
+            // Invariant: `pool` is `Some` exactly when `!use_fake_model`
+            // (both follow `config.model_backend == Local`), and the
+            // fake-backend case already returned above.
+            return Err(AppError::ModelPool(
+                "missing for a real-backend runtime".into(),
+            ));
+        };
+        let footprint_bytes = model_store.manifest(id)?.size_bytes;
+        if let Err(e) = admit_to_pool(
+            pool,
+            &self.model_runtimes,
+            &self.orchestrator,
+            &self.events,
+            id,
+            role,
+            footprint_bytes,
+        )
+        .await
+        {
+            self.orchestrator.bind_single(
+                role,
+                id.to_string(),
+                Arc::new(NoModelRuntime::failed(id, &e.to_string())),
+            );
+            let _ = self
+                .events
+                .append(NewEvent::new(
+                    EventKind::ModelServerFailed,
+                    serde_json::json!({
+                        "role": role.as_str(),
+                        "id": id,
+                        "code": "model_pool.wont_fit",
+                        "message": e.to_string(),
+                    }),
+                ))
+                .await;
+            return Err(AppError::ModelPool(e.to_string()));
+        }
+
         let _ = self
             .events
             .append(NewEvent::new(
@@ -1291,7 +1357,6 @@ impl Runtime {
             ))
             .await;
 
-        let model_store = self.model_store();
         match boot_model_server(self.global.root(), id, &model_store, &self.events).await {
             Ok(handle) => {
                 let port = handle.port();
@@ -1582,6 +1647,83 @@ impl valyria_model_store::Prober for ServerProber {
     }
 }
 
+/// M6: admits `id`/`role`/`footprint_bytes` into `pool`'s memory budget
+/// and projects whatever the pool decided — a `resource_pressure` notice,
+/// one `model_evicted` per victim (actually shutting down that victim's
+/// live server and rebinding its role[s] to `NoModelRuntime::evicted`
+/// first — this function's caller, in turn, boots the *new* server only
+/// after this returns `Ok`, so a role is never left pointing at a server
+/// that already stopped answering), and a final `model_loaded` — as real
+/// protocol events. `Err(PoolError::WontFit)` means the caller must not
+/// boot the server at all; nothing is evicted or rebound in that case
+/// (`ModelPool::admit` never partially applies).
+async fn admit_to_pool(
+    pool: &tokio::sync::Mutex<ModelPool>,
+    model_runtimes: &ModelRuntimeRegistry,
+    orchestrator: &RoleRouter,
+    events: &EventBus,
+    id: &str,
+    role: Role,
+    footprint_bytes: u64,
+) -> std::result::Result<(), PoolError> {
+    let pool_events = pool.lock().await.admit(id, role, footprint_bytes)?;
+    for ev in pool_events {
+        match ev {
+            PoolEvent::ResourcePressure {
+                requested_bytes,
+                budget_bytes,
+            } => {
+                let _ = events
+                    .append(NewEvent::new(
+                        EventKind::ResourcePressure,
+                        serde_json::json!({
+                            "requested_bytes": requested_bytes,
+                            "budget_bytes": budget_bytes,
+                        }),
+                    ))
+                    .await;
+            }
+            PoolEvent::Evicted {
+                id: victim_id,
+                reason,
+            } => {
+                let reason_str = match reason {
+                    EvictReason::MemoryPressure => "memory_pressure",
+                    EvictReason::Manual => "manual",
+                };
+                for victim_role in model_runtimes.roles_for_model(&victim_id).await {
+                    if let Some(handle) = model_runtimes.take(victim_role).await {
+                        orchestrator.bind_single(
+                            victim_role,
+                            victim_id.clone(),
+                            Arc::new(NoModelRuntime::evicted(&victim_id)),
+                        );
+                        tokio::spawn(async move { handle.shutdown().await });
+                    }
+                }
+                let _ = events
+                    .append(NewEvent::new(
+                        EventKind::ModelEvicted,
+                        serde_json::json!({ "id": victim_id, "reason": reason_str }),
+                    ))
+                    .await;
+            }
+            PoolEvent::Loaded {
+                id,
+                footprint_bytes,
+            } => {
+                let _ = events
+                    .append(NewEvent::new(
+                        EventKind::ModelLoaded,
+                        serde_json::json!({ "id": id, "footprint_bytes": footprint_bytes }),
+                    ))
+                    .await;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Resolve the inference engine, downloading and unpacking it the first
 /// time (emitting `engine_install_progress` / `_completed` / `_failed`) if
 /// [`valyria_engine_store::EngineStore::resolve`] comes back empty.
@@ -1747,16 +1889,84 @@ async fn boot_model_server(
 /// `NoModelRuntime::failed` on failure) and emit `model_server_ready` /
 /// `_failed`. `open()` never awaits this — it returns as soon as the task
 /// is spawned, with the role already pointed at `NoModelRuntime::starting`.
+/// The shared handles every model-boot path (`spawn_model_boot`,
+/// `model_activate`) rebinds/notifies through — bundled into one struct so
+/// passing them around stays a single argument rather than growing the
+/// parameter list every time a new piece of shared state joins them.
+#[derive(Clone)]
+struct ModelBootHandles {
+    orchestrator: Arc<RoleRouter>,
+    model_runtimes: Arc<ModelRuntimeRegistry>,
+    pool: Arc<tokio::sync::Mutex<ModelPool>>,
+    events: Arc<EventBus>,
+}
+
 fn spawn_model_boot(
     role: Role,
     model_id: String,
     global_root: PathBuf,
     model_store: ModelStore,
-    orchestrator: Arc<RoleRouter>,
-    model_runtimes: Arc<ModelRuntimeRegistry>,
-    events: Arc<EventBus>,
+    handles: ModelBootHandles,
 ) {
+    let ModelBootHandles {
+        orchestrator,
+        model_runtimes,
+        pool,
+        events,
+    } = handles;
     tokio::spawn(async move {
+        let footprint_bytes = match model_store.manifest(&model_id) {
+            Ok(m) => m.size_bytes,
+            Err(e) => {
+                orchestrator.bind_single(
+                    role,
+                    model_id.clone(),
+                    Arc::new(NoModelRuntime::failed(&model_id, &e.to_string())),
+                );
+                let _ = events
+                    .append(NewEvent::new(
+                        EventKind::ModelServerFailed,
+                        serde_json::json!({
+                            "role": role.as_str(),
+                            "id": model_id,
+                            "code": ErrorCode::code(&e),
+                            "message": e.to_string(),
+                        }),
+                    ))
+                    .await;
+                return;
+            }
+        };
+        if let Err(e) = admit_to_pool(
+            &pool,
+            &model_runtimes,
+            &orchestrator,
+            &events,
+            &model_id,
+            role,
+            footprint_bytes,
+        )
+        .await
+        {
+            orchestrator.bind_single(
+                role,
+                model_id.clone(),
+                Arc::new(NoModelRuntime::failed(&model_id, &e.to_string())),
+            );
+            let _ = events
+                .append(NewEvent::new(
+                    EventKind::ModelServerFailed,
+                    serde_json::json!({
+                        "role": role.as_str(),
+                        "id": model_id,
+                        "code": "model_pool.wont_fit",
+                        "message": e.to_string(),
+                    }),
+                ))
+                .await;
+            return;
+        }
+
         let _ = events
             .append(NewEvent::new(
                 EventKind::ModelServerStarting,
@@ -1805,4 +2015,212 @@ fn spawn_model_boot(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod admit_to_pool_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use futures::stream::{self, BoxStream, StreamExt};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use valyria_model::{Capabilities, Chunk, Completion, Health, ModelError};
+
+    struct FakeServer {
+        id: &'static str,
+        shutdowns: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ModelRuntime for FakeServer {
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                context_length: 4096,
+                supports_native_tools: true,
+                supports_grammar: false,
+                supports_streaming: false,
+            }
+        }
+        async fn health(&self) -> Health {
+            Health::Healthy
+        }
+        fn count_tokens(&self, text: &str) -> usize {
+            text.len()
+        }
+        async fn generate(
+            &self,
+            _req: GenerateRequest,
+            _cancel: CancellationToken,
+        ) -> std::result::Result<Completion, ModelError> {
+            unimplemented!()
+        }
+        fn stream(
+            &self,
+            _req: GenerateRequest,
+            _cancel: CancellationToken,
+        ) -> BoxStream<'static, std::result::Result<Chunk, ModelError>> {
+            stream::empty().boxed()
+        }
+    }
+
+    #[async_trait]
+    impl LocalModelServer for FakeServer {
+        async fn shutdown(&self) {
+            self.shutdowns.fetch_add(1, Ordering::SeqCst);
+        }
+        fn model_id(&self) -> &str {
+            self.id
+        }
+        fn port(&self) -> u16 {
+            0
+        }
+    }
+
+    fn bus() -> Arc<EventBus> {
+        let store = Arc::new(Store::open_in_memory(valyria_events::MIGRATIONS).unwrap());
+        Arc::new(EventBus::new(store))
+    }
+
+    const GB: u64 = 1_000_000_000;
+
+    /// The core M6 exit criterion at the wiring level (`ModelPool` itself
+    /// already proves the algorithm; this proves the *plumbing* around
+    /// it): admitting a model that doesn't fit alongside an already-
+    /// resident higher-priority one evicts the resident's *real* server —
+    /// `shutdown` actually gets called, the role is rebound away from the
+    /// dead handle, and both a `resource_pressure` and a `model_evicted`
+    /// event land on the real event stream — not just a bookkeeping
+    /// change inside `ModelPool`.
+    #[tokio::test]
+    async fn eviction_shuts_down_the_real_server_and_rebinds_the_role() {
+        let pool = tokio::sync::Mutex::new(ModelPool::new(8 * GB));
+        let registry = ModelRuntimeRegistry::new();
+        let orchestrator = RoleRouter::new();
+        let events = bus();
+
+        let embed_shutdowns = Arc::new(AtomicUsize::new(0));
+        let embed_handle = Arc::new(FakeServer {
+            id: "embed",
+            shutdowns: embed_shutdowns.clone(),
+        });
+        orchestrator.bind_single(Role::Embedder, "embed".to_string(), embed_handle.clone());
+        registry
+            .swap(Role::Embedder, "embed".to_string(), embed_handle)
+            .await;
+        admit_to_pool(
+            &pool,
+            &registry,
+            &orchestrator,
+            &events,
+            "embed",
+            Role::Embedder,
+            6 * GB,
+        )
+        .await
+        .unwrap();
+        assert!(registry
+            .roles_for_model("embed")
+            .await
+            .contains(&Role::Embedder));
+
+        // A coder needs 6 GB too; used is 6, budget 8 → the embedder (lower
+        // priority) must go to make room.
+        admit_to_pool(
+            &pool,
+            &registry,
+            &orchestrator,
+            &events,
+            "coder",
+            Role::PrimaryCoder,
+            6 * GB,
+        )
+        .await
+        .unwrap();
+
+        // The real server was actually told to shut down — not just
+        // dropped from ModelPool's own bookkeeping.
+        assert_eq!(embed_shutdowns.load(Ordering::SeqCst), 1);
+        // The registry no longer thinks the embedder role is served by it.
+        assert!(registry.roles_for_model("embed").await.is_empty());
+        // The orchestrator's binding for the evicted role was replaced —
+        // health now honestly reports unavailable rather than pointing at
+        // a server that already stopped listening.
+        let health = orchestrator
+            .generate(
+                Role::Embedder,
+                GenerateRequest::new(vec![]),
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(health.is_err(), "{health:?}");
+
+        let recorded = events
+            .replay_since(valyria_events::Seq::ZERO)
+            .await
+            .unwrap();
+        let kinds: Vec<_> = recorded.iter().map(|e| e.kind).collect();
+        assert!(kinds.contains(&EventKind::ResourcePressure), "{kinds:?}");
+        assert!(kinds.contains(&EventKind::ModelEvicted), "{kinds:?}");
+        assert!(kinds.contains(&EventKind::ModelLoaded), "{kinds:?}");
+
+        let evicted_payload = recorded
+            .iter()
+            .find(|e| e.kind == EventKind::ModelEvicted)
+            .unwrap();
+        assert_eq!(evicted_payload.payload["id"], "embed");
+        assert_eq!(evicted_payload.payload["reason"], "memory_pressure");
+    }
+
+    /// A model too big for the whole budget is refused *before* anything
+    /// is evicted or rebound — the caller never boots a server for it.
+    #[tokio::test]
+    async fn wont_fit_leaves_residents_and_bindings_untouched() {
+        let pool = tokio::sync::Mutex::new(ModelPool::new(4 * GB));
+        let registry = ModelRuntimeRegistry::new();
+        let orchestrator = RoleRouter::new();
+        let events = bus();
+
+        let coder_shutdowns = Arc::new(AtomicUsize::new(0));
+        let coder_handle = Arc::new(FakeServer {
+            id: "coder",
+            shutdowns: coder_shutdowns.clone(),
+        });
+        orchestrator.bind_single(
+            Role::PrimaryCoder,
+            "coder".to_string(),
+            coder_handle.clone(),
+        );
+        registry
+            .swap(Role::PrimaryCoder, "coder".to_string(), coder_handle)
+            .await;
+        admit_to_pool(
+            &pool,
+            &registry,
+            &orchestrator,
+            &events,
+            "coder",
+            Role::PrimaryCoder,
+            3 * GB,
+        )
+        .await
+        .unwrap();
+
+        let err = admit_to_pool(
+            &pool,
+            &registry,
+            &orchestrator,
+            &events,
+            "huge",
+            Role::Embedder,
+            10 * GB,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, PoolError::WontFit { .. }));
+
+        assert_eq!(coder_shutdowns.load(Ordering::SeqCst), 0);
+        assert!(registry
+            .roles_for_model("coder")
+            .await
+            .contains(&Role::PrimaryCoder));
+    }
 }

@@ -1,0 +1,20 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ModelLoadedPayload",
+  "description": "`model_loaded` — a model was admitted into the `ModelPool`'s memory budget (M6).",
+  "type": "object",
+  "required": [
+    "footprint_bytes",
+    "id"
+  ],
+  "properties": {
+    "footprint_bytes": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "id": {
+      "type": "string"
+    }
+  }
+}

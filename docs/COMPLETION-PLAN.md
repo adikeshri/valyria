@@ -855,48 +855,112 @@ immediately without a Core change.
 
 ---
 
-### M6 — Model platform, complete
+### M6 — Model platform  🟡 partially shipped 2026-09-15
 
-**Core**
-- M1: `valyria-runtime-mlx`, a managed `mlx_lm.server`.
-  - Engine store provisions an isolated Python env under
-    `~/.valyria/engines/mlx/` (pinned versions, hash-verified wheels).
-  - Strict handshake + health; reuses `OpenAiCompatRuntime` for the wire.
-  - Catalog carries MLX variants; hardware selection prefers MLX on Apple
-    silicon when the probe shows it faster.
-- M2: engine variants (Metal, CUDA, ROCm, Vulkan, CPU) chosen from
-  `valyria-hardware`, verified by the probe, with fallback to CPU recorded,
-  not silent.
-- M3: `model_endpoint_add { url, api_key_ref? }` for existing local servers.
-  - The policy floor allows loopback/unix only unless network policy permits.
-  - Endpoints are probed with the same ladder and bindable to roles.
-- M4: signed catalog refresh (ed25519, key compiled in) with embedded
-  fallback; a refreshed catalog never downgrades a pinned hash.
-- M5:
-  - Pool admission uses the probe's measured RSS.
-  - `ResourcePressure` / `Evicted` / `Loaded` are projected as protocol
-    events.
-  - 16 GB unified-memory target: coder + embedder coexist (asserted with the
-    pool's budget model).
-- Role bindings auto-derived for every role from installed models via
-  `RoleBinding::derive`, with user overrides in `global.db`.
+**Already shipped before this milestone (found during M6's own survey,
+recorded here since the plan text above still described it as open work)**
 
-**Protocol 1.18** — `model_endpoint_add/remove/list`, `catalog_refresh`,
-`pool_status`; `model_pool_*` events; `ModelSummaryWire.backend`.
+- M1's llama.cpp half, in full: `valyria-runtime-llamacpp` really spawns
+  and health-checks a `llama-server` subprocess and wraps it in
+  `valyria-runtime-openai-compat`'s `OpenAiCompatRuntime<ReqwestTransport>`
+  — the real, `reqwest`-backed wire client, not a mock. `valyria-engine-store`
+  really downloads, blake3-verifies, and unpacks the engine binary under
+  `~/.valyria/engines/`, including a real-network `#[ignore]`d test that
+  installs and runs a genuine release. `valyria-app::Runtime` boots this
+  for real on `model_activate` and at startup, with real hot-swap
+  (`ModelRuntimeRegistry::swap`) and honest failure semantics
+  (`NoModelRuntime::failed`) — not a fake runtime standing in.
+- The `RoleBinding::derive` auto-derivation *algorithm* itself
+  (`valyria-model-registry::select`): scores every installed model against
+  a role using `valyria_hardware::fits`, picks the best-fitting one as
+  primary and every other fitting one as ordered fallback. Not yet
+  *wired* to run automatically (see deferred list).
+- `ModelPool`'s admission/LRU-eviction *algorithm* (`valyria-orchestrator::
+  pool`): priority-ordered eviction, tested against exactly the exit
+  criteria below, in isolation. Not yet wired into anything that boots a
+  real server — see the "Shipped" entry below, which is what closed that
+  gap.
 
-**App** (keeping the product decision from app commit `422be82`: no per-role
-picker in the main flow)
-- Models panel shows backend (llama.cpp Metal/CUDA/…, MLX, endpoint) and a
-  pool memory meter.
-- Endpoints and role overrides live under Settings → Models (advanced).
-- Catalog refresh button.
+**Shipped**
 
-**Exit:**
-- The seeded-bug suite completes on **three adapters** (llama.cpp, MLX,
-  openai-compat endpoint) on real hardware in the nightly real-model job
-  (PLAN §6 criterion 4).
-- Forced memory pressure evicts the embedder and not the coder, visible in
-  the app.
+- `ModelPool` wired into `valyria-app`'s real model-activation path — the
+  actual gap the survey above found, and the most structurally important
+  piece of M6 to close first, since everything else (MLX, endpoints,
+  hardware variants) ultimately boots through the same admission
+  chokepoint. `Runtime::open` sizes one pool per runtime from
+  `valyria_hardware::probe()`'s measured available RAM (80% of it —
+  documented headroom for the OS and the process's own working set, not a
+  hardware-verified ceiling) when the backend is `Local`; both the
+  background boot loop (`spawn_model_boot`) and explicit `model_activate`
+  call a new shared `admit_to_pool` before booting a server, using the
+  installed weights file's on-disk size (`Manifest.size_bytes`) as the
+  footprint. A `PoolError::WontFit` fails the activation cleanly *before*
+  anything is evicted or a server is booted (`ModelPool::admit` never
+  partially applies). An eviction actually shuts down the victim's *real*
+  server (`ModelRuntimeRegistry::take` + `.shutdown()`) and rebinds its
+  role(s) away from the now-dead handle to a new `NoModelRuntime::evicted`
+  placeholder — a role is never left pointing at a server that already
+  stopped listening.
+
+  Two new event kinds carry this live: `model_loaded` / `model_evicted`
+  (protocol 1.13.1, patch bump — new event kinds/payloads only, no new
+  request/response variants), plus the first real emission ever of
+  `resource_pressure` (added to `EventKind` in an earlier phase but never
+  actually fired by anything until now). All three got real payload
+  contracts in `event_payloads.rs`/`docs/protocol/events/`.
+
+  Proven with two tests exercising the wiring function directly (not just
+  `ModelPool`'s own already-thorough unit suite): eviction actually calls
+  `shutdown()` on a real (fake-but-real-trait-object) server and the
+  orchestrator's binding for the evicted role afterward genuinely fails a
+  `generate` call rather than silently pointing at nothing; a
+  too-big-to-fit admission leaves every existing resident and binding
+  completely untouched.
+
+**Deliberately deferred, with reasons**
+
+- MLX runtime adapter (`valyria-runtime-mlx`, still a bare stub crate):
+  genuinely new work — spawn `mlx_lm.server` the same way `LlamaServer`
+  spawns `llama-server`, wrap it in the same `OpenAiCompatRuntime`. This
+  machine has Apple Silicon and could exercise it for real, but it's a
+  meaningfully-sized standalone chunk (process supervision + an
+  `mlx_lm`-specific Python env under `~/.valyria/engines/mlx/`, pinned
+  versions, hash-verified wheels) on top of the pool-wiring work above,
+  not a small addition to it.
+- Hardware accelerator-variant detection and engine-variant selection
+  (Metal/CUDA/ROCm/Vulkan capability flags, `valyria-hardware` currently
+  only has an Apple-Silicon heuristic and macOS-only GPU enumeration) —
+  needed before M2's "chosen from `valyria-hardware`, fallback recorded"
+  can mean anything on Linux/Windows, and CUDA/ROCm can't be verified at
+  all without that hardware.
+- `model_endpoint_add/remove/list` for existing local OpenAI-compatible
+  servers, and role bindings auto-*wiring* at startup (the `derive`
+  algorithm exists; nothing calls it automatically yet, nor persists a
+  user override distinctly from an auto-derived binding in `global.db`).
+- Signed catalog refresh (ed25519): no crypto exists anywhere in
+  `valyria-model-registry`/`valyria-engine-store` yet. The mechanism
+  (verify a detached signature against a compiled-in public key before
+  accepting a refreshed catalog, never downgrade a pinned hash) can be
+  built and tested against a locally-generated test keypair without
+  needing the real production signing key — genuinely a separate chunk,
+  not started this pass.
+- Protocol 1.18's *request* additions (`model_endpoint_add/remove/list`,
+  `catalog_refresh`, `pool_status`, `ModelSummaryWire.backend`): nothing
+  to wrap yet until endpoints and catalog signing exist — the event-kind
+  half of 1.18 shipped early, as 1.13.1, once the pool wiring needed it.
+- App UI (backend/pool-memory-meter in the Models panel, endpoints under
+  Settings, a catalog-refresh button): waits on the protocol surface
+  above existing to display.
+
+**Exit (partial):**
+- Forced memory pressure evicts the embedder and not the coder — proven
+  at the wiring level (`eviction_shuts_down_the_real_server_and_rebinds_
+  the_role`); `ModelPool`'s own suite already proved the underlying
+  priority/LRU algorithm exhaustively.
+- Deferred: the seeded-bug suite completing on three real adapters
+  (llama.cpp already does via the existing `local_model_e2e.rs`
+  end-to-end test; MLX and an openai-compat endpoint don't exist yet to
+  test against) — needs MLX and endpoint support above first.
 
 ---
 

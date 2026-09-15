@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ModelEvictedPayload",
+  "description": "`model_evicted` — a model was unloaded from the `ModelPool` (M6).",
+  "type": "object",
+  "required": [
+    "id",
+    "reason"
+  ],
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "reason": {
+      "description": "`memory_pressure` | `manual`.",
+      "type": "string"
+    }
+  }
+}

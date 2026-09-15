@@ -72,6 +72,13 @@ pub enum AppError {
     LicenseNotAccepted(String),
     #[error("model {0:?} is already being installed")]
     InstallInFlight(String),
+    /// M6: `ModelPool::admit` refused (`PoolError::WontFit`) — the model
+    /// needs more memory than the pool's budget even with everything
+    /// evictable actually evicted. Not a `#[from]`: `PoolError` doesn't
+    /// implement `ErrorCode`, and this carries its own stable code rather
+    /// than flattening to a generic one.
+    #[error("model pool: {0}")]
+    ModelPool(String),
 }
 
 impl ErrorCode for AppError {
@@ -104,6 +111,7 @@ impl ErrorCode for AppError {
             AppError::Repo(_) => "app.repo",
             AppError::LicenseNotAccepted(_) => "model.license_not_accepted",
             AppError::InstallInFlight(_) => "model.install_in_flight",
+            AppError::ModelPool(_) => "model_pool.wont_fit",
         }
     }
 
@@ -136,6 +144,7 @@ impl ErrorCode for AppError {
             AppError::Repo(_) => false,
             AppError::LicenseNotAccepted(_) => false,
             AppError::InstallInFlight(_) => false,
+            AppError::ModelPool(_) => false,
         }
     }
 }

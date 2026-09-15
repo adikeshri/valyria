@@ -32,6 +32,17 @@ impl NoModelRuntime {
         }
     }
 
+    /// The real server for `model_id` was unloaded by the `ModelPool` to
+    /// free memory for a higher-priority admission (M6).
+    pub fn evicted(model_id: &str) -> Self {
+        Self {
+            reason: format!(
+                "model `{model_id}` was unloaded to free memory for a higher-priority \
+                 model — reactivate it from the Model Manager"
+            ),
+        }
+    }
+
     /// No model is bound to this role at all (never activated, or just
     /// removed).
     pub fn none_bound() -> Self {
@@ -136,6 +147,18 @@ mod tests {
             rt.count_tokens("hello world"),
             HeuristicTokenCounter.count("hello world")
         );
+    }
+
+    #[tokio::test]
+    async fn evicted_reason_names_the_model_and_points_at_the_model_manager() {
+        let rt = NoModelRuntime::evicted("qwen-1.5b");
+        match rt.health().await {
+            Health::Unavailable { reason } => {
+                assert!(reason.contains("qwen-1.5b"));
+                assert!(reason.to_lowercase().contains("model manager"));
+            }
+            other => panic!("expected Unavailable, got {other:?}"),
+        }
     }
 
     #[test]

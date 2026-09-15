@@ -33,3 +33,5 @@ model_server_stopped
 subtask_started
 subtask_completed
 artifact_published
+model_loaded
+model_evicted

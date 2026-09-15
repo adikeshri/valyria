@@ -1,0 +1,22 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ResourcePressurePayload",
+  "description": "`resource_pressure` — admitting a model required evicting another (M6, `valyria-orchestrator::pool::PoolEvent::ResourcePressure`). Always immediately followed in the same admission by one or more `model_evicted` events and then a `model_loaded` for the model that triggered it.",
+  "type": "object",
+  "required": [
+    "budget_bytes",
+    "requested_bytes"
+  ],
+  "properties": {
+    "budget_bytes": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "requested_bytes": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  }
+}
