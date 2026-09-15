@@ -17,7 +17,7 @@ use valyria_model::{
     Capabilities, Chunk, Completion, GenerateRequest, Health, ModelError, ModelRuntime,
     Role as MessageRole,
 };
-use valyria_orchestrator::{Orchestrator, Role};
+use valyria_orchestrator::{Role, RoleRouter};
 use valyria_permissions::PermissionEngine;
 use valyria_runtime_fake::{FakeModelRuntime, Scenario, ScriptedTurn};
 use valyria_sandbox::{detect_platform_launcher, ProcessLauncher, SandboxProfile};
@@ -116,8 +116,8 @@ async fn implementing_turns_carry_a_system_prompt_tools_and_replay_tool_history(
         }),
         seen: seen.clone(),
     };
-    let orch = Orchestrator::new();
-    orch.bind(Role::PrimaryCoder, Arc::new(capturing));
+    let orch = RoleRouter::new();
+    orch.bind_single(Role::PrimaryCoder, "fake", Arc::new(capturing));
     let orchestrator = Arc::new(orch);
 
     let context = Arc::new(ContextAssembler::new(tool_runtime.clone()));

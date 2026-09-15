@@ -16,7 +16,7 @@ use valyria_agent::{AgentDriver, PlanningMode};
 use valyria_context::ContextAssembler;
 use valyria_events::{EventBus, EventKind, Seq};
 use valyria_ledger::Ledger;
-use valyria_orchestrator::{Orchestrator, Role};
+use valyria_orchestrator::{Role, RoleRouter};
 use valyria_permissions::PermissionEngine;
 use valyria_plan::{PlanStore, RollbackError};
 use valyria_runtime_fake::{FakeModelRuntime, Scenario, ScriptedTurn};
@@ -83,9 +83,10 @@ fn build_driver(
         engine.clone(),
         clock.clone(),
     ));
-    let orch = Orchestrator::new();
-    orch.bind(
+    let orch = RoleRouter::new();
+    orch.bind_single(
         Role::PrimaryCoder,
+        "fake",
         Arc::new(FakeModelRuntime::from_scenario(scenario)),
     );
     let context = Arc::new(ContextAssembler::new(tools.clone()));

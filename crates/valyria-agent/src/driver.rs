@@ -35,7 +35,7 @@ use valyria_context::{
 use valyria_instructions::Discovery;
 use valyria_ledger::Ledger;
 use valyria_model::{GenerateRequest, Message, ToolSpec};
-use valyria_orchestrator::{Orchestrator, Role};
+use valyria_orchestrator::{Role, RoleRouter};
 use valyria_permissions::{GrantScope, PermissionEngine};
 use valyria_plan::PlanStore;
 use valyria_sandbox::{ProcessLauncher, SandboxProfile};
@@ -65,7 +65,7 @@ const MAX_REPAIR_ATTEMPTS: u32 = 4;
 /// Bounded reformat-retries `generate_action` gets before giving up on a
 /// model that won't produce a parseable action — matches the value every
 /// existing `generate_action` test in `valyria-orchestrator` already uses.
-const MAX_REFORMAT_RETRIES: u32 = 2;
+pub(crate) const MAX_REFORMAT_RETRIES: u32 = 2;
 
 /// Cap on plan-repair rounds before `Planning` fails to the user (§4.25:
 /// "bounded repair attempts").
@@ -131,7 +131,7 @@ struct VerifyState {
 pub struct AgentDriver {
     pub(crate) tasks: Arc<TaskManager>,
     pub(crate) tools: Arc<ToolRuntime>,
-    pub(crate) orchestrator: Arc<Orchestrator>,
+    pub(crate) orchestrator: Arc<RoleRouter>,
     pub(crate) context: Arc<ContextAssembler>,
     pub(crate) ledger: Arc<Ledger>,
     pub(crate) permissions: Arc<PermissionEngine>,
@@ -147,7 +147,7 @@ pub struct AgentDriver {
     /// Every tool the model may call this turn — computed once from the
     /// registry `tools` was built with; the registry is static after
     /// construction so there's nothing to keep in sync.
-    tool_specs: Vec<ToolSpec>,
+    pub(crate) tool_specs: Vec<ToolSpec>,
 }
 
 impl AgentDriver {
@@ -155,7 +155,7 @@ impl AgentDriver {
     pub fn new(
         tasks: Arc<TaskManager>,
         tools: Arc<ToolRuntime>,
-        orchestrator: Arc<Orchestrator>,
+        orchestrator: Arc<RoleRouter>,
         context: Arc<ContextAssembler>,
         ledger: Arc<Ledger>,
         permissions: Arc<PermissionEngine>,
@@ -440,19 +440,16 @@ impl AgentDriver {
             )
             .await?;
 
+        let role = self.model_role(self.is_role_escalated(task_id));
         let messages = self.build_conversation(task_id).await?;
         let request = GenerateRequest::new(messages)
             .with_tools(self.tool_specs.clone())
             .with_turn_hint(turn_index);
-        let completion = self
+        let routed = self
             .orchestrator
-            .generate_action(
-                Role::PrimaryCoder,
-                request,
-                cancel.child(),
-                MAX_REFORMAT_RETRIES,
-            )
+            .generate_action(role, request, cancel.child(), MAX_REFORMAT_RETRIES)
             .await?;
+        let completion = routed.completion;
 
         self.tasks
             .append_journal(
@@ -464,6 +461,8 @@ impl AgentDriver {
                     payload: serde_json::json!({
                         "finish_reason": format!("{:?}", completion.finish_reason),
                         "text": completion.text,
+                        "role": role.as_str(),
+                        "model_id": routed.model_id,
                     }),
                 },
             )
@@ -821,12 +820,13 @@ impl AgentDriver {
             .as_ref()
             .map(|d| d.fingerprint())
             .unwrap_or_default();
-        // Only `PrimaryCoder` is bound in Phase 7; `SwitchRole` still
-        // advances the escalation ladder in `RepairLedger::decide` (next
-        // stop: the user) even though the role binding is unchanged until
-        // a `FastCoder`/`PrimaryCoder` split lands with real models.
-        let role = Role::PrimaryCoder;
-        let _ = vs.repair_role_primary;
+        // `SwitchRole` (M1) escalates a repair turn to `PrimaryCoder` the
+        // same way the main loop does — `model_role` degrades to the
+        // unconditional `Role::PrimaryCoder` this used to hardcode whenever
+        // `FastCoder` isn't bound (every install today; multi-role catalog
+        // selection is COMPLETION-PLAN.md M6), so a single-model setup sees
+        // no behaviour change.
+        let role = self.model_role(vs.repair_role_primary);
 
         // Reason (repair-focused).
         let turn_index = self.tasks.count_model_calls(task_id).await?;
@@ -852,10 +852,11 @@ impl AgentDriver {
         let request = GenerateRequest::new(messages)
             .with_tools(self.tool_specs.clone())
             .with_turn_hint(turn_index);
-        let completion = self
+        let routed = self
             .orchestrator
             .generate_action(role, request, cancel.child(), MAX_REFORMAT_RETRIES)
             .await?;
+        let completion = routed.completion;
 
         self.tasks
             .append_journal(
@@ -867,6 +868,8 @@ impl AgentDriver {
                     payload: serde_json::json!({
                         "finish_reason": format!("{:?}", completion.finish_reason),
                         "text": completion.text,
+                        "role": role.as_str(),
+                        "model_id": routed.model_id,
                     }),
                 },
             )
@@ -1217,6 +1220,43 @@ impl AgentDriver {
 
     fn put_verify_state(&self, task_id: TaskId, state: VerifyState) {
         self.verify_states.lock().unwrap().insert(task_id, state);
+    }
+
+    /// Whether a `RepairDecision::SwitchRole` has escalated this task away
+    /// from `FastCoder` for the remainder of the run — a cheap peek at
+    /// `repair_role_primary` (bumped in `step_diagnosing`'s `SwitchRole`
+    /// arm) without the clone-out/clone-back `take_verify_state`/
+    /// `put_verify_state` pair every other reader of `VerifyState` uses,
+    /// since every non-repair caller (the main Implementing loop) only
+    /// ever needs this one field and never mutates it. Defaults to
+    /// unescalated for a task with no verify state yet — i.e. every task's
+    /// first turn.
+    pub(crate) fn is_role_escalated(&self, task_id: TaskId) -> bool {
+        self.verify_states
+            .lock()
+            .unwrap()
+            .get(&task_id)
+            .map(|s| s.repair_role_primary)
+            .unwrap_or(false)
+    }
+
+    /// Which role the next Reason step should call. `FastCoder` is the
+    /// default entry point — both for a task's very first Implementing turn
+    /// and every one after, main loop or repair — unless this task has been
+    /// escalated to `PrimaryCoder` for the rest of its run (§4.22's
+    /// FastCoder→PrimaryCoder escalation, driven by a `SwitchRole` repair
+    /// decision), or `FastCoder` simply isn't bound to anything. That second
+    /// case is the common one today: `valyria-app`'s real-inference wiring
+    /// only ever binds `PrimaryCoder` (multi-role catalog selection is
+    /// COMPLETION-PLAN.md M6), so this degrades to the unconditional
+    /// `Role::PrimaryCoder` every call site used before M1 with no observed
+    /// behaviour change for a single-model install.
+    pub(crate) fn model_role(&self, escalated: bool) -> Role {
+        if escalated || !self.orchestrator.is_bound(Role::FastCoder) {
+            Role::PrimaryCoder
+        } else {
+            Role::FastCoder
+        }
     }
 
     /// Record what the context assembler retrieved for a step so it

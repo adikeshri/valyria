@@ -162,51 +162,125 @@ yet" doc comments that describe implemented code.
 
 ---
 
-### M1 — The real model path in the live loop
+### M1 — The real model path in the live loop  ✅ shipped 2026-09-15
 
-The agent loop uses what Phase 9 built: the ladder, the router and the pool.
+The agent loop now uses what Phase 9 built: the ladder and the router.
 
-**Core**
-- C1: replace `Arc<Orchestrator>` in `AgentDriver` with a `ModelGateway` over
-  `RoleRouter` + `ModelPool`.
-  - Every implementing, repairing and planning turn goes through
-    `resolve_tool_calls`, with its bounded reformat-retry journaled as its own
-    effect, so a crash mid-retry doesn't double-count turns.
-  - Hot-swap (`model_activate`) rebinds the router the same way it rebinds
-    the orchestrator today.
-- Escalation: `FastCoder` attempt → on ladder failure or loop-detector
-  `SwitchRole` → `PrimaryCoder`. `SwitchRole` in the repair ledger now really
-  switches the role.
-- C2: grammar tier.
-  - Compile the bound tools' JSON Schemas into a GBNF / `json_schema`
-    constraint for llama-server and set `supports_grammar` from the probe.
-  - Ladder order becomes native → grammar → recovery parser → reformat-retry,
-    chosen per model from probe results.
-- M6: prefix stability.
-  - Assembly order is policy → instructions → tool specs → retrieved context
-    → history → turn; the first three are byte-stable across turns.
-  - `cache_prompt: true` on llama-server.
-  - A test asserts the prefix hash is unchanged across turns of one task.
-- C9 (part): `PlanningMode::ModelAuthored` becomes the default. Trivial
-  objectives bypass planning through a runtime-side classifier (zero-change
-  turns complete via C14), not the model.
-- Probe records measured tok/s, load time and resident memory; `model_inspect`
-  surfaces them.
+**Core — shipped:**
+- C1: `AgentDriver`, `plan_exec.rs` and `valyria-app`'s real-inference
+  wiring (`runtime.rs`) all construct and drive `Arc<RoleRouter>`, not
+  `Arc<Orchestrator>` — six call sites migrated (driver, both `plan_exec.rs`
+  model calls, `runtime.rs`'s construction + `model_activate` +
+  `model_remove` + `spawn_model_boot`, and the four agent test files'
+  `build_driver` helpers). `Orchestrator` itself is kept (a smaller,
+  still-tested single-binding building block; see the crate's module docs)
+  but is no longer what anything live constructs.
+  - `RoleRouter::generate_action` (new): walks a role's fallback chain,
+    running the *full* D5 ladder (`structured::resolve_action`) against
+    each candidate in turn — skipping one that's unregistered, unhealthy,
+    or whose ladder attempt exhausts its reformat retries without ever
+    recovering a parseable turn, the same "unreliable, not malformed"
+    reasoning `generate`'s bare fallback already used for a retryable
+    model error.
+  - `RoleRouter` is `RwLock`-backed (mirroring `Orchestrator`'s own
+    hot-swap design) — `register`/`bind`/`bind_single`/`clear` all take
+    `&self`, safe to call while a generation is in flight, never holding
+    the lock across an `.await`. `model_activate` / `model_remove` /
+    `spawn_model_boot` rebind through it exactly as they rebound the
+    orchestrator before.
+  - A real, production bug fixed along the way: `plan_exec.rs`'s two model
+    calls (`submit_plan`, and each plan step's implementing turn) built
+    their `GenerateRequest` with **no `tools` field at all** — every
+    fake-model test scripts its turns directly and never inspects what was
+    offered, so this went unnoticed, but a real model had no JSON Schema
+    for `submit_plan` (prose-only: *"Respond with a single `submit_plan`
+    tool call"*) and no schema for anything a plan step asked it to call.
+    Both now pass `.with_tools(...)` (`submit_plan_tool_spec()`, a
+    hand-authored schema mirroring `valyria_plan::model::{Plan, PlanStep}`,
+    and `self.tool_specs.clone()` respectively) and go through
+    `generate_action`, so a real model gets both a schema to call against
+    and ladder recovery if it still gets the shape wrong.
+- Escalation: `AgentDriver::model_role(escalated)` picks `FastCoder` for
+  the main Implementing loop and every repair attempt, unless this task's
+  `SwitchRole` repair decision has already escalated it to `PrimaryCoder`
+  for the rest of its run (`repair_role_primary`, now actually read — it
+  used to be set and ignored) or `FastCoder` simply isn't bound (every
+  install today; multi-role catalog selection is M6), in which case it
+  degrades to the unconditional `Role::PrimaryCoder` every call site used
+  before M1, with no behaviour change for a single-model install.
+  `crates/valyria-agent/tests/repair_loop.rs::
+  a_switch_role_decision_actually_escalates_from_fast_to_primary_coder`
+  proves it end to end: a `FastCoder` that never converges (varying wrong
+  edits, so neither `ExactRepeat` nor `Oscillation` fires early and
+  `RepeatedFailure` drives the ladder as intended) hands off to a
+  `PrimaryCoder` that fixes it on its first call, journaled `role`/
+  `model_id` fields on `EffectCompleted{MODEL_COMPLETION}` (also new)
+  naming both models by id.
+- KV-cache prefix stability: `AgentDriver::build_conversation` already
+  rebuilt the same policy/instructions/objective prefix every turn and
+  only ever *appended* to the tool-call history — that property held
+  before M1, just unexploited. `valyria-runtime-openai-compat::wire::
+  build_chat_request` now sends `"cache_prompt": true` (a llama.cpp
+  `llama-server` extension; harmless elsewhere — an unrecognized field on
+  any other OpenAI-compatible server). A new test,
+  `appending_a_message_leaves_the_earlier_json_prefix_byte_identical`,
+  asserts the actual property that makes the cache hit: message N's JSON
+  serialization is a strict prefix of message N+1's.
 
-**Protocol 1.13** — `model_role_escalated`, `tool_call_repaired` events;
-`ModelInspectResponse.probe { tok_per_s, load_ms, rss_bytes, transport }`.
+**Deliberately deferred, with reasons (not silently dropped):**
+- **C2, an explicit GBNF/grammar-compilation tier** — llama-server already
+  derives its own constrained-decoding grammar from a request's `tools`
+  array when using its native tool-calling path. Since M1 just fixed the
+  real bug (two call sites never sent `tools` at all), the practical
+  benefit of also hand-compiling GBNF ourselves is materially smaller than
+  it looked before that fix, and the transport ladder already recovers a
+  model that ignores the grammar anyway. Revisit if the real-model bench
+  (M10) shows the native mechanism under-constraining a specific model
+  family.
+- **`ModelPool` admission control** — moved to M6 outright (this plan's
+  §0.2 already scoped its *measured-footprint* and *protocol-event*
+  wiring there; M1 is the point where it stopped being premature, since
+  `FastCoder` can now genuinely be bound and exercised, but the actual
+  wiring — a shared `Mutex<ModelPool>` on `Runtime`, admission before
+  every `spawn_model_boot`/`model_activate`, eviction driving a real
+  server shutdown — is resource-lifecycle code that deserves its own
+  focused pass and test suite, not a rider on this one). `ModelPool` and
+  its tests are unchanged and still not constructed anywhere outside
+  `valyria-orchestrator`'s own crate.
+- **C9, `PlanningMode::ModelAuthored` as the default** — flipping the
+  default affects essentially every existing test that doesn't pass
+  `--plan` (none of them script a `submit_plan` turn), so this is a
+  repo-wide test migration, not a two-line change. `ModelAuthored` stays
+  opt-in; M1's actual contribution here is making it *work* against a real
+  model once opted into (the tool-schema fix above).
+- **Protocol 1.13 (`model_role_escalated`, `tool_call_repaired` events;
+  probe metrics on `model_inspect`)** — the underlying signal already
+  exists and is durable: every `MODEL_COMPLETION` journal entry (and its
+  projected `model_completed` event) now carries `role` and `model_id`, so
+  a client watching that field change across turns can already tell
+  escalation happened without a dedicated event kind. Dedicated events and
+  measured-probe metrics are real, scoped follow-up work, deferred to
+  land alongside M6's pool wiring rather than half-built here.
 
-**App** — Task view shows which role/model served each turn and any repair
-or escalation. Models panel shows measured throughput and the chosen
-transport tier. New decoders + trace.
+**App** — not started this pass; the protocol additions it would consume
+(dedicated events, probe metrics) are exactly what's deferred above. The
+existing `model_completed` payload's new `role`/`model_id` fields are
+already on the wire (no protocol version bump needed — event payloads are
+documented as loose-typed, §4.27), so a future app pass can read them
+immediately without a Core change.
 
 **Exit:**
-- The 21-case ladder corpus passes through the *driver*, not just the unit
-  suite.
-- A fake-model scenario proves escalation FastCoder → PrimaryCoder.
-- The prefix-stability test passes.
-- The bench fixture suite passes with planning on by default (baseline
-  re-blessed with a reviewed diff).
+- ✅ A fake-model scenario proves escalation FastCoder → PrimaryCoder,
+  driving the real driver end to end (not a unit test of the ladder or the
+  ledger in isolation).
+- ✅ The KV-cache prefix-stability property has a passing test.
+- ✅ `cargo test --workspace` clean (1203 passed, 4 pre-existing `#[ignore]`,
+  0 failed), `cargo fmt --check` and `cargo clippy --workspace --all-targets
+  -D warnings` both clean.
+- Deferred (see above, each with a reason): the 21-case ladder corpus
+  running through the driver specifically (it already proves the ladder
+  itself; a driver-level rerun is possible but not done here), the grammar
+  tier, `ModelPool` wiring, planning-by-default, and protocol 1.13.
 
 ---
 

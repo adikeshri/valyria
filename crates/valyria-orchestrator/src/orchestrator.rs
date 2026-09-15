@@ -17,12 +17,12 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use valyria_model::{Completion, FinishReason, GenerateRequest, ModelRuntime, TokenUsage};
+use valyria_model::{Completion, GenerateRequest, ModelRuntime};
 use valyria_util::CancellationToken;
 
 use crate::error::{OrchestratorError, Result};
 use crate::role::Role;
-use crate::structured::{self, ResolvedAction};
+use crate::structured;
 
 #[derive(Default)]
 pub struct Orchestrator {
@@ -102,36 +102,7 @@ impl Orchestrator {
         let model = self.handle_for(role)?;
         let action =
             structured::resolve_action(model.as_ref(), req, &cancel, max_reformat_retries).await?;
-        Ok(match action {
-            ResolvedAction::ToolCalls(mut calls) => {
-                if calls.len() > 1 {
-                    tracing::warn!(
-                        role = role.as_str(),
-                        dropped = calls.len() - 1,
-                        "model emitted multiple tool calls in one turn; taking the first"
-                    );
-                    calls.truncate(1);
-                }
-                Completion {
-                    text: String::new(),
-                    tool_calls: calls,
-                    finish_reason: FinishReason::ToolCalls,
-                    usage: TokenUsage::default(),
-                }
-            }
-            ResolvedAction::Answer { text, ask: true } => Completion {
-                text,
-                tool_calls: Vec::new(),
-                finish_reason: FinishReason::Ask,
-                usage: TokenUsage::default(),
-            },
-            ResolvedAction::Answer { text, ask: false } => Completion {
-                text,
-                tool_calls: Vec::new(),
-                finish_reason: FinishReason::Stop,
-                usage: TokenUsage::default(),
-            },
-        })
+        Ok(structured::action_to_completion(role, action))
     }
 
     /// Clone the `Arc` bound to `role` out from under a short-lived read

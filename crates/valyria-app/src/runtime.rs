@@ -18,7 +18,7 @@ use valyria_memory::{MemoryStore, RetrievalRequest};
 use valyria_model::{GenerateRequest, Message, ModelRuntime, SamplingParams};
 use valyria_model_registry::{score_card_for_role, CardScore, Catalog, ModelCard, ModelRole};
 use valyria_model_store::{HttpFetcher, ModelStore, NullProber};
-use valyria_orchestrator::{NoModelRuntime, Orchestrator, Role};
+use valyria_orchestrator::{NoModelRuntime, Role, RoleRouter};
 use valyria_permissions::PermissionEngine;
 use valyria_plan::{PlanRevision, PlanStore, RollbackError, RollbackReport};
 use valyria_runtime_fake::{FakeModelRuntime, Scenario};
@@ -227,10 +227,14 @@ pub struct Runtime {
     /// runs; `model_install_cancel` fires the token and the task's next
     /// checkpoint stops it.
     installs: Arc<Mutex<HashMap<String, CancellationToken>>>,
-    /// The same `Arc<Orchestrator>` the driver holds — `model_activate` /
+    /// The same `Arc<RoleRouter>` the driver holds — `model_activate` /
     /// `model_remove` rebind through this handle, which is why it must be
-    /// the *same* `Arc`, not a fresh `Orchestrator`.
-    orchestrator: Arc<Orchestrator>,
+    /// the *same* `Arc`, not a fresh `RoleRouter`. Every role is currently
+    /// bound as a length-1 chain (`bind_single`): real fallback chains
+    /// across multiple installed models for one role are
+    /// `docs/COMPLETION-PLAN.md` M6 (catalog-backed multi-model role
+    /// selection), not wired up here yet.
+    orchestrator: Arc<RoleRouter>,
     /// The live `llama-server` handles this `Runtime` has started. Empty
     /// (and untouched) when `model_backend` is `Fake`.
     model_runtimes: Arc<ModelRuntimeRegistry>,
@@ -287,10 +291,11 @@ impl Runtime {
         let engine_handle = engine.clone();
 
         let use_fake_model = config.model_backend.is_fake();
-        let orchestrator = Arc::new(Orchestrator::new());
+        let orchestrator = Arc::new(RoleRouter::new());
         if let ModelBackend::Fake(scenario) = &config.model_backend {
-            orchestrator.bind(
+            orchestrator.bind_single(
                 Role::PrimaryCoder,
+                "fake",
                 Arc::new(FakeModelRuntime::from_scenario(scenario.clone())),
             );
         }
@@ -326,7 +331,11 @@ impl Runtime {
                 if role == Role::PrimaryCoder {
                     primary_bound = true;
                 }
-                orchestrator.bind(role, Arc::new(NoModelRuntime::starting(&model_id)));
+                orchestrator.bind_single(
+                    role,
+                    model_id.clone(),
+                    Arc::new(NoModelRuntime::starting(&model_id)),
+                );
                 spawn_model_boot(
                     role,
                     model_id,
@@ -338,7 +347,11 @@ impl Runtime {
                 );
             }
             if !primary_bound {
-                orchestrator.bind(Role::PrimaryCoder, Arc::new(NoModelRuntime::none_bound()));
+                orchestrator.bind_single(
+                    Role::PrimaryCoder,
+                    "none",
+                    Arc::new(NoModelRuntime::none_bound()),
+                );
             }
         }
 
@@ -1156,7 +1169,7 @@ impl Runtime {
         if !self.use_fake_model {
             for role in self.model_runtimes.roles_for_model(id).await {
                 self.orchestrator
-                    .rebind(role, Arc::new(NoModelRuntime::none_bound()));
+                    .bind_single(role, "none", Arc::new(NoModelRuntime::none_bound()));
                 if let Some(old) = self.model_runtimes.take(role).await {
                     old.shutdown().await; // awaited: files are about to go away
                 }
@@ -1217,8 +1230,11 @@ impl Runtime {
         match boot_model_server(self.global.root(), id, &model_store, &self.events).await {
             Ok(handle) => {
                 let port = handle.port();
-                self.orchestrator
-                    .rebind(role, handle.clone() as Arc<dyn ModelRuntime>);
+                self.orchestrator.bind_single(
+                    role,
+                    id.to_string(),
+                    handle.clone() as Arc<dyn ModelRuntime>,
+                );
                 if let Some(old) = self.model_runtimes.swap(role, id.to_string(), handle).await {
                     tokio::spawn(async move { old.shutdown().await });
                 }
@@ -1232,8 +1248,11 @@ impl Runtime {
                 Ok(())
             }
             Err(e) => {
-                self.orchestrator
-                    .rebind(role, Arc::new(NoModelRuntime::failed(id, &e.to_string())));
+                self.orchestrator.bind_single(
+                    role,
+                    id.to_string(),
+                    Arc::new(NoModelRuntime::failed(id, &e.to_string())),
+                );
                 let _ = self
                     .events
                     .append(NewEvent::new(
@@ -1614,7 +1633,7 @@ fn spawn_model_boot(
     model_id: String,
     global_root: PathBuf,
     model_store: ModelStore,
-    orchestrator: Arc<Orchestrator>,
+    orchestrator: Arc<RoleRouter>,
     model_runtimes: Arc<ModelRuntimeRegistry>,
     events: Arc<EventBus>,
 ) {
@@ -1629,7 +1648,11 @@ fn spawn_model_boot(
         match boot_model_server(&global_root, &model_id, &model_store, &events).await {
             Ok(handle) => {
                 let port = handle.port();
-                orchestrator.rebind(role, handle.clone() as Arc<dyn ModelRuntime>);
+                orchestrator.bind_single(
+                    role,
+                    model_id.clone(),
+                    handle.clone() as Arc<dyn ModelRuntime>,
+                );
                 if let Some(old) = model_runtimes.swap(role, model_id.clone(), handle).await {
                     // Drain in place rather than block this task: an
                     // in-flight generate against the old server still
@@ -1644,8 +1667,9 @@ fn spawn_model_boot(
                     .await;
             }
             Err(e) => {
-                orchestrator.rebind(
+                orchestrator.bind_single(
                     role,
+                    model_id.clone(),
                     Arc::new(NoModelRuntime::failed(&model_id, &e.to_string())),
                 );
                 let _ = events

@@ -25,8 +25,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use valyria_model::{GenerateRequest, Message};
-use valyria_orchestrator::Role;
+use valyria_model::{GenerateRequest, Message, ToolSpec};
 use valyria_plan::{
     schedule, validate, Plan, PlanContext, PlanError, PlanErrorCode, PlanRepairDecision,
     PlanRepairLedger, PlanRevision, PlanStepId, RollbackError, RollbackReport,
@@ -36,8 +35,92 @@ use valyria_types::{AgentState, CheckpointId, EffectId, StepId, TaskId};
 use valyria_util::{CancellationToken, ContentHash};
 
 use crate::action::ActionRequest;
-use crate::driver::{AgentDriver, Flow, MAX_PLAN_REPAIR_ATTEMPTS, MAX_STEP_TURNS};
+use crate::driver::{
+    AgentDriver, Flow, MAX_PLAN_REPAIR_ATTEMPTS, MAX_REFORMAT_RETRIES, MAX_STEP_TURNS,
+};
 use crate::error::{AgentError, Result};
+
+/// The `submit_plan` tool a `ModelAuthored` planning turn is offered — with
+/// M1's `generate_action` wiring (the D5 transport ladder), a real model
+/// finally has a JSON Schema to call it against instead of prose alone
+/// ("Respond with a single `submit_plan` tool call…") and nothing telling
+/// it, or any grammar-constrained runtime, what shape to produce. The
+/// schema mirrors `valyria_plan::model::{Plan, PlanStep}` closely enough to
+/// guide a real model; it is not the source of truth for correctness —
+/// `valyria_plan::validate` and the bounded structural-repair loop below
+/// are, exactly as before this schema existed.
+fn submit_plan_tool_spec() -> ToolSpec {
+    ToolSpec {
+        name: crate::driver::SUBMIT_PLAN_ACTION.to_string(),
+        description: "Submit the plan for this task: an ordered set of steps, each with its \
+            targets, dependencies, and how it will be verified."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "required": ["steps"],
+            "properties": {
+                "plan_scope": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Paths (or glob-like prefixes) this whole plan is allowed to touch."
+                },
+                "steps": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "required": ["id", "intent"],
+                        "properties": {
+                            "id": { "type": "string", "description": "Unique step id, e.g. \"s1\"." },
+                            "intent": { "type": "string", "description": "What this step does." },
+                            "targets": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "description": "Files this step will touch. Empty for a read-only step."
+                            },
+                            "depends_on": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "description": "Ids of steps that must complete before this one."
+                            },
+                            "parallelizable": { "type": "boolean" },
+                            "checkpoint": {
+                                "type": "boolean",
+                                "description": "Capture a rollback point after this step."
+                            },
+                            "rollback_boundary": {
+                                "type": "boolean",
+                                "description": "Required alongside checkpoint: true."
+                            },
+                            "approval_required": { "type": "boolean" },
+                            "verification": {
+                                "type": "object",
+                                "description": "Required for any step with targets.",
+                                "properties": {
+                                    "mode": {
+                                        "type": "string",
+                                        "enum": ["none", "inherit", "command"]
+                                    },
+                                    "command": {
+                                        "type": "string",
+                                        "description": "Only when mode is \"command\"."
+                                    }
+                                }
+                            },
+                            "estimated_scope": {
+                                "type": "object",
+                                "properties": {
+                                    "files": { "type": "integer" },
+                                    "risk": { "type": "string", "enum": ["low", "medium", "high"] }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }),
+    }
+}
 
 impl AgentDriver {
     // --- Planning -----------------------------------------------------
@@ -208,11 +291,15 @@ impl AgentDriver {
             ),
             Some(fb) => format!("{objective}\n\n{fb}\n\nResubmit the corrected plan."),
         };
-        let request = GenerateRequest::new(vec![Message::user(prompt)]).with_turn_hint(turn_index);
+        let role = self.model_role(self.is_role_escalated(task_id));
+        let request = GenerateRequest::new(vec![Message::user(prompt)])
+            .with_tools(vec![submit_plan_tool_spec()])
+            .with_turn_hint(turn_index);
         let completion = self
             .orchestrator
-            .generate(Role::PrimaryCoder, request, cancel.child())
-            .await?;
+            .generate_action(role, request, cancel.child(), MAX_REFORMAT_RETRIES)
+            .await?
+            .completion;
 
         let submission = match ActionRequest::from_completion(&completion)? {
             ActionRequest::ToolCall { tool, input }
@@ -420,11 +507,21 @@ impl AgentDriver {
                 targets.join(", ")
             },
         );
-        let request = GenerateRequest::new(vec![Message::user(prompt)]).with_turn_hint(turn_index);
+        // `self.tool_specs` (M1): a plan step's model call used to be built
+        // with no `tools` field at all — every fake-model test scripts its
+        // turns directly and never looks at what was offered, so this went
+        // unnoticed, but a real model had no schema for any tool it was
+        // asked to call one of. `generate_action` also gets it the same
+        // ladder recovery and fallback chain as the main Implementing loop.
+        let role = self.model_role(self.is_role_escalated(task_id));
+        let request = GenerateRequest::new(vec![Message::user(prompt)])
+            .with_tools(self.tool_specs.clone())
+            .with_turn_hint(turn_index);
         let completion = self
             .orchestrator
-            .generate(Role::PrimaryCoder, request, cancel.child())
-            .await?;
+            .generate_action(role, request, cancel.child(), MAX_REFORMAT_RETRIES)
+            .await?
+            .completion;
 
         let action = match ActionRequest::from_completion(&completion)? {
             ActionRequest::ToolCall { tool, input } => StepAction::ToolCall { tool, input },

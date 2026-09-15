@@ -13,7 +13,7 @@ use valyria_agent::AgentDriver;
 use valyria_context::ContextAssembler;
 use valyria_events::{EventBus, EventKind, Seq};
 use valyria_ledger::Ledger;
-use valyria_orchestrator::{Orchestrator, Role};
+use valyria_orchestrator::{Role, RoleRouter};
 use valyria_permissions::PermissionEngine;
 use valyria_runtime_fake::{FakeModelRuntime, Scenario, ScriptedTurn};
 use valyria_sandbox::{detect_platform_launcher, ProcessLauncher, SandboxProfile};
@@ -61,6 +61,44 @@ fn seeded_bug_workspace() -> Backing {
 }
 
 fn build_driver(backing: &Backing, scenario: Scenario) -> (Arc<TaskManager>, AgentDriver) {
+    let orch = RoleRouter::new();
+    orch.bind_single(
+        Role::PrimaryCoder,
+        "fake",
+        Arc::new(FakeModelRuntime::from_scenario(scenario)),
+    );
+    build_driver_with_router(backing, orch)
+}
+
+/// M1: `FastCoder` bound alongside `PrimaryCoder` with its own,
+/// independently scripted model — `AgentDriver::model_role` picks
+/// `FastCoder` for the main loop and every repair attempt until a
+/// `SwitchRole` repair decision escalates the task to `PrimaryCoder` for
+/// the rest of its run (`is_role_escalates_from_fast_to_primary_coder`
+/// below exercises this end to end).
+fn build_driver_two_roles(
+    backing: &Backing,
+    fast_scenario: Scenario,
+    primary_scenario: Scenario,
+) -> (Arc<TaskManager>, AgentDriver) {
+    let orch = RoleRouter::new();
+    orch.bind_single(
+        Role::FastCoder,
+        "fake-fast",
+        Arc::new(FakeModelRuntime::from_scenario(fast_scenario)),
+    );
+    orch.bind_single(
+        Role::PrimaryCoder,
+        "fake-primary",
+        Arc::new(FakeModelRuntime::from_scenario(primary_scenario)),
+    );
+    build_driver_with_router(backing, orch)
+}
+
+fn build_driver_with_router(
+    backing: &Backing,
+    orch: RoleRouter,
+) -> (Arc<TaskManager>, AgentDriver) {
     let clock: Arc<dyn Clock> = Arc::new(FixedClock::at_millis(1_000_000));
     let tasks = Arc::new(TaskManager::new(
         backing.store.clone(),
@@ -78,11 +116,6 @@ fn build_driver(backing: &Backing, scenario: Scenario) -> (Arc<TaskManager>, Age
         engine.clone(),
         clock.clone(),
     ));
-    let orch = Orchestrator::new();
-    orch.bind(
-        Role::PrimaryCoder,
-        Arc::new(FakeModelRuntime::from_scenario(scenario)),
-    );
     let context = Arc::new(ContextAssembler::new(tools.clone()));
     let verification_log = Arc::new(VerificationLog::new(backing.store.clone()));
     let plan_store = Arc::new(valyria_plan::PlanStore::new(backing.store.clone()));
@@ -299,4 +332,129 @@ async fn a_workspace_with_no_tooling_completes_without_verifying() {
     );
     let log = VerificationLog::new(backing.store.clone());
     assert!(log.list_for_task(task.id).await.unwrap().is_empty());
+}
+
+/// M1 (`docs/COMPLETION-PLAN.md`): `SwitchRole` used to bump a bookkeeping
+/// flag (`repair_role_primary`) that nothing downstream ever read — every
+/// repair call hardcoded `Role::PrimaryCoder` regardless. With `FastCoder`
+/// now consulted by `AgentDriver::model_role`, a task that starts on a
+/// `FastCoder` that can never converge (it only ever "finishes" without
+/// touching the file, reproducing the exact loop the *un*fixable-bug test
+/// above proves gets detected) must actually reach a real, distinct
+/// `PrimaryCoder` model once the repair ledger escalates — and that model,
+/// making the one edit `FastCoder` never attempted, finishes the task.
+#[tokio::test]
+async fn a_switch_role_decision_actually_escalates_from_fast_to_primary_coder() {
+    let backing = seeded_bug_workspace();
+
+    // FastCoder: turn 0 (the main Implementing loop's only turn — it keeps
+    // calling the model on every `ToolCall` and only leaves on `Finish`/
+    // `Ask`, unlike `Repairing`, which always re-verifies after exactly
+    // one call) is a no-op `Finish`, driving straight into a failing
+    // Verify exactly like `seeded_bug_is_verified_diagnosed_and_repaired_
+    // end_to_end`'s turn 0. Every turn after that is a real edit — but to
+    // a *different* wrong value each time (ANSWER=1, ANSWER=2, …), never
+    // the fix. A repair phase that repeats the exact same no-op or the
+    // exact same edit trips the loop detector's `Oscillation` class within
+    // a few cycles (the diagnose step's signature is constant while the
+    // repair step's is too), which `RepairLedger::decide` routes straight
+    // to `AskUser` — bypassing `SwitchRole` entirely, by design (§31: an
+    // oscillating repair is its own distinct, worse signal, so this isn't
+    // a bug to route around). Varying the (still wrong) edit changes the
+    // repair step's signature every cycle (`StepSignature::patch_hash`/
+    // `file_state_hash`), so neither `ExactRepeat` nor `Oscillation` fires;
+    // the *verification* failure is identical every time regardless (`grep
+    // ANSWER=42` never matches whatever wrong value is there), so
+    // `RepeatedFailure` reliably does — exercising exactly the
+    // `EscalateStrategy → SwitchRole` ladder this test is about.
+    let mut fast_turns: Vec<ScriptedTurn> = vec![ScriptedTurn::Finish {
+        summary: "done (but it isn't)".into(),
+    }];
+    fast_turns.extend(
+        (0..10).map(|i: u32| {
+            edit_config_turn(&format!("ANSWER={i}\n"), &format!("ANSWER={}\n", i + 1))
+        }),
+    );
+    let fast_scenario = Scenario {
+        name: "fast_never_fixes_it".into(),
+        turns: fast_turns,
+    };
+
+    // PrimaryCoder: makes the actual fix the very first time it is called,
+    // whichever global turn index that turns out to be, and regardless of
+    // which wrong value FastCoder left the file at — a whole-file
+    // replacement rather than an exact-anchor replacement, since the exact
+    // prior content depends on exactly how many FastCoder turns ran before
+    // the ledger escalated.
+    let primary_turns: Vec<ScriptedTurn> = (0..10)
+        .map(|_| ScriptedTurn::ToolCall {
+            name: "edit_file".into(),
+            arguments: serde_json::json!({
+                "path": "src/config.txt",
+                "precondition": "any",
+                "strategy": {
+                    "type": "whole_file_replacement",
+                    "content": "ANSWER=42\n",
+                    "reason": "primary coder fix",
+                    "force": false,
+                }
+            }),
+        })
+        .collect();
+    let primary_scenario = Scenario {
+        name: "primary_fixes_it_immediately".into(),
+        turns: primary_turns,
+    };
+
+    let (tasks, driver) = build_driver_two_roles(&backing, fast_scenario, primary_scenario);
+    let task = tasks
+        .create(
+            WorkspaceId::new(),
+            "set the answer to 42".into(),
+            Budget::default(),
+        )
+        .await
+        .unwrap();
+    driver.run(task.id, CancellationToken::new()).await.unwrap();
+
+    let final_task = tasks.get(task.id).await.unwrap();
+    assert_eq!(
+        final_task.state,
+        AgentState::Completed,
+        "expected COMPLETED once PrimaryCoder took over, got {:?}",
+        final_task.state
+    );
+    assert_eq!(config_contents(&backing), "ANSWER=42\n");
+
+    // The journal's MODEL_COMPLETION payloads (driver.rs's `"role"` /
+    // `"model_id"` fields, added alongside `generate_action`'s
+    // `RoutedCompletion`) name every model that actually served a turn —
+    // proof this ran through two distinct models, not one model that
+    // happened to eventually emit the right edit.
+    let events = backing.events.replay_since(Seq::ZERO).await.unwrap();
+    let roles_seen: std::collections::BTreeSet<String> = events
+        .iter()
+        .filter(|e| e.kind == EventKind::ModelCompleted)
+        .filter_map(|e| e.payload.get("role")?.as_str().map(str::to_string))
+        .collect();
+    assert!(
+        roles_seen.contains("fast_coder"),
+        "FastCoder should have been tried first: {roles_seen:?}"
+    );
+    assert!(
+        roles_seen.contains("primary_coder"),
+        "PrimaryCoder should have been escalated to: {roles_seen:?}"
+    );
+
+    // And the escalation was real, not a fluke: at least one verification
+    // run failed (FastCoder's futile attempts) before the final pass.
+    let log = VerificationLog::new(backing.store.clone());
+    let runs = log.list_for_task(task.id).await.unwrap();
+    assert!(
+        runs.len() >= 2,
+        "expected at least one failed run before the fix, got {}",
+        runs.len()
+    );
+    assert!(!runs.first().unwrap().passed());
+    assert!(runs.last().unwrap().passed());
 }
