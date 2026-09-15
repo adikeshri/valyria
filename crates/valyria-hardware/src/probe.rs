@@ -30,17 +30,46 @@ pub fn probe() -> HardwareReport {
     let gpus = probe_gpus();
     let unified_memory = is_apple_silicon() && !gpus.is_empty();
 
+    let ram_total_bytes = system.total_memory();
+    let ram_available_bytes = available_memory_bytes(
+        ram_total_bytes,
+        system.available_memory(),
+        system.used_memory(),
+    );
+
     HardwareReport {
         os: std::env::consts::OS.to_string(),
         os_version: System::os_version(),
         arch: std::env::consts::ARCH.to_string(),
         cpu,
-        ram_total_bytes: system.total_memory(),
-        ram_available_bytes: system.available_memory(),
+        ram_total_bytes,
+        ram_available_bytes,
         gpus,
         unified_memory,
         accelerator_present: probe_accelerator(),
         disk,
+    }
+}
+
+/// `sysinfo::System::available_memory()` has been observed returning `0`
+/// on a real machine with real free RAM — a real macOS environment during
+/// this crate's own development, `total_memory()`/`used_memory()` both
+/// plausible at the same time. Whatever the root cause (a memory-pressure
+/// API `sysinfo` can't read in some sandboxes or OS configurations), a
+/// hard `0` here is worse than a slightly-conservative estimate: every
+/// caller (`valyria_hardware::fits`, the M6 `ModelPool` budget) treats it
+/// as "nothing fits anywhere, ever" — silently disabling role-binding
+/// auto-derivation and model-pool admission rather than degrading
+/// gracefully. `total - used` is a sound floor (it just doesn't credit
+/// reclaimable cache pages, so it slightly *undercounts* what's really
+/// free) and is never itself `0` unless the machine genuinely has none
+/// left, so it's used whenever the reported figure is suspiciously `0`
+/// on a machine that very much has RAM.
+fn available_memory_bytes(ram_total_bytes: u64, reported: u64, used: u64) -> u64 {
+    if reported == 0 && ram_total_bytes > 0 {
+        ram_total_bytes.saturating_sub(used)
+    } else {
+        reported
     }
 }
 
@@ -96,6 +125,42 @@ mod tests {
             report.ram_total_bytes > 0,
             "a real machine always has some RAM"
         );
+        // Regression: `sysinfo::available_memory()` has been observed
+        // returning 0 on a real machine with real RAM to spare — every
+        // consumer of this field (role-binding auto-derivation, the M6
+        // ModelPool budget) treats a 0 budget as "nothing ever fits",
+        // silently disabling both features rather than degrading.
+        assert!(
+            report.ram_available_bytes > 0,
+            "available RAM must never be reported as 0 on a real machine \
+             (total={}, see available_memory_bytes's fallback)",
+            report.ram_total_bytes
+        );
+        assert!(report.ram_available_bytes <= report.ram_total_bytes);
+    }
+
+    #[test]
+    fn available_memory_falls_back_to_total_minus_used_when_reported_is_zero() {
+        // The exact bug this guards: sysinfo's own `available_memory()`
+        // (`reported`) came back 0 on a real 24GB machine with 18GB used
+        // and total/used both clearly plausible.
+        assert_eq!(
+            available_memory_bytes(25_769_803_776, 0, 18_324_619_264),
+            25_769_803_776 - 18_324_619_264,
+        );
+    }
+
+    #[test]
+    fn available_memory_passes_through_a_real_nonzero_report_unchanged() {
+        assert_eq!(
+            available_memory_bytes(16_000_000_000, 4_000_000_000, 12_000_000_000),
+            4_000_000_000
+        );
+    }
+
+    #[test]
+    fn available_memory_with_no_ram_at_all_is_zero_fallback_or_not() {
+        assert_eq!(available_memory_bytes(0, 0, 0), 0);
     }
 
     #[test]

@@ -16,7 +16,9 @@ use valyria_index::IndexStore;
 use valyria_ledger::Ledger;
 use valyria_memory::{MemoryStore, RetrievalRequest};
 use valyria_model::{GenerateRequest, Message, ModelRuntime, SamplingParams};
-use valyria_model_registry::{score_card_for_role, CardScore, Catalog, ModelCard, ModelRole};
+use valyria_model_registry::{
+    score_card_for_role, CardScore, Catalog, ModelCard, ModelRole, RoleBinding,
+};
 use valyria_model_store::{HttpFetcher, ModelStore, NullProber};
 use valyria_orchestrator::{
     EvictReason, ModelPool, NoModelRuntime, PoolError, PoolEvent, Role, RoleRouter,
@@ -340,7 +342,7 @@ impl Runtime {
 
             let model_store = ModelStore::new(global.root());
             let bindings = global.models().role_bindings().await?;
-            let mut primary_bound = false;
+            let mut bound_roles: std::collections::HashSet<Role> = std::collections::HashSet::new();
             for (role_str, model_id) in bindings {
                 let Ok(role) = role_str.parse::<ModelRole>() else {
                     tracing::warn!(role = %role_str, "unknown role in model_role_binding, skipping");
@@ -349,9 +351,7 @@ impl Runtime {
                 if !model_store.is_installed(&model_id) {
                     continue;
                 }
-                if role == Role::PrimaryCoder {
-                    primary_bound = true;
-                }
+                bound_roles.insert(role);
                 orchestrator.bind_single(
                     role,
                     model_id.clone(),
@@ -370,7 +370,61 @@ impl Runtime {
                     },
                 );
             }
-            if !primary_bound {
+
+            // M6: every role a user has never explicitly activated (no
+            // persisted `model_role_binding` row) gets a *best-effort*
+            // auto-derived choice instead of sitting unbound —
+            // `RoleBinding::derive` picks the best-fitting installed model
+            // for the role, scored against this machine's real, just-
+            // measured hardware. Deliberately never persisted: an explicit
+            // `model_activate` writes a real row and, from then on, wins
+            // on every subsequent `open()` without any extra bookkeeping
+            // to distinguish "auto" from "override" rows — this recomputes
+            // from scratch each time instead, so it also tracks newly
+            // installed/removed models automatically. Only `.primary` is
+            // used, not `.fallbacks` — multi-model fallback chains are a
+            // distinct, not-yet-wired piece of M6 (see the `orchestrator`
+            // field's own doc comment).
+            let installed = model_store.installed().unwrap_or_default();
+            // `RoleBinding::derive`/`select_for_role` treat an *empty*
+            // `available` list as "consider the whole catalog" — the
+            // right behavior for `model_recommend`'s "what would I need
+            // to install" question, but wrong here: with nothing
+            // installed at all, that would auto-select a catalog entry
+            // whose weights don't actually exist on disk, and
+            // `spawn_model_boot` would fail trying to load them. Guard it
+            // explicitly rather than relying on every call site to know
+            // that distinction.
+            if let (Ok(catalog), false) = (Catalog::embedded(), installed.is_empty()) {
+                for role in ModelRole::ALL {
+                    if bound_roles.contains(&role) {
+                        continue;
+                    }
+                    let Ok(derived) = RoleBinding::derive(&catalog, role, &hw, &installed) else {
+                        continue;
+                    };
+                    bound_roles.insert(role);
+                    orchestrator.bind_single(
+                        role,
+                        derived.primary.clone(),
+                        Arc::new(NoModelRuntime::starting(&derived.primary)),
+                    );
+                    spawn_model_boot(
+                        role,
+                        derived.primary,
+                        global.root().to_path_buf(),
+                        model_store.clone(),
+                        ModelBootHandles {
+                            orchestrator: orchestrator.clone(),
+                            model_runtimes: model_runtimes.clone(),
+                            pool: model_pool.clone(),
+                            events: events.clone(),
+                        },
+                    );
+                }
+            }
+
+            if !bound_roles.contains(&Role::PrimaryCoder) {
                 orchestrator.bind_single(
                     Role::PrimaryCoder,
                     "none",

@@ -917,6 +917,54 @@ recorded here since the plan text above still described it as open work)**
   too-big-to-fit admission leaves every existing resident and binding
   completely untouched.
 
+- Role bindings auto-derived at startup: every `ModelRole` nobody has
+  ever explicitly `model_activate`d now gets a best-effort choice from
+  `RoleBinding::derive`, scored against this machine's real, just-
+  measured hardware — `Runtime::open` walks `ModelRole::ALL`, skips any
+  role that already has a persisted binding, and boots `.primary` for
+  the rest through the exact same `spawn_model_boot`/`admit_to_pool`
+  path an explicit activation uses. Deliberately never persisted: an
+  explicit `model_activate` writes a real `model_role_binding` row and
+  wins on every later `open()` without any extra "auto vs. override"
+  flag in `global.db` — recomputing from scratch each time also means it
+  automatically tracks newly installed/removed models. Only `.primary`
+  is used, not `.fallbacks` — multi-model fallback chains are a distinct,
+  already-documented "not yet wired" piece (`orchestrator` field's own
+  doc comment in `Runtime`), unchanged by this. Guarded against a real
+  footgun in `select_for_role`: an *empty* installed-models list is
+  "consider the whole catalog" there (correct for `model_recommend`'s
+  "what would I need to install" question) but would be wrong here —
+  with nothing installed at all it would auto-select a catalog entry
+  whose weights don't exist on disk. Explicitly skipped instead.
+
+  **Found and fixed a real, load-bearing bug while testing this for
+  real, not against a mock:** `valyria_hardware::probe()`'s
+  `ram_available_bytes` came back `0` on this actual development
+  machine (a real 24GB Mac, `ram_total_bytes` and `used_memory()` both
+  plausible at the same time) — `sysinfo::System::available_memory()`
+  itself returning `0` for reasons not fully diagnosed (a memory-
+  pressure API it can't read in some environments, is the leading
+  guess). This is exactly the kind of bug that stays invisible forever
+  in a suite that only asserts `ram_total_bytes > 0` (which the existing
+  test did) and never exercises the *available* figure against a real
+  probe — and it would have silently zeroed out both this feature and
+  the `ModelPool` budget wired in the previous chunk on every real
+  user's machine hitting the same `sysinfo` behavior, not just this
+  one. Fixed with a documented, unit-tested fallback
+  (`total_memory() - used_memory()`, sound though it slightly
+  undercounts reclaimable cache) whenever the reported figure is
+  suspiciously `0` on a machine that very much has RAM, plus a
+  strengthened `probe_returns_plausible_values` assertion so this exact
+  regression can't silently return.
+
+  Proven end-to-end (a real `Runtime::open` with `ModelBackend::Local`,
+  a hand-installed fake model, no mocking of the derive/admission/boot
+  path at all): a role nobody activated gets a real `model_server_
+  starting` event naming the auto-derived id, only after real pool
+  admission succeeds; with nothing installed at all, no such event ever
+  fires and `PrimaryCoder` falls back to `NoModelRuntime::none_bound()`
+  exactly as before this chunk.
+
 **Deliberately deferred, with reasons**
 
 - MLX runtime adapter (`valyria-runtime-mlx`, still a bare stub crate):
@@ -934,9 +982,7 @@ recorded here since the plan text above still described it as open work)**
   can mean anything on Linux/Windows, and CUDA/ROCm can't be verified at
   all without that hardware.
 - `model_endpoint_add/remove/list` for existing local OpenAI-compatible
-  servers, and role bindings auto-*wiring* at startup (the `derive`
-  algorithm exists; nothing calls it automatically yet, nor persists a
-  user override distinctly from an auto-derived binding in `global.db`).
+  servers.
 - Signed catalog refresh (ed25519): no crypto exists anywhere in
   `valyria-model-registry`/`valyria-engine-store` yet. The mechanism
   (verify a detached signature against a compiled-in public key before
@@ -957,6 +1003,9 @@ recorded here since the plan text above still described it as open work)**
   at the wiring level (`eviction_shuts_down_the_real_server_and_rebinds_
   the_role`); `ModelPool`'s own suite already proved the underlying
   priority/LRU algorithm exhaustively.
+- ✅ Role bindings auto-derive for every unactivated role from installed
+  models, scored against real measured hardware — proven end to end, not
+  mocked.
 - Deferred: the seeded-bug suite completing on three real adapters
   (llama.cpp already does via the existing `local_model_e2e.rs`
   end-to-end test; MLX and an openai-compat endpoint don't exist yet to
