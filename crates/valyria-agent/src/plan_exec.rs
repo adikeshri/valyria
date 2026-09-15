@@ -26,6 +26,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use valyria_model::{GenerateRequest, Message, ToolSpec};
+use valyria_orchestrator::Role;
 use valyria_plan::{
     schedule, validate, Plan, PlanContext, PlanError, PlanErrorCode, PlanRepairDecision,
     PlanRepairLedger, PlanRevision, PlanStepId, RollbackError, RollbackReport,
@@ -136,10 +137,19 @@ impl AgentDriver {
     /// the shared model-turn counter (and therefore the scripted fake
     /// model) in sync across a restart. An already-accepted plan just
     /// re-enters `Implementing`.
+    /// `role_override` (M5): when `Some`, every model call this drives
+    /// (including any repair-feedback retries) uses that exact
+    /// `valyria_orchestrator::Role` instead of the ordinary FastCoder/
+    /// PrimaryCoder escalation `model_role` picks — the role pipeline's
+    /// Planner role passes `Some(Role::Planner)` so it gets its own model
+    /// binding independent of the single-task loop's escalation state.
+    /// `None` (every pre-M5 caller, via `run`) preserves the exact prior
+    /// behavior.
     pub(crate) async fn step_planning(
         &self,
         task_id: TaskId,
         cancel: &CancellationToken,
+        role_override: Option<Role>,
     ) -> Result<Flow> {
         if self.has_accepted_plan(task_id).await? {
             self.tasks
@@ -179,7 +189,7 @@ impl AgentDriver {
             let submission = match self.unprocessed_plan_submission(task_id).await? {
                 Some(v) => v,
                 None => {
-                    self.request_plan_from_model(task_id, cancel, &feedback)
+                    self.request_plan_from_model(task_id, cancel, &feedback, role_override)
                         .await?
                 }
             };
@@ -266,6 +276,7 @@ impl AgentDriver {
         task_id: TaskId,
         cancel: &CancellationToken,
         feedback: &Option<String>,
+        role_override: Option<Role>,
     ) -> Result<serde_json::Value> {
         let objective = self.tasks.get(task_id).await?.objective;
         let turn_index = self.tasks.count_model_calls(task_id).await?;
@@ -291,7 +302,8 @@ impl AgentDriver {
             ),
             Some(fb) => format!("{objective}\n\n{fb}\n\nResubmit the corrected plan."),
         };
-        let role = self.model_role(self.is_role_escalated(task_id));
+        let role =
+            role_override.unwrap_or_else(|| self.model_role(self.is_role_escalated(task_id)));
         let request = GenerateRequest::new(vec![Message::user(prompt)])
             .with_tools(vec![submit_plan_tool_spec()])
             .with_turn_hint(turn_index);
@@ -333,10 +345,14 @@ impl AgentDriver {
 
     // --- plan-driven Implementing ----------------------------------
 
+    /// `role_override`: see `step_planning`'s docs — same meaning, same
+    /// `None`-preserves-prior-behavior contract, threaded through to every
+    /// per-step model call.
     pub(crate) async fn step_implementing_plan(
         &self,
         task_id: TaskId,
         cancel: &CancellationToken,
+        role_override: Option<Role>,
     ) -> Result<Flow> {
         // D1: redo an interrupted tool call before anything new.
         if let Some(pending) = self.tasks.interrupted_tool_call(task_id).await? {
@@ -430,7 +446,10 @@ impl AgentDriver {
         let sid = StepId::new();
         let action = match self.unprocessed_step_action(task_id, &step.id).await? {
             Some(a) => a,
-            None => self.request_step_action(task_id, cancel, &step).await?,
+            None => {
+                self.request_step_action(task_id, cancel, &step, role_override)
+                    .await?
+            }
         };
 
         match action {
@@ -469,6 +488,7 @@ impl AgentDriver {
         task_id: TaskId,
         cancel: &CancellationToken,
         step: &valyria_plan::PlanStep,
+        role_override: Option<Role>,
     ) -> Result<StepAction> {
         let objective = self.tasks.get(task_id).await?.objective;
         let turn_index = self.tasks.count_model_calls(task_id).await?;
@@ -513,7 +533,8 @@ impl AgentDriver {
         // unnoticed, but a real model had no schema for any tool it was
         // asked to call one of. `generate_action` also gets it the same
         // ladder recovery and fallback chain as the main Implementing loop.
-        let role = self.model_role(self.is_role_escalated(task_id));
+        let role =
+            role_override.unwrap_or_else(|| self.model_role(self.is_role_escalated(task_id)));
         let request = GenerateRequest::new(vec![Message::user(prompt)])
             .with_tools(self.tool_specs.clone())
             .with_turn_hint(turn_index);
@@ -906,7 +927,7 @@ impl AgentDriver {
     }
 }
 
-fn plan_err(e: valyria_plan::PlanCrateError) -> AgentError {
+pub(crate) fn plan_err(e: valyria_plan::PlanCrateError) -> AgentError {
     AgentError::Plan(e.to_string())
 }
 

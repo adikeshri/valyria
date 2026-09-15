@@ -256,6 +256,27 @@ impl AgentDriver {
     /// only between steps (never mid-effect) so a pause always lands
     /// cleanly on a step boundary.
     pub async fn run(&self, task_id: TaskId, cancel: CancellationToken) -> Result<()> {
+        self.run_with_role(task_id, cancel, None).await
+    }
+
+    /// M5: identical to [`AgentDriver::run`], except every `Planning`/
+    /// plan-driven `Implementing` model call uses `role_override` (when
+    /// `Some`) instead of the ordinary FastCoder/PrimaryCoder escalation
+    /// `model_role` picks. `run` is a thin `None`-forwarding wrapper around
+    /// this, so every pre-M5 call site's behavior is unchanged bit-for-bit.
+    ///
+    /// The role pipeline ([`crate::role_pipeline`]) uses this for its
+    /// Implementer child: without it, that child's `Planning`/`Implementing`
+    /// calls would resolve through the exact same global FastCoder-bound
+    /// check every ordinary task's does, which is indistinguishable from —
+    /// and would collide with — whatever role-specific model the pipeline's
+    /// other roles (Researcher, Reviewer) are bound to.
+    pub(crate) async fn run_with_role(
+        &self,
+        task_id: TaskId,
+        cancel: CancellationToken,
+        role_override: Option<Role>,
+    ) -> Result<()> {
         loop {
             if cancel.is_cancelled() {
                 self.tasks
@@ -312,14 +333,20 @@ impl AgentDriver {
                             .await?;
                     }
                     PlanningMode::ModelAuthored => {
-                        if self.step_planning(task_id, &cancel).await? == Flow::Return {
+                        if self.step_planning(task_id, &cancel, role_override).await?
+                            == Flow::Return
+                        {
                             return Ok(());
                         }
                     }
                 },
                 AgentState::Implementing => {
                     if self.task_has_plan(task_id).await? {
-                        if self.step_implementing_plan(task_id, &cancel).await? == Flow::Return {
+                        if self
+                            .step_implementing_plan(task_id, &cancel, role_override)
+                            .await?
+                            == Flow::Return
+                        {
                             return Ok(());
                         }
                     } else {
@@ -405,7 +432,7 @@ impl AgentDriver {
     /// the response's own `USER_RESPONSE`), since that's the only ordering
     /// that's meaningful when the two kinds interleave across a task with
     /// more than one question in it.
-    async fn build_conversation(&self, task_id: TaskId) -> Result<Vec<Message>> {
+    pub(crate) async fn build_conversation(&self, task_id: TaskId) -> Result<Vec<Message>> {
         let mut messages = self.system_and_task_messages(task_id).await?;
 
         let entries = self.tasks.journal_since(task_id, JournalSeq::ZERO).await?;

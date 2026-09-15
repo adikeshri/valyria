@@ -596,17 +596,101 @@ immediately without a Core change.
   `AgentDriver`, and asserts the total repair attempts across both
   processes still respect the same budget a single uninterrupted process
   is held to.
+- Role pipeline wiring (`valyria-agent::role_pipeline`): `AgentDriver::
+  run_role_pipeline` runs Researcher → Planner → Implementer → Tester →
+  Reviewer as a real sequence of child tasks under one coordinator,
+  persisting each role's typed `Artifact` (`ResearchBrief`/`Plan`/
+  `ChangeSet`/`VerificationReport`/`ReviewFindings`) to `PlanStore` — the
+  only channel roles communicate through, exactly as `valyria-plan`'s
+  Phase-8 design called for. Reuses existing machinery wherever a role's
+  job actually matches it rather than reinventing anything: Planner calls
+  `step_planning` verbatim (the exact "ask for `submit_plan`, validate,
+  repair under budget" cycle single-task `Planning` already does);
+  Implementer reuses the *entire* single-task state machine on its own
+  child, pre-loaded with the Planner's accepted revision, so it gets the
+  full edit/verify/diagnose/repair loop for free; Tester makes no model
+  call at all — its report is read straight from the `VerificationLog`
+  rows the Implementer's own mandatory verification already produced;
+  Researcher and Reviewer (read-only, no existing analogue) get a new
+  bounded Reason/Select/Execute loop restricted to their tool allowlist
+  plus a role-specific "submit" tool.
+
+  This surfaced two real, previously-untested gaps, both fixed:
+  - **Model routing was role-blind.** `AgentDriver::model_role` only ever
+    resolves to `FastCoder`/`PrimaryCoder` — nothing in the live loop ever
+    used the `Planner`/`Reviewer` `ModelRole`s valyria-model-registry has
+    defined since Phase 8. A role pipeline genuinely needs each role
+    routable to its own model (so Researcher/Reviewer can use a cheap
+    model while Implementer uses the strong one), and — as a test
+    surfaced immediately — the *existing* single-task `Planning`/
+    `Implementing` model calls have no way to be pinned to a specific
+    role independent of the global FastCoder-bound-or-not check, which
+    would otherwise make an unrelated role's binding hijack another
+    role's model choice. Fixed additively: `step_planning`/
+    `request_plan_from_model`/`step_implementing_plan`/
+    `request_step_action` all now take an `Option<Role>` override
+    (`None` — every pre-M5 call site via `run` — preserves prior behavior
+    bit-for-bit); `AgentDriver::run` is now a thin wrapper around a new
+    `pub(crate) run_with_role`. `role_pipeline::preferred_model_role`
+    maps each `AgentRole` to its `ModelRole` (Researcher→FastCoder,
+    Planner→Planner, Implementer→PrimaryCoder, Reviewer→Reviewer),
+    falling back to the ordinary `model_role` selection when nothing
+    role-specific is bound, so a driver that only ever bound
+    `PrimaryCoder` (every pre-M5 setup) still runs a role pipeline
+    end-to-end on that one model.
+  - **`Timestamp` could not survive `serde_json` at all.** `Artifact::Plan`
+    embeds a `PlanRevision`, which embeds a `Timestamp` (`u128` newtype);
+    `PlanStore::save_artifact` serializes the whole `Artifact` via
+    `serde_json::to_string`, which errored unconditionally
+    ("u128 is not supported" — serde_json has no native u128 support
+    without the `arbitrary_precision` feature, which this workspace
+    doesn't enable). This was real, latent, and pre-existing: nothing had
+    ever tried to serialize an `Artifact::Plan` before (the one existing
+    `Artifact` serde test in `valyria-plan` used `VerificationReport`),
+    and every other `Timestamp` persistence path in the codebase
+    deliberately goes through a raw SQL column, not `serde`. Fixed at the
+    source (`valyria-types::Timestamp`, layer 0): serializes as a decimal
+    string instead of a bare number — full range, no precision loss, and
+    since serialization always errored before, nothing could have been
+    depending on a numeric JSON shape. New regression tests
+    (`time::tests::round_trips_through_serde_json`,
+    `rejects_a_non_numeric_string`) guard it directly.
+
+  Proven end-to-end: `role_pipeline.rs`'s
+  `the_full_role_pipeline_runs_end_to_end_and_persists_every_artifact`
+  binds four *independently scripted* fake models (one per role — proving
+  routing is real, not coincidental sharing), drives a coordinator task
+  through the whole pipeline, and asserts the real file edit happened,
+  all five artifacts were persisted with the right role/kind, and all
+  four spawned children are linked back via `parent_task` and reached a
+  terminal state. A second test,
+  `a_reviewer_rejection_hands_the_coordinator_to_waiting_for_user_not_completed`,
+  proves a Reviewer that flags a problem blocks completion rather than
+  being silently ignored.
 
 **Deliberately deferred, with reasons**
 
-- Role pipeline wiring (Researcher → Planner → Implementer → Tester →
-  Reviewer spawning real child tasks and publishing `Artifact`s via
-  `PlanStore`): the `AgentRole`/`Artifact`/`StoredArtifact` types and their
-  persistence already exist in full in `valyria-plan` (Phase 8), but
-  wiring them into `valyria-agent`'s actual execution is a substantial
-  driver-shaped feature (a new orchestration mode alongside the existing
-  single-task loop) in its own right, not a small addition on top of
-  child tasks. Tracked as the next M5 chunk.
+- Role-pipeline coordinator crash-recovery: a coordinator killed
+  mid-pipeline restarts `run_role_pipeline` from scratch on the next call,
+  which would mint duplicate child tasks rather than resuming the ones
+  already in flight — every *child* task itself is fully crash-safe (an
+  ordinary task, recovered exactly like any other), so no work is
+  silently lost, but the coordinator's own "which role am I on"
+  bookkeeping needs a follow-up (checking `children_of(task_id)` before
+  spawning a new child) to make resuming the pipeline itself idempotent.
+- Auto-repair-revision loop: a Reviewer finding or a failing Tester
+  report hands the coordinator to `WaitingForUser` rather than looping
+  back into a new Implementer revision that addresses the feedback — real
+  follow-up work, not a corner cut silently (see the test proving the
+  hand-off happens rather than being ignored).
+- Role-pinned model routing only covers the Planner/Implementer's *first*
+  pass through `Planning`/`Implementing`; if the role-pipeline
+  Implementer's own mandatory verification fails and it enters
+  `Diagnosing`/`Repairing`, that repair cycle's model call falls back to
+  the ordinary global `model_role` selection (not the role-pinned one) —
+  immaterial for a passing implementation, but a real gap if a role
+  pipeline's Implementer needs to self-repair while a differently-bound
+  role (e.g. Researcher's `FastCoder`) is also active.
 - Parallel wave executor: `PlanStep.parallelizable`/`.targets` and
   `Schedule::waves()` (grouped concurrent steps) already exist and are
   tested in `valyria-plan`; `plan_exec.rs` still only consumes the
@@ -629,9 +713,15 @@ immediately without a Core change.
 - ✅ A loop detected before a crash is still counted after resume (proven
   end-to-end, not just at the unit level).
 - ✅ A repair-ledger budget exhausted across a crash does not reset.
+- ✅ The role pipeline runs end to end: Researcher, Planner, Implementer,
+  Tester and Reviewer each produce and persist their typed artifact, each
+  routed to its own model, with a real file edit landing on disk.
+- ✅ A Reviewer finding blocks completion (hands off to a human) rather
+  than being silently ignored.
 - Deferred to the next M5 chunk: two-wave concurrent execution surviving
   `kill -9` mid-wave; overlapping targets serializing; a Reviewer finding
-  causing a repair revision.
+  causing an automatic repair *revision* (today it hands off to a human
+  instead); role-pipeline coordinator crash-recovery.
 
 ---
 
