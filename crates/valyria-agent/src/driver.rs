@@ -689,10 +689,15 @@ impl AgentDriver {
             .as_ref()
             .map(|r| r.failures.clone())
             .unwrap_or_default();
-        // No graph wiring in the live loop yet (Phase 6 follow-up); an
-        // empty neighbour set means suspects come from the failure
-        // locations ∩ the change ledger alone.
-        let diagnosis = diagnose(&failures, &changed, &[]);
+        // M2: graph neighbours of each changed file, so a failure whose
+        // location is a *caller* of something this task touched — not the
+        // touched file itself — still implicates the right suspect. Empty
+        // (exactly pre-M2 behaviour: suspects from failure locations ∩ the
+        // change ledger alone) when there's no store, no index generation
+        // yet, or the graph errors for any reason — this is an
+        // enrichment, never a hard dependency.
+        let neighbors = self.graph_neighbors_for(&changed).await;
+        let diagnosis = diagnose(&failures, &changed, &neighbors);
         let fingerprint = diagnosis.fingerprint();
 
         self.tasks
@@ -1256,6 +1261,22 @@ impl AgentDriver {
         self.verify_states.lock().unwrap().insert(task_id, state);
     }
 
+    /// Graph neighbours of `changed`'s files — every file whose graph
+    /// edges depend on one of them, within `GraphStore::impact_of`'s
+    /// standard depth — as `(changed_file, neighbor)` pairs, the shape
+    /// `valyria_verify::diagnose` matches a failure location against
+    /// (M2). Empty (not an error) when this driver has no `store`, no
+    /// index generation has been published yet, or the graph query fails
+    /// for any reason: this only ever enriches suspects beyond "failure
+    /// locations ∩ the change ledger", never gates diagnosis on the graph
+    /// existing.
+    async fn graph_neighbors_for(&self, changed: &[PathBuf]) -> Vec<(PathBuf, PathBuf)> {
+        let Some(store) = self.store.clone() else {
+            return Vec::new();
+        };
+        graph_neighbors(&store, changed).await
+    }
+
     /// [`Self::journal_context_retrieved`]'s sibling for
     /// [`system_and_task_messages`](Self::system_and_task_messages)'s
     /// `ContextEngine`/`EngineInput` pipeline (M2), which assembles an
@@ -1441,6 +1462,41 @@ pub(crate) enum Flow {
     Return,
 }
 
+/// [`AgentDriver::graph_neighbors_for`]'s actual work, as a free function
+/// so it's testable without a full `AgentDriver` (M2): every file whose
+/// graph edges depend on one of `changed`'s files, within
+/// `GraphStore::impact_of`'s standard depth, as `(changed_file, neighbor)`
+/// pairs — the shape `valyria_verify::diagnose` matches a failure location
+/// against. Empty, never an error, when there's no index generation yet
+/// or a query fails — an enrichment, never a hard dependency.
+async fn graph_neighbors(
+    store: &Arc<valyria_store::Store>,
+    changed: &[PathBuf],
+) -> Vec<(PathBuf, PathBuf)> {
+    let index = valyria_index::IndexStore::new(store.clone());
+    let Ok(Some(info)) = index.current().await else {
+        return Vec::new();
+    };
+    let graph = valyria_graph::GraphStore::new(store.clone());
+
+    const IMPACT_DEPTH: usize = 2;
+    let mut pairs = Vec::new();
+    for path in changed {
+        let Some(path_str) = path.to_str() else {
+            continue;
+        };
+        if let Ok(impact) = graph
+            .impact_of(info.generation, path_str, IMPACT_DEPTH)
+            .await
+        {
+            for affected in impact.affected_files {
+                pairs.push((path.clone(), PathBuf::from(affected)));
+            }
+        }
+    }
+    pairs
+}
+
 /// Wire shape for one parsed verification failure (§19, §35, G15).
 fn failure_payload(f: &valyria_verify::Failure) -> serde_json::Value {
     let loc = |l: &valyria_verify::Location| serde_json::json!({ "path": l.file.display().to_string(), "line": l.line });
@@ -1521,5 +1577,93 @@ mod diagnostics_tests {
         assert_eq!(v["kind"], "timeout");
         assert_eq!(v["location"].as_array().unwrap().len(), 0);
         assert!(v["failing_test"].is_null());
+    }
+}
+
+#[cfg(test)]
+mod graph_neighbors_tests {
+    use super::*;
+    use std::path::Path;
+    use valyria_embed::{EmbedPipeline, EmbedStore, HashingEmbedder};
+    use valyria_graph::GraphStore as TestGraphStore;
+    use valyria_index::{IndexPipeline, IndexStore};
+    use valyria_lang::LanguageRegistry;
+
+    fn migrations() -> Vec<valyria_store::Migration> {
+        let mut m: Vec<valyria_store::Migration> = valyria_index::MIGRATIONS.to_vec();
+        m.extend(valyria_graph::MIGRATIONS.iter().copied());
+        m.extend(valyria_embed::MIGRATIONS.iter().copied());
+        m
+    }
+
+    /// M2: a caller depending on a changed callee shows up as a graph
+    /// neighbour of the changed file — the property `diagnose`'s
+    /// `GraphNeighbor` suspect reason relies on to flag "you broke this
+    /// caller by changing what it depends on", not just "this file itself
+    /// changed". Direct unit test of the free function (no full
+    /// `AgentDriver`/model/task machinery needed — see the function's own
+    /// doc comment for why it's split out).
+    #[tokio::test]
+    async fn a_caller_is_a_graph_neighbour_of_a_changed_callee() {
+        let ws = valyria_testkit::TempWorkspace::new();
+        ws.write(
+            "src/callee.rs",
+            "//! The changed file.\n\
+             pub fn compute_total(items: &[f64]) -> f64 {\n\
+             \x20   items.iter().sum()\n\
+             }\n",
+        );
+        ws.write(
+            "src/caller.rs",
+            "//! Depends on callee — where the failure actually shows up.\n\
+             use crate::callee::compute_total;\n\
+             \n\
+             pub fn checkout(items: &[f64]) -> f64 {\n\
+             \x20   compute_total(items)\n\
+             }\n",
+        );
+
+        let store = Arc::new(valyria_store::Store::open_in_memory(&migrations()).unwrap());
+        let index = IndexStore::new(store.clone());
+        let graph = TestGraphStore::new(store.clone());
+        let embed = EmbedStore::new(store.clone());
+
+        let pipeline = IndexPipeline::new(
+            ws.path().to_path_buf(),
+            LanguageRegistry::with_builtin_languages().unwrap(),
+            index.clone(),
+        );
+        let delta = pipeline.bootstrap_unstaged(&|_| {}).await.unwrap();
+        graph.build_for(&index, delta.generation).await.unwrap();
+        EmbedPipeline::new(
+            ws.path().to_path_buf(),
+            LanguageRegistry::with_builtin_languages().unwrap(),
+            Arc::new(HashingEmbedder::default()),
+            embed,
+        )
+        .bootstrap(&index, delta.generation)
+        .await
+        .unwrap();
+
+        let changed = vec![PathBuf::from("src/callee.rs")];
+        let pairs = graph_neighbors(&store, &changed).await;
+
+        assert!(
+            pairs.iter().any(
+                |(changed_file, neighbor)| changed_file == Path::new("src/callee.rs")
+                    && neighbor == Path::new("src/caller.rs")
+            ),
+            "expected (callee.rs, caller.rs) among the graph-neighbour pairs, got {pairs:?}"
+        );
+    }
+
+    /// No store — the honest, error-free empty result the live driver's
+    /// `graph_neighbors_for` falls back to.
+    #[tokio::test]
+    async fn no_generation_yet_is_an_empty_result_not_an_error() {
+        let store = Arc::new(valyria_store::Store::open_in_memory(&migrations()).unwrap());
+        let changed = vec![PathBuf::from("src/anything.rs")];
+        let pairs = graph_neighbors(&store, &changed).await;
+        assert!(pairs.is_empty());
     }
 }

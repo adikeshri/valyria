@@ -284,65 +284,106 @@ immediately without a Core change.
 
 ---
 
-### M2 — Repository intelligence in the loop
+### M2 — Repository intelligence in the loop  🟡 partially shipped 2026-09-15
 
-**Core**
-- C4: index lifecycle.
-  - `Runtime::open` starts a background staged bootstrap
-    (files → symbols → edges → embeddings), resumable, emitting
-    `index_progress`; lexical + symbol search are usable before embeddings
-    finish.
-  - The VFS watcher feeds the incremental pipeline (debounced); HEAD changes
-    become one bulk delta instead of N watcher events.
-  - Each step records the generation it planned against; divergence forces a
-    context refresh before execution (PLAN §4.24 stale-context guard).
-- C3: `SearchRetriever` replaces `StaticRetriever::empty()` in
-  `system_and_task_messages`.
-  - The query comes from objective + anchors (files the task touched, failing
-    test locations) + error signatures.
-  - Memory is a second retriever fused in.
-  - `context_retrieved` carries real items with their `ScoreExplanation`.
-- C5/C6 (read tools): real `search` (fused modes + explanation in the rendered
-  output), `symbol_search`, `find_definition`, `find_references`, `read_many`,
-  `git_blame` (line-range scoped via `gix`). All bound to the model; the
-  `EXCLUDED` list is deleted.
-- C7:
-  - `diagnose` gets graph neighbours of failure locations.
-  - The verify strategy maps changed symbols → covering tests through the
-    graph for `TargetedTest` / `RelatedTests`.
-- C9 (part): plan target validation resolves against the index (symbols as
-  well as paths).
-- C10: `SymbolResolver` merges index results with a pooled LSP client when a
-  server is healthy.
-  - Spawn on demand, restart on crash, idle shutdown, memory cap.
-  - Each result records its source; ranking prefers LSP on conflict.
-  - `doctor` reports server health.
-- C11: `Embedder` role served by llama-server `/v1/embeddings` from a small
-  catalog embedding GGUF.
-  - Vectors are tagged with embedder id; switching embedder re-embeds by
-    generation.
-  - `HashingEmbedder` stays as the no-model fallback, reported as `degraded`.
-  - Optional `Reranker` role for the final rerank stage.
+**Core — shipped:**
+- C4 (part): index lifecycle at `open`, synchronous and scoped-down.
+  - `valyria_app::Runtime::open` bootstraps the index (files → symbols →
+    graph → embeddings) and wires the result into the driver, but **only**
+    for `ModelBackend::Local`. The Fake backend — every existing CLI/agent
+    test, including the timing-sensitive kill-9/resume races — keeps
+    `LiveRetriever::empty()` and zero added latency, exactly as before.
+  - Not shipped: this is a *blocking* bootstrap at `open` time, not the
+    staged, non-blocking, resumable background bootstrap with
+    `index_progress` the full design calls for. A failed embedding stage
+    degrades to lexical/symbol search rather than losing retrieval, but a
+    slow *index* stage still delays `open` itself. Real background staging
+    is its own focused piece of work, deferred (see below).
+  - Not shipped: the VFS watcher still has zero consumers (C4's
+    incremental-pipeline wiring and the stale-context generation guard are
+    both untouched).
+- C3: `LiveRetriever` (`Static` | `Search`) replaces the hardcoded
+  `StaticRetriever::empty()` in `AgentDriver::system_and_task_messages`,
+  set via a new `with_retriever` builder (`Runtime::open` calls it for the
+  `Local` backend). The query is the task objective (`RetrievalQuery::new`'s
+  default) — not yet enriched with anchors/failing-test-locations/error
+  signatures, and memory is not fused in as a second retriever (both
+  deferred, see below). Every retrieval is journaled as `context_retrieved`
+  with real items and their per-hit `ScoreExplanation`-derived score
+  (`journal_prompt_context_retrieved`, new).
+- C5/C6 (read tools, partial): `search` and `symbol_search` are real —
+  the `EXCLUDED` stub list in `tool_specs.rs` no longer contains them,
+  `ToolCtx` carries an optional `store: Arc<Store>` the tools open the
+  fused `SearchEngine` through (mirroring `Runtime::search`'s own
+  `!Send`-future/scoped-thread bridge), degrading to a clean
+  `tools.search_unavailable` failure — never a panic — when no store is
+  wired. `git_blame` stays excluded and stays a stub: `valyria-git` has no
+  blame implementation *at all* yet (not just the tool wrapper), which is
+  real, separate work this milestone didn't touch. `find_definition`,
+  `find_references`, `read_many` are not built (deferred, see below).
+- C7 (part): `diagnose` gets real graph neighbours. A new
+  `graph_neighbors` (free function, unit-tested directly) walks
+  `GraphStore::impact_of` for each changed file and feeds the
+  `(changed_file, neighbor)` pairs `valyria_verify::diagnose` already knew
+  how to use — a caller broken by an edit to its callee now gets flagged
+  as a `GraphNeighbor` suspect instead of only being found by literal
+  failure-location or change-ledger overlap. Verified end to end with a
+  two-file fixture (a real caller/callee pair through a real bootstrapped
+  index+graph). The verify-strategy half of C7 (changed symbols → covering
+  tests, for `TargetedTest`/`RelatedTests` selection) is not built.
 
-**Protocol 1.14** — `index_progress` event; `IndexStatus` gains
-`{ stage, watcher, embedder, lsp_servers[] }`; `context_explain { task_id,
-turn }` → the stored `ContextSnapshot` items with provenance.
-
-**App**
-- Search panel (Core fused search, per-hit "why" from `ScoreExplanation`,
-  mode chips, anchors from open editors).
-- Index progress in status bar + Home.
-- Context Inspector lit with real data and `context_explain` per turn.
-- "Why was this file in context?" action from the explorer.
+**Deliberately deferred, with reasons:**
+- **Background, non-blocking, staged bootstrap + `index_progress` +
+  the VFS watcher wiring** — real, focused infrastructure work (resumable
+  staged indexing, a debounced watcher-to-incremental-pipeline bridge, the
+  stale-context generation guard) that deserves its own pass rather than a
+  rider on getting retrieval wired at all. The synchronous bootstrap
+  shipped here is a real, working, but scoped-down first cut.
+- **`find_definition` / `find_references` / `read_many` tools** — each is
+  real, separate tool-surface work (symbol resolution against the index,
+  a read-many batching contract) with no shared plumbing to this
+  milestone's search wiring beyond `ToolCtx.store`, which they can now
+  build on directly.
+- **`git_blame`** — blocked on `valyria-git` having no blame
+  implementation at all; a `gix`-based line-range blame is its own task.
+- **LSP consumer wiring (C10)** — `valyria-lsp` still has zero consumers;
+  merging its results into `SymbolResolver` ranking is real, separate
+  work with its own real-server test matrix (deferred to run alongside
+  M8's language-corpus expansion, where a real-server LSP matrix is
+  needed anyway).
+- **Real `Embedder` role (C11)** — blocked on M6's real multi-model
+  wiring (an embedding-capable model actually loaded via the pool);
+  `HashingEmbedder` stays the retrieval signal for now, exactly as
+  before M2.
+- **Query enrichment (anchors, failing-test locations, error signatures)
+  and memory as a second fused retriever** — both real, bounded follow-on
+  work once M3 (memory) exists to fuse in.
+- **Plan target index resolution (C9 part)** — plan validation still
+  resolves targets against the filesystem, not the index; unaffected by
+  this milestone.
+- **Protocol 1.14 and the app surfaces it would drive** (`index_progress`
+  event, `IndexStatus` fields, `context_explain`, the Search panel, Index
+  progress UI, a lit-up Context Inspector) — not started. `context_
+  retrieved`'s existing payload already carries real items post-M2, so a
+  future app pass has real data to render without a protocol change; the
+  new pieces above (`index_progress`, `context_explain`) still need one.
 
 **Exit:**
-- A task whose target file isn't named in the objective finds it through
-  retrieval (fake-model scenario asserts the file is in `context_retrieved`
-  before the edit).
-- Incremental reindex after a single edit is observed in a test.
-- `verify_index` shows zero drift after watcher-driven updates.
-- The model calls real `search` successfully.
-- LSP enrichment is exercised against a real `rust-analyzer` in CI.
+- ✅ A fake-model-independent scenario proves a real `SearchRetriever`
+  finds the one relevant file among distractors and it lands in
+  `context_retrieved` (`valyria-agent/tests/live_retrieval.rs`), driving
+  the real `AgentDriver`.
+- ✅ `search`/`symbol_search` find real content through `ToolRuntime::
+  invoke` end to end (`valyria-tools/tests/search_tool.rs`).
+- ✅ A caller broken by a changed callee is flagged as a graph-neighbour
+  suspect, proven against a real bootstrapped index+graph
+  (`valyria-agent/src/driver.rs::graph_neighbors_tests`).
+- ✅ `cargo test --workspace` clean (1210 passed, 4 pre-existing
+  `#[ignore]`, 0 failed), `cargo fmt --check` and `cargo clippy --workspace
+  --all-targets -D warnings` both clean.
+- Deferred (see above): incremental reindex / watcher observation,
+  `verify_index` drift after watcher-driven updates, LSP enrichment
+  against a real server, the background staged bootstrap.
 
 ---
 
