@@ -225,7 +225,7 @@ fn now_ms() -> i64 {
 /// whatever `mlx-lm` version is pinned above.
 pub fn find_system_python() -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
-    let candidates = [
+    let mut candidates = vec![
         "python3.13",
         "python3.12",
         "python3.11",
@@ -233,9 +233,22 @@ pub fn find_system_python() -> Option<PathBuf> {
         "python3.9",
         "python3",
     ];
+    // The `python3` executable-naming convention (PEP 394) is a
+    // Unix-world thing -- the official python.org Windows installer (and
+    // what CI's `windows-latest` runner has on `PATH`) provides only
+    // `python.exe`, never `python3.exe`. Tried last so a `python3*` match
+    // always wins on a system that happens to have both.
+    if cfg!(windows) {
+        candidates.push("python");
+    }
     for candidate in candidates {
         for dir in std::env::split_paths(&path_var) {
-            let full = dir.join(candidate);
+            // Every candidate above is a bare stem: `Path::is_file` needs
+            // the real filename, extension included, which is `""` on
+            // Unix but `.exe` on Windows (`std::env::consts::EXE_SUFFIX`)
+            // -- without this, `dir.join("python3")` never matches the
+            // Windows-only file `python3.exe` even when it exists.
+            let full = dir.join(format!("{candidate}{}", std::env::consts::EXE_SUFFIX));
             if full.is_file() {
                 return Some(full);
             }
