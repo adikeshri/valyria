@@ -162,6 +162,34 @@ fn status_field(status_text: &str, field: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// `valyria task resume` immediately after a real `SIGKILL` races the OS's
+/// own cleanup of the killed process's file handles: on a loaded machine
+/// the new process can observe the workspace `.db` (or its `-wal`/`-shm`
+/// siblings) still exclusively locked at the filesystem level for a brief
+/// window after `wait()` returns, which is a coarser lock than SQLite's own
+/// `busy_timeout` covers. Retried a handful of times with a short backoff
+/// rather than asserted once, so that narrow window doesn't flake the test
+/// — this is the CLI-process analogue of the in-process retry the resume
+/// path itself already does for a stale pause signal.
+fn resume_with_retry(workspace: &Path, task_id: &str, extra_args: &[&str]) -> std::process::Output {
+    const MAX_ATTEMPTS: usize = 5;
+    let workspace_str = workspace.display().to_string();
+    let mut args = vec!["task", "resume", task_id, "--workspace", &workspace_str];
+    args.extend_from_slice(extra_args);
+    let mut last = None;
+    for attempt in 1..=MAX_ATTEMPTS {
+        let out = valyria(&args);
+        if out.status.success() {
+            return out;
+        }
+        if attempt < MAX_ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_millis(50 * attempt as u64));
+        }
+        last = Some(out);
+    }
+    last.expect("MAX_ATTEMPTS >= 1")
+}
+
 #[test]
 fn full_run_completes_and_edits_the_fixture() {
     let ws = fixture_repo();
@@ -267,13 +295,7 @@ fn kill_nine_then_restart_and_resume_completes_correctly_without_double_applying
         assert!(state != "CANCELLED", "unexpected cancellation: {status}");
 
         // Resume as a brand-new process against the same on-disk store.
-        let out = valyria(&[
-            "task",
-            "resume",
-            &task_id,
-            "--workspace",
-            &ws.path().display().to_string(),
-        ]);
+        let out = resume_with_retry(ws.path(), &task_id, &[]);
         assert!(
             out.status.success(),
             "resume failed: {}",
@@ -657,18 +679,18 @@ fn multi_step_plan_survives_kill_nine_and_resumes_mid_plan() {
         // rebuilds the runtime per invocation and has no daemon to carry
         // that choice), exactly as `--workspace` is repeated on every
         // subcommand.
-        let out = valyria(&[
-            "task",
-            "resume",
+        let scenario_str = scenario.display().to_string();
+        let out = resume_with_retry(
+            ws.path(),
             &task_id,
-            "--workspace",
-            &ws.path().display().to_string(),
-            "--scenario",
-            &scenario.display().to_string(),
-            "--plan",
-            "--permission-mode",
-            "autonomous",
-        ]);
+            &[
+                "--scenario",
+                &scenario_str,
+                "--plan",
+                "--permission-mode",
+                "autonomous",
+            ],
+        );
         assert!(
             out.status.success(),
             "resume failed: {}",

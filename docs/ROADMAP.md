@@ -12,7 +12,16 @@ Status vocabulary:
 - **scaffolded** — the crate compiles, declares its layer and phase, and is
   wired into the layering check. No implementation yet.
 
-Last updated: 2026-08-29 (after Phase 11).
+Last updated: 2026-09-15 (after the `feat/local-inference` merge, PR #32).
+
+**The authoritative, re-verified gap list and the plan to close every one of
+them — Core and the app together — is
+[docs/COMPLETION-PLAN.md](COMPLETION-PLAN.md).** This file's phase
+narrative below (Phases 0–11) is a historical record of *how the codebase got
+here* and is left as written at the time; treat its "Known gaps" table and
+each phase's "Deliberate scope choices" as superseded by COMPLETION-PLAN.md
+§0, which was checked directly against the code rather than against this
+document.
 
 ---
 
@@ -35,6 +44,42 @@ Last updated: 2026-08-29 (after Phase 11).
 
 Phase 9 can start early against the OpenAI-compatible adapter (a locally running
 `llama-server`) without waiting for any FFI work.
+
+---
+
+## What the `feat/local-inference` merge delivered (post-Phase 11, PR #32)
+
+Landed on `main` 2026-09-15, closing several items the Phase 9/10 rows above
+still listed as deferred:
+
+- **A concrete HTTP transport.** `valyria-runtime-openai-compat::
+  transport_reqwest` is a real `reqwest`/`rustls` `HttpTransport` impl
+  (buffered and SSE), no longer only `MockTransport`-tested.
+- **`valyria-engine-store`** (new crate): downloads, verifies and manages the
+  `llama-server` binary itself per-platform — Core provisions its own
+  inference engine; no `brew install llama.cpp` required. Emits
+  `engine_install_{progress,completed,failed}`.
+- **`valyria-runtime-llamacpp`** is implemented, not a scaffold:
+  `LlamaServerRuntime` + `LlamaServer` process supervision (spawn, ready-wait,
+  crash detection, shutdown) over `OpenAiCompatRuntime`.
+- **The orchestrator hot-swaps.** `Orchestrator::bind`/`rebind` let
+  `model_activate` repoint a role's live model with no daemon restart, and
+  `Orchestrator::generate_action` — what `valyria-agent`'s live driver loop
+  actually calls — already runs every turn through
+  `structured::resolve_action`, i.e. **the D5 transport ladder is wired into
+  the live loop**, contrary to what Phase 9's row above still says. What is
+  *not* yet wired: `RoleRouter` (fallback chains — `Orchestrator` is still
+  one model per role) and `ModelPool` (memory-aware eviction across
+  simultaneously-loaded roles). See COMPLETION-PLAN.md M1.
+- **`valyria-app`** boots a real `llama-server` per role from an installed,
+  bound model (`model_runtimes.rs::ModelRuntimeRegistry`), with a real
+  load-and-generate `ServerProber` replacing `NullProber` for local installs,
+  and emits `model_server_{starting,ready,failed,stopped}`.
+- **Protocol 1.12.0** — capability `model_inference`; the seven event kinds
+  above, no new `Request`/`Response` variants.
+
+1207 tests pass across the workspace as of this merge (up from 1087 at the
+end of Phase 11).
 
 ---
 
