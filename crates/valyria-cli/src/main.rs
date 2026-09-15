@@ -17,10 +17,10 @@ use std::sync::Arc;
 use futures::StreamExt;
 use valyria_app::{load_scenario, serve, EmbeddedClient, Runtime, RuntimeConfig};
 use valyria_protocol::{
-    Client, Empty, MemoryListRequest, ModelActivateRequest, ModelEndpointAddRequest,
-    ModelIdRequest, ModelInstallRequest, ModelRecommendRequest, PermissionResolveRequest, Request,
-    Response, StoragePurgeRequest, TaskCreateRequest, TaskIdRequest, TaskRollbackRequest,
-    TaskStatusRequest,
+    CatalogRefreshRequest, Client, Empty, MemoryListRequest, ModelActivateRequest,
+    ModelEndpointAddRequest, ModelIdRequest, ModelInstallRequest, ModelRecommendRequest,
+    PermissionResolveRequest, Request, Response, StoragePurgeRequest, TaskCreateRequest,
+    TaskIdRequest, TaskRollbackRequest, TaskStatusRequest,
 };
 use valyria_util::CancellationToken;
 
@@ -47,6 +47,7 @@ fn main() -> ExitCode {
         Some("config") => tokio_main(cmd_config(argv[1..].to_vec())),
         Some("model") => tokio_main(cmd_model(argv[1..].to_vec())),
         Some("model-endpoint") => tokio_main(cmd_model_endpoint(argv[1..].to_vec())),
+        Some("catalog-refresh") => tokio_main(cmd_catalog_refresh(argv[1..].to_vec())),
         Some("memory") => tokio_main(cmd_memory(argv[1..].to_vec())),
         Some("serve") => tokio_main(cmd_serve(argv[1..].to_vec())),
         _ => {
@@ -84,6 +85,7 @@ fn print_usage() {
     eprintln!("    valyria model-endpoint <list|add <id> <base_url> [--display-name NAME]");
     eprintln!("                  [--remote-model NAME] [--context-length N] [--no-native-tools]");
     eprintln!("                  [--supports-grammar]|remove <id>> [--json]");
+    eprintln!("    valyria catalog-refresh <catalog_url> <signature_url> [--json]");
     eprintln!("    valyria memory list [<query>] [--json]  inspect stored memory");
     eprintln!("    valyria clean --scope <memory|cache|tasks|logs> [--dry-run] [--json]");
     eprintln!("    valyria serve [--socket <path>]         run the daemon");
@@ -384,6 +386,32 @@ async fn cmd_model_endpoint(raw: Vec<String>) -> ExitCode {
             ExitCode::from(64)
         }
     }
+}
+
+/// `valyria catalog-refresh <catalog_url> <signature_url>` — fetch a
+/// candidate catalog and its detached ed25519 signature, verify against
+/// this build's compiled-in trusted key, and (only if genuinely newer)
+/// accept it in place of the embedded baseline.
+async fn cmd_catalog_refresh(raw: Vec<String>) -> ExitCode {
+    let (Some(catalog_url), Some(signature_url)) = (
+        raw.iter().find(|a| !a.starts_with("--")).cloned(),
+        raw.iter().filter(|a| !a.starts_with("--")).nth(1).cloned(),
+    ) else {
+        eprintln!("error: usage: valyria catalog-refresh <catalog_url> <signature_url>");
+        return ExitCode::from(64);
+    };
+    one_shot(
+        raw,
+        "catalog-refresh",
+        move |_| {
+            Request::CatalogRefresh(CatalogRefreshRequest {
+                catalog_url: catalog_url.clone(),
+                signature_url: signature_url.clone(),
+            })
+        },
+        render::catalog_refresh,
+    )
+    .await
 }
 
 /// `valyria model install <id> [--accept-license]`. Without the flag this

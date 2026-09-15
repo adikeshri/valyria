@@ -12,7 +12,7 @@
 //!   field (backward compatible: old clients ignore it);
 //! - **major** — a removed/renamed variant or field, or a changed type
 //!   (breaking: old clients misparse).
-pub const PROTOCOL_VERSION: &str = "1.14.0";
+pub const PROTOCOL_VERSION: &str = "1.15.0";
 
 /// Capability tokens a `HelloResponse` advertises (§4.27). A client
 /// negotiates against these, not the version string — a runtime built
@@ -100,6 +100,11 @@ pub mod capability {
     /// supervising their process: `model_endpoint_add/remove/list`
     /// (Phase 9/M6 follow-up).
     pub const MODEL_ENDPOINTS: &str = "model_endpoints";
+    /// `catalog_refresh` is served: a caller can offer a signed catalog +
+    /// detached signature and have Core verify it against its compiled-in
+    /// trusted key and, if newer, accept it in place of the embedded
+    /// baseline (§ M6).
+    pub const CATALOG_REFRESH: &str = "catalog_refresh";
 
     /// The full set an embedded runtime supports.
     pub const ALL: &[&str] = &[
@@ -124,5 +129,6 @@ pub mod capability {
         MODEL_INFERENCE,
         MULTI_AGENT,
         MODEL_ENDPOINTS,
+        CATALOG_REFRESH,
     ];
 }

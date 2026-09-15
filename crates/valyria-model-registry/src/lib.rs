@@ -12,9 +12,11 @@
 //!    named alternative rather than failing the task.
 //!
 //! The catalog ships **embedded** (`catalog.json`, compiled in via
-//! `include_str!`) so the runtime works fully offline; a signed remote
-//! refresh is a Phase 10 concern. Nothing here downloads, loads, or runs a
-//! model — that is `valyria-model-store` and the runtime adapters.
+//! `include_str!`) so the runtime works fully offline; [`signing`]'s
+//! ed25519 mechanism lets a caller accept a signed remote refresh instead
+//! (§ M6, [`Catalog::verify_and_parse_signed`]). Nothing here downloads,
+//! loads, or runs a model — that is `valyria-model-store` and the runtime
+//! adapters.
 
 #![forbid(unsafe_code)]
 
@@ -24,13 +26,22 @@ pub mod error;
 pub mod license;
 pub mod role;
 pub mod select;
+pub mod signing;
 
 pub use card::{EngineKind, ModelCard, Quantization, TransportPreference};
 pub use catalog::Catalog;
+/// Re-exported so a caller of [`Catalog::verify_and_parse_signed`] /
+/// [`signing::sign`] doesn't need its own direct `ed25519-dalek`
+/// dependency just to hold the key types those functions pass around.
+pub use ed25519_dalek::{SigningKey, VerifyingKey};
 pub use error::{RegistryError, Result};
 pub use license::{has_license_text, license_text};
 pub use role::ModelRole;
 pub use select::{score_card_for_role, select_for_role, CardScore, RoleAssignment, RoleBinding};
+pub use signing::{
+    generate_keypair, parse_public_key_hex, sign, verify as verify_signature,
+    CATALOG_PUBLIC_KEY_HEX,
+};
 
 /// Kept for backwards compatibility with the scaffold; the crate is now
 /// implemented.

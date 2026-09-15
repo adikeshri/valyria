@@ -694,6 +694,27 @@ pub struct ModelEndpointListResponse {
     pub endpoints: Vec<ModelEndpointWire>,
 }
 
+/// `catalog_refresh` (protocol 1.15.0, M6) — fetch a candidate catalog
+/// and its detached signature from `catalog_url`/`signature_url`, verify
+/// against this build's compiled-in trusted key, and (only if it's
+/// strictly newer than what's currently in effect) durably persist it as
+/// the catalog every other model-listing call reads through. Two
+/// separate URLs rather than a convention (`catalog_url` + `.sig`)
+/// because no canonical hosting for this exists yet — see `docs/
+/// COMPLETION-PLAN.md`'s M6 section.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CatalogRefreshRequest {
+    pub catalog_url: String,
+    pub signature_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CatalogRefreshResponse {
+    pub previous_version: u32,
+    pub new_version: u32,
+    pub model_count: u32,
+}
+
 /// `model_install` — begin a download. `accept_license` is the wire record
 /// of the user's acceptance of the model's license (its text is on
 /// `ModelInspectResponse::license_text`). Core **refuses** the install with

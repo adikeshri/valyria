@@ -19,9 +19,10 @@ use valyria_model::{
     Capabilities, GenerateRequest, LocalModelServer, Message, ModelRuntime, SamplingParams,
 };
 use valyria_model_registry::{
-    score_card_for_role, CardScore, Catalog, EngineKind, ModelCard, ModelRole, RoleBinding,
+    parse_public_key_hex, score_card_for_role, CardScore, Catalog, EngineKind, ModelCard,
+    ModelRole, RoleBinding, CATALOG_PUBLIC_KEY_HEX,
 };
-use valyria_model_store::{EndpointRow, HttpFetcher, ModelStore, NullProber};
+use valyria_model_store::{EndpointRow, Fetcher, HttpFetcher, ModelStore, NullProber};
 use valyria_orchestrator::{
     EvictReason, ModelPool, NoModelRuntime, PoolError, PoolEvent, Role, RoleRouter,
 };
@@ -135,6 +136,14 @@ pub struct ModelEndpointOptions<'a> {
     pub supports_grammar: Option<bool>,
 }
 
+/// The result of a successful [`Runtime::catalog_refresh`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CatalogRefreshOutcome {
+    pub previous_version: u32,
+    pub new_version: u32,
+    pub model_count: usize,
+}
+
 /// Loads a scenario TOML file into a `Scenario` `RuntimeConfig` can be
 /// built with, without the caller needing to depend on
 /// `valyria-runtime-fake` directly — kept here specifically so
@@ -179,6 +188,15 @@ pub struct RuntimeConfig {
     /// store, and logs (§4.1). Defaults to [`GlobalStore::default_root`];
     /// tests point it at a tempdir.
     pub global_dir: PathBuf,
+    /// Hex-encoded ed25519 public key `catalog_refresh` (and every later
+    /// re-load of a persisted refresh) trusts. `None` uses this build's
+    /// compiled-in [`valyria_model_registry::CATALOG_PUBLIC_KEY_HEX`] —
+    /// the only sensible choice in production. Exists as a config knob
+    /// purely so a test can exercise the *real* `catalog_refresh` →
+    /// persist → `effective_catalog` re-load round trip with a throwaway
+    /// keypair it actually holds the private half of, since the
+    /// compiled-in key's private half deliberately exists nowhere.
+    pub catalog_trusted_key_hex: Option<String>,
 }
 
 impl RuntimeConfig {
@@ -192,7 +210,16 @@ impl RuntimeConfig {
             model_backend: ModelBackend::Fake(Scenario::default_walking_skeleton()),
             planning_mode: PlanningMode::default(),
             global_dir: GlobalStore::default_root(),
+            catalog_trusted_key_hex: None,
         }
+    }
+
+    /// Test-only in practice (see the field's own doc comment) — trust a
+    /// different ed25519 public key for `catalog_refresh` than this
+    /// build's compiled-in one.
+    pub fn with_catalog_trusted_key_hex(mut self, hex: impl Into<String>) -> Self {
+        self.catalog_trusted_key_hex = Some(hex.into());
+        self
     }
 
     pub fn with_planning_mode(mut self, mode: PlanningMode) -> Self {
@@ -282,6 +309,11 @@ pub struct Runtime {
     /// budget under an admission already in flight would make eviction
     /// decisions non-reproducible).
     pool: Option<Arc<tokio::sync::Mutex<ModelPool>>>,
+    /// The ed25519 public key `catalog_refresh` and every catalog read
+    /// (via [`effective_catalog`]) trust — this build's compiled-in
+    /// [`CATALOG_PUBLIC_KEY_HEX`] unless overridden by [`RuntimeConfig::
+    /// catalog_trusted_key_hex`] (test-only in practice).
+    catalog_trusted_key: valyria_model_registry::VerifyingKey,
 }
 
 impl Runtime {
@@ -303,6 +335,13 @@ impl Runtime {
     /// `valyria_task::TaskManager::recover_task_if_active`'s docs for the
     /// full reasoning.
     pub async fn open(config: RuntimeConfig) -> Result<Self> {
+        let catalog_trusted_key = parse_public_key_hex(
+            config
+                .catalog_trusted_key_hex
+                .as_deref()
+                .unwrap_or(CATALOG_PUBLIC_KEY_HEX),
+        )
+        .map_err(|e| AppError::Repo(format!("catalog trusted key: {e}")))?;
         let workspace_root = WorkspaceRoot::new(&config.workspace_path).map_err(AppError::Vfs)?;
         std::fs::create_dir_all(&config.data_dir).map_err(|e| {
             AppError::Vfs(valyria_vfs::VfsError::Io {
@@ -409,6 +448,7 @@ impl Runtime {
                         model_runtimes: model_runtimes.clone(),
                         pool: model_pool.clone(),
                         events: events.clone(),
+                        catalog_trusted_key,
                     },
                 );
             }
@@ -437,7 +477,8 @@ impl Runtime {
             // `spawn_model_boot` would fail trying to load them. Guard it
             // explicitly rather than relying on every call site to know
             // that distinction.
-            if let (Ok(catalog), false) = (Catalog::embedded(), installed.is_empty()) {
+            if !installed.is_empty() {
+                let catalog = effective_catalog(global.root(), &catalog_trusted_key);
                 for role in ModelRole::ALL {
                     if bound_roles.contains(&role) {
                         continue;
@@ -461,6 +502,7 @@ impl Runtime {
                             model_runtimes: model_runtimes.clone(),
                             pool: model_pool.clone(),
                             events: events.clone(),
+                            catalog_trusted_key,
                         },
                     );
                 }
@@ -553,6 +595,7 @@ impl Runtime {
             model_runtimes,
             use_fake_model,
             pool,
+            catalog_trusted_key,
         })
     }
 
@@ -1090,7 +1133,7 @@ impl Runtime {
     /// (§4.21). This is the full "what can I run" surface — the catalog
     /// ships embedded, so a clean machine still lists every model.
     pub async fn model_list(&self) -> Result<Vec<ModelListEntryView>> {
-        let catalog = Catalog::embedded().map_err(|e| AppError::Plan(e.to_string()))?;
+        let catalog = effective_catalog(self.global.root(), &self.catalog_trusted_key);
         let installed: std::collections::BTreeSet<String> = self
             .global
             .models()
@@ -1146,7 +1189,7 @@ impl Runtime {
         Option<(ModelCard, CardScore)>,
         Vec<(ModelCard, Option<CardScore>, bool)>,
     )> {
-        let catalog = Catalog::embedded().map_err(|e| AppError::Plan(e.to_string()))?;
+        let catalog = effective_catalog(self.global.root(), &self.catalog_trusted_key);
         let hw = self.hardware_probe();
         let installed: std::collections::BTreeSet<String> = self
             .global
@@ -1211,7 +1254,7 @@ impl Runtime {
         if !accept_license {
             return Err(AppError::LicenseNotAccepted(id.to_string()));
         }
-        let catalog = Catalog::embedded().map_err(|e| AppError::Plan(e.to_string()))?;
+        let catalog = effective_catalog(self.global.root(), &self.catalog_trusted_key);
         let card = catalog
             .get(id)
             .ok_or_else(|| AppError::Repo(format!("no catalog model `{id}`")))?
@@ -1456,7 +1499,15 @@ impl Runtime {
             ))
             .await;
 
-        match boot_model_server(self.global.root(), id, &model_store, &self.events).await {
+        match boot_model_server(
+            self.global.root(),
+            id,
+            &model_store,
+            &self.events,
+            &self.catalog_trusted_key,
+        )
+        .await
+        {
             Ok(handle) => {
                 let port = handle.port();
                 self.orchestrator.bind_single(
@@ -1507,7 +1558,7 @@ impl Runtime {
     /// Full detail for model `id`: its catalog card, its manifest when
     /// installed, and the roles it is bound to.
     pub async fn model_inspect(&self, id: &str) -> Result<ModelInspectView> {
-        let catalog = Catalog::embedded().map_err(|e| AppError::Plan(e.to_string()))?;
+        let catalog = effective_catalog(self.global.root(), &self.catalog_trusted_key);
         let card = catalog
             .get(id)
             .ok_or_else(|| AppError::Repo(format!("no catalog model `{id}`")))?
@@ -1565,12 +1616,11 @@ impl Runtime {
                 "endpoint base_url {base_url:?} has no host"
             )));
         }
-        if let Ok(catalog) = Catalog::embedded() {
-            if catalog.get(id).is_some() {
-                return Err(AppError::Repo(format!(
-                    "`{id}` is already an embedded catalog model id; pick a different endpoint id"
-                )));
-            }
+        let catalog = effective_catalog(self.global.root(), &self.catalog_trusted_key);
+        if catalog.get(id).is_some() {
+            return Err(AppError::Repo(format!(
+                "`{id}` is already an embedded catalog model id; pick a different endpoint id"
+            )));
         }
         let now = SystemClock.now().as_millis() as i64;
         self.global
@@ -1681,6 +1731,73 @@ impl Runtime {
         };
         let rt = OpenAiCompatRuntime::new(transport, row.remote_model_name.clone(), capabilities);
         Ok(Arc::new(rt))
+    }
+
+    /// Fetch a candidate catalog + its detached signature from
+    /// `catalog_url`/`signature_url`, verify the signature against
+    /// [`Self::catalog_trusted_key`] (this build's compiled-in
+    /// [`CATALOG_PUBLIC_KEY_HEX`] unless a test overrode it via
+    /// [`RuntimeConfig::catalog_trusted_key_hex`]), refuse it if its
+    /// `version` isn't strictly newer than what's currently in effect
+    /// (anti-rollback — see [`valyria_model_registry::Catalog::
+    /// verify_and_parse_signed`]), and only then persist it durably
+    /// (atomic write) as the catalog every other `Runtime` method reads
+    /// through [`effective_catalog`]. Nothing is written, and nothing
+    /// already cached is disturbed, on any failure — signature, parse, or
+    /// rollback alike.
+    pub async fn catalog_refresh(
+        &self,
+        catalog_url: &str,
+        signature_url: &str,
+    ) -> Result<CatalogRefreshOutcome> {
+        self.catalog_refresh_with(catalog_url, signature_url, &CatalogHttpFetcher::new()?)
+            .await
+    }
+
+    /// [`Self::catalog_refresh`] with an injected [`Fetcher`] — production
+    /// passes a real `HttpFetcher`; tests pass an in-memory one, or a
+    /// real one pointed at a real local HTTP server, and use
+    /// [`RuntimeConfig::catalog_trusted_key_hex`] to trust a throwaway
+    /// keypair they actually hold the private half of, since this
+    /// build's compiled-in key's private half deliberately exists
+    /// nowhere (see [`CATALOG_PUBLIC_KEY_HEX`]'s own doc comment).
+    pub async fn catalog_refresh_with<F: Fetcher>(
+        &self,
+        catalog_url: &str,
+        signature_url: &str,
+        fetcher: &F,
+    ) -> Result<CatalogRefreshOutcome> {
+        let current_version =
+            effective_catalog(self.global.root(), &self.catalog_trusted_key).version();
+
+        let catalog_bytes = fetch_whole(fetcher, catalog_url).await?;
+        let sig_bytes = fetch_whole(fetcher, signature_url).await?;
+        let signature_hex = String::from_utf8(sig_bytes)
+            .map_err(|e| AppError::Repo(format!("signature file is not valid UTF-8: {e}")))?;
+
+        let refreshed = Catalog::verify_and_parse_signed(
+            &catalog_bytes,
+            signature_hex.trim(),
+            &self.catalog_trusted_key,
+            current_version,
+        )
+        .map_err(|e| AppError::Repo(e.to_string()))?;
+
+        let dir = catalog_dir(self.global.root());
+        let io_err = |e: std::io::Error| AppError::Repo(format!("catalog refresh: {e}"));
+        std::fs::create_dir_all(&dir).map_err(io_err)?;
+        write_atomic(&dir.join(REFRESHED_CATALOG_JSON), &catalog_bytes).map_err(io_err)?;
+        write_atomic(
+            &dir.join(REFRESHED_CATALOG_SIG),
+            signature_hex.trim().as_bytes(),
+        )
+        .map_err(io_err)?;
+
+        Ok(CatalogRefreshOutcome {
+            previous_version: current_version,
+            new_version: refreshed.version(),
+            model_count: refreshed.cards().len(),
+        })
     }
 
     fn spawn_driver(&self, task_id: TaskId) {
@@ -2027,6 +2144,175 @@ async fn admit_to_pool(
     Ok(())
 }
 
+const REFRESHED_CATALOG_JSON: &str = "refreshed.json";
+const REFRESHED_CATALOG_SIG: &str = "refreshed.json.sig";
+
+fn catalog_dir(global_root: &std::path::Path) -> PathBuf {
+    global_root.join("catalog")
+}
+
+/// The catalog actually in effect: a signed refresh persisted by a
+/// previous [`Runtime::catalog_refresh`] if one exists and still
+/// verifies, falling back to the embedded baseline otherwise (no refresh
+/// has ever happened, or a previously-accepted one somehow no longer
+/// verifies — e.g. this build's compiled-in trusted key rotated since it
+/// was written). Never trusts the bytes on disk on their own: re-verifies
+/// the signature every time, since that check is cheap and the
+/// alternative is trusting unauthenticated state on every single catalog
+/// read.
+fn effective_catalog(
+    global_root: &std::path::Path,
+    trusted_key: &valyria_model_registry::VerifyingKey,
+) -> Catalog {
+    match load_refreshed_catalog(global_root, trusted_key) {
+        Some(catalog) => catalog,
+        None => embedded_or_empty(),
+    }
+}
+
+fn embedded_or_empty() -> Catalog {
+    Catalog::embedded().unwrap_or_else(|e| {
+        tracing::error!(error = %e, "embedded catalog.json failed to parse");
+        Catalog::from_cards(Vec::new())
+    })
+}
+
+fn load_refreshed_catalog(
+    global_root: &std::path::Path,
+    trusted_key: &valyria_model_registry::VerifyingKey,
+) -> Option<Catalog> {
+    let dir = catalog_dir(global_root);
+    let bytes = std::fs::read(dir.join(REFRESHED_CATALOG_JSON)).ok()?;
+    let sig = std::fs::read_to_string(dir.join(REFRESHED_CATALOG_SIG)).ok()?;
+    match Catalog::verify_and_parse(&bytes, sig.trim(), trusted_key) {
+        Ok(catalog) => Some(catalog),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "persisted catalog refresh no longer verifies; falling back to the embedded catalog"
+            );
+            None
+        }
+    }
+}
+
+/// A [`Fetcher`] for `catalog_refresh` specifically — deliberately its
+/// own type rather than a reuse of `valyria_model_store::HttpFetcher`.
+/// That fetcher forces `https_only(true)`, the right call for weights
+/// (a large binary blob whose only integrity check is a blake3 hash
+/// *from the very catalog being fetched over that connection*, so the
+/// transport is meaningfully part of the trust chain). A catalog refresh
+/// is different: every byte is independently ed25519-verified against a
+/// key baked into this binary, not learned from the connection at all —
+/// transport security here is real defense in depth, not the trust
+/// anchor, so requiring HTTPS specifically would rule out legitimate
+/// internal/self-hosted catalog mirrors (and, confirmed live while
+/// building this, even a plain local HTTP server used for testing)
+/// without buying back any actual authenticity guarantee the signature
+/// doesn't already provide.
+#[derive(Debug, Clone)]
+struct CatalogHttpFetcher {
+    client: reqwest::Client,
+}
+
+impl CatalogHttpFetcher {
+    fn new() -> Result<Self> {
+        let client = reqwest::Client::builder()
+            .use_rustls_tls()
+            .user_agent(concat!("valyria-app/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .map_err(|e| {
+                AppError::Repo(format!("building the catalog-refresh HTTP client: {e}"))
+            })?;
+        Ok(Self { client })
+    }
+}
+
+#[async_trait::async_trait]
+impl Fetcher for CatalogHttpFetcher {
+    async fn head(
+        &self,
+        url: &str,
+    ) -> valyria_model_store::Result<valyria_model_store::RemoteObject> {
+        let resp = self
+            .client
+            .head(url)
+            .send()
+            .await
+            .map_err(|e| catalog_fetch_err(url, e))?
+            .error_for_status()
+            .map_err(|e| catalog_fetch_err(url, e))?;
+        let headers = resp.headers();
+        let len = headers
+            .get(reqwest::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .ok_or_else(|| catalog_fetch_err(url, "HEAD response had no usable Content-Length"))?;
+        let etag = headers
+            .get(reqwest::header::ETAG)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let supports_ranges = headers
+            .get(reqwest::header::ACCEPT_RANGES)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.eq_ignore_ascii_case("bytes"))
+            .unwrap_or(false);
+        Ok(valyria_model_store::RemoteObject {
+            len,
+            etag,
+            supports_ranges,
+        })
+    }
+
+    async fn get_range(
+        &self,
+        url: &str,
+        start: u64,
+        end: u64,
+    ) -> valyria_model_store::Result<Vec<u8>> {
+        let last = end.saturating_sub(1).max(start);
+        let resp = self
+            .client
+            .get(url)
+            .header(reqwest::header::RANGE, format!("bytes={start}-{last}"))
+            .send()
+            .await
+            .map_err(|e| catalog_fetch_err(url, e))?
+            .error_for_status()
+            .map_err(|e| catalog_fetch_err(url, e))?;
+        let bytes = resp.bytes().await.map_err(|e| catalog_fetch_err(url, e))?;
+        Ok(bytes.to_vec())
+    }
+}
+
+fn catalog_fetch_err(url: &str, e: impl std::fmt::Display) -> valyria_model_store::ModelStoreError {
+    valyria_model_store::ModelStoreError::Download {
+        id: url.to_string(),
+        detail: e.to_string(),
+    }
+}
+
+/// Fetch the whole (small — a catalog and its signature are at most a
+/// few KB) object at `url` via the same [`Fetcher`] seam `model_install`
+/// uses for weights — `head` for the length, one `get_range` for
+/// everything, no chunking or resume machinery needed at this size.
+async fn fetch_whole<F: Fetcher>(fetcher: &F, url: &str) -> Result<Vec<u8>> {
+    let head = fetcher
+        .head(url)
+        .await
+        .map_err(|e| AppError::Repo(format!("HEAD {url} failed: {e}")))?;
+    fetcher
+        .get_range(url, 0, head.len)
+        .await
+        .map_err(|e| AppError::Repo(format!("GET {url} failed: {e}")))
+}
+
+fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)
+}
+
 /// Resolve the inference engine, downloading and unpacking it the first
 /// time (emitting `engine_install_progress` / `_completed` / `_failed`) if
 /// [`valyria_engine_store::EngineStore::resolve`] comes back empty.
@@ -2233,8 +2519,9 @@ async fn boot_model_server(
     model_id: &str,
     model_store: &ModelStore,
     events: &Arc<EventBus>,
+    catalog_trusted_key: &valyria_model_registry::VerifyingKey,
 ) -> Result<Arc<dyn LocalModelServer>> {
-    let catalog = Catalog::embedded().map_err(|e| AppError::Plan(e.to_string()))?;
+    let catalog = effective_catalog(global_root, catalog_trusted_key);
     let card = catalog
         .get(model_id)
         .ok_or_else(|| AppError::Repo(format!("no catalog model `{model_id}`")))?
@@ -2286,6 +2573,7 @@ struct ModelBootHandles {
     model_runtimes: Arc<ModelRuntimeRegistry>,
     pool: Arc<tokio::sync::Mutex<ModelPool>>,
     events: Arc<EventBus>,
+    catalog_trusted_key: valyria_model_registry::VerifyingKey,
 }
 
 fn spawn_model_boot(
@@ -2300,6 +2588,7 @@ fn spawn_model_boot(
         model_runtimes,
         pool,
         events,
+        catalog_trusted_key,
     } = handles;
     tokio::spawn(async move {
         let footprint_bytes = match model_store.manifest(&model_id) {
@@ -2361,7 +2650,15 @@ fn spawn_model_boot(
             ))
             .await;
 
-        match boot_model_server(&global_root, &model_id, &model_store, &events).await {
+        match boot_model_server(
+            &global_root,
+            &model_id,
+            &model_store,
+            &events,
+            &catalog_trusted_key,
+        )
+        .await
+        {
             Ok(handle) => {
                 let port = handle.port();
                 orchestrator.bind_single(

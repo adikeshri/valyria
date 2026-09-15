@@ -191,6 +191,16 @@ pub fn model_endpoint_list(response: &Response) {
     }
 }
 
+pub fn catalog_refresh(response: &Response) {
+    let Response::CatalogRefresh(r) = response else {
+        return;
+    };
+    println!(
+        "catalog refreshed: version {} -> {} ({} models)",
+        r.previous_version, r.new_version, r.model_count
+    );
+}
+
 pub fn memory_list(response: &Response) {
     let Response::MemoryList(r) = response else {
         return;

@@ -731,6 +731,25 @@
       }
     },
     {
+      "description": "Verify and, if newer, accept a signed catalog refresh. Protocol 1.15.0 (M6).",
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "catalog_refresh"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/CatalogRefreshRequest"
+        }
+      }
+    },
+    {
       "type": "object",
       "required": [
         "method",
@@ -750,6 +769,22 @@
     }
   ],
   "definitions": {
+    "CatalogRefreshRequest": {
+      "description": "`catalog_refresh` (protocol 1.15.0, M6) — fetch a candidate catalog and its detached signature from `catalog_url`/`signature_url`, verify against this build's compiled-in trusted key, and (only if it's strictly newer than what's currently in effect) durably persist it as the catalog every other model-listing call reads through. Two separate URLs rather than a convention (`catalog_url` + `.sig`) because no canonical hosting for this exists yet — see `docs/ COMPLETION-PLAN.md`'s M6 section.",
+      "type": "object",
+      "required": [
+        "catalog_url",
+        "signature_url"
+      ],
+      "properties": {
+        "catalog_url": {
+          "type": "string"
+        },
+        "signature_url": {
+          "type": "string"
+        }
+      }
+    },
     "ConfigSetRequest": {
       "description": "Write one dotted config leaf to a Core-owned config file, then report the re-resolved effective view (§24). Additive as of protocol 1.1.0.\n\nThe write is validated against the policy floor (`valyria_config::validate_floor`) *before* it touches disk: a value that would loosen access past the compiled-in ceiling is rejected with `config.policy_floor_violation` and nothing is written.",
       "type": "object",

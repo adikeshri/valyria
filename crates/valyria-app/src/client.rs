@@ -14,10 +14,10 @@ use std::sync::Arc;
 use futures::stream::{BoxStream, StreamExt};
 use valyria_events::{Delivery, EventEnvelope, Seq};
 use valyria_protocol::{
-    capability, ArtifactWire, Client, ConfigEntryWire, ConfigShowResponse, CpuInfoWire,
-    DoctorCheckWire, DoctorRunResponse, GitBranchWire, GitBranchesResponse, GitCommitWire,
-    GitDiffResponse, GitFileStatusWire, GitLogResponse, GitStatusResponse, GpuInfoWire,
-    HardwareProbeResponse, HelloResponse, IndexStatusResponse, LedgerChangeWire,
+    capability, ArtifactWire, CatalogRefreshResponse, Client, ConfigEntryWire, ConfigShowResponse,
+    CpuInfoWire, DoctorCheckWire, DoctorRunResponse, GitBranchWire, GitBranchesResponse,
+    GitCommitWire, GitDiffResponse, GitFileStatusWire, GitLogResponse, GitStatusResponse,
+    GpuInfoWire, HardwareProbeResponse, HelloResponse, IndexStatusResponse, LedgerChangeWire,
     LedgerChangesResponse, MemoryEntryWire, MemoryListRequest, MemoryListResponse,
     ModelCandidateWire, ModelEndpointListResponse, ModelEndpointWire, ModelInspectResponse,
     ModelListResponse, ModelRecommendResponse, ModelRemoveResponse, ModelSummaryWire,
@@ -903,6 +903,20 @@ impl Client for EmbeddedClient {
                 }),
                 Err(e) => error_response(e),
             },
+            Request::CatalogRefresh(r) => {
+                match self
+                    .runtime
+                    .catalog_refresh(&r.catalog_url, &r.signature_url)
+                    .await
+                {
+                    Ok(outcome) => Response::CatalogRefresh(CatalogRefreshResponse {
+                        previous_version: outcome.previous_version,
+                        new_version: outcome.new_version,
+                        model_count: outcome.model_count as u32,
+                    }),
+                    Err(e) => error_response(e),
+                }
+            }
             Request::LedgerChanges(r) => {
                 let task_id = match parse_task_id(&r.task_id) {
                     Ok(id) => id,

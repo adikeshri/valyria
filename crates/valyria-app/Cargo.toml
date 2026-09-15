@@ -54,6 +54,7 @@ tracing = { workspace = true }
 tokio = { workspace = true, features = ["net", "sync"] }
 async-trait = { workspace = true }
 futures = { workspace = true }
+reqwest = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true }
@@ -61,4 +62,3 @@ rustix = { workspace = true }
 [dev-dependencies]
 valyria-testkit = { workspace = true }
 tempfile = { workspace = true }
-reqwest = { workspace = true }

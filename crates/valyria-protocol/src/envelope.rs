@@ -7,18 +7,18 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::messages::{
-    ConfigSetRequest, ConfigShowResponse, DoctorRunResponse, Empty, EventsSubscribeRequest,
-    GitBranchesResponse, GitDiffRequest, GitDiffResponse, GitLogRequest, GitLogResponse,
-    GitStatusResponse, HardwareProbeResponse, HelloRequest, HelloResponse, IndexStatusResponse,
-    LedgerChangesRequest, LedgerChangesResponse, MemoryListRequest, MemoryListResponse,
-    ModelActivateRequest, ModelEndpointAddRequest, ModelEndpointListResponse, ModelIdRequest,
-    ModelInspectResponse, ModelInstallRequest, ModelListResponse, ModelRecommendRequest,
-    ModelRecommendResponse, ModelRemoveResponse, PermissionResolveRequest, PlanGetResponse,
-    PlanRevisionsResponse, PurgeResponse, SearchQueryRequest, SearchQueryResponse,
-    StorageInspectResponse, StoragePurgeRequest, TaskArtifactsResponse, TaskChildrenResponse,
-    TaskCreateRequest, TaskCreateResponse, TaskIdRequest, TaskListResponse, TaskReportResponse,
-    TaskRollbackRequest, TaskRollbackResponse, TaskStatusRequest, TaskStatusResponse, WireError,
-    WorkspaceStatusResponse,
+    CatalogRefreshRequest, CatalogRefreshResponse, ConfigSetRequest, ConfigShowResponse,
+    DoctorRunResponse, Empty, EventsSubscribeRequest, GitBranchesResponse, GitDiffRequest,
+    GitDiffResponse, GitLogRequest, GitLogResponse, GitStatusResponse, HardwareProbeResponse,
+    HelloRequest, HelloResponse, IndexStatusResponse, LedgerChangesRequest, LedgerChangesResponse,
+    MemoryListRequest, MemoryListResponse, ModelActivateRequest, ModelEndpointAddRequest,
+    ModelEndpointListResponse, ModelIdRequest, ModelInspectResponse, ModelInstallRequest,
+    ModelListResponse, ModelRecommendRequest, ModelRecommendResponse, ModelRemoveResponse,
+    PermissionResolveRequest, PlanGetResponse, PlanRevisionsResponse, PurgeResponse,
+    SearchQueryRequest, SearchQueryResponse, StorageInspectResponse, StoragePurgeRequest,
+    TaskArtifactsResponse, TaskChildrenResponse, TaskCreateRequest, TaskCreateResponse,
+    TaskIdRequest, TaskListResponse, TaskReportResponse, TaskRollbackRequest, TaskRollbackResponse,
+    TaskStatusRequest, TaskStatusResponse, WireError, WorkspaceStatusResponse,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -81,6 +81,9 @@ pub enum Request {
     ModelEndpointRemove(ModelIdRequest),
     /// List every registered external endpoint. Protocol 1.14.0 (M6).
     ModelEndpointList(Empty),
+    /// Verify and, if newer, accept a signed catalog refresh. Protocol
+    /// 1.15.0 (M6).
+    CatalogRefresh(CatalogRefreshRequest),
     LedgerChanges(LedgerChangesRequest),
 }
 
@@ -119,6 +122,8 @@ pub enum Response {
     ModelInspect(ModelInspectResponse),
     /// Protocol 1.14.0 (M6).
     ModelEndpointList(ModelEndpointListResponse),
+    /// Protocol 1.15.0 (M6).
+    CatalogRefresh(CatalogRefreshResponse),
     LedgerChanges(LedgerChangesResponse),
     /// A request that succeeded with nothing to return (`task.pause`,
     /// `task.resume`, `task.cancel`, `permission.resolve`,

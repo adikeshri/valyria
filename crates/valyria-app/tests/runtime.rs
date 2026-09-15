@@ -10,8 +10,8 @@ use std::time::Duration;
 use futures::StreamExt;
 use valyria_app::{AppError, EmbeddedClient, ModelEndpointOptions, Runtime, RuntimeConfig};
 use valyria_events::{EventKind, NewEvent};
-use valyria_model_registry::{Catalog, ModelRole};
-use valyria_model_store::{Manifest, ModelStore};
+use valyria_model_registry::{generate_keypair, sign, Catalog, ModelRole};
+use valyria_model_store::{InMemoryFetcher, Manifest, ModelStore};
 use valyria_protocol::Client as _;
 use valyria_types::AgentState;
 
@@ -531,4 +531,141 @@ async fn model_endpoint_add_activate_list_remove_round_trip() {
         .await
         .unwrap_err();
     assert!(matches!(err, AppError::Repo(_)));
+}
+
+fn signed_test_catalog(version: u32, key: &valyria_model_registry::SigningKey) -> (String, String) {
+    let json = format!(
+        r#"{{"version":{version},"models":[
+        {{"id":"refreshed-model","family":"f","display_name":"Refreshed","parameters_b":1.0,
+         "quantization":"q4_k_m","context_length":2048,"file_size_bytes":1,
+         "recommended_sampling":{{"temperature":0.2,"top_p":0.9,"max_tokens":null,"stop":[]}},
+         "requirement":{{"min_ram_bytes":1,"min_vram_bytes":null}},
+         "transport_preference":"native","supports_native_tools":true,"supports_grammar":false,
+         "source_url":"u","content_hash":"aa","license_name":"MIT"}}
+    ]}}"#
+    );
+    let sig = sign(key, json.as_bytes());
+    (json, sig)
+}
+
+/// M6: `catalog_refresh` — real fetch (via the same `Fetcher` seam
+/// `model_install` uses, here in-memory) + real ed25519 verification +
+/// real anti-rollback version gating + a real round trip back through
+/// `effective_catalog` (exercised indirectly via `model_list`, which
+/// only ever reads the catalog through that helper). Uses a throwaway
+/// keypair trusted via `RuntimeConfig::with_catalog_trusted_key_hex`
+/// rather than this build's real compiled-in key, whose private half
+/// deliberately exists nowhere a test could sign with it.
+#[tokio::test]
+async fn catalog_refresh_accepts_a_newer_signed_catalog_and_it_takes_effect() {
+    let temp = tempfile::tempdir().unwrap();
+    let ws = valyria_testkit::TempWorkspace::new();
+    let key = generate_keypair();
+    let pubkey_hex: String = {
+        let mut s = String::new();
+        for b in key.verifying_key().to_bytes() {
+            s.push_str(&format!("{b:02x}"));
+        }
+        s
+    };
+    let config = RuntimeConfig::new(ws.path())
+        .with_data_dir(temp.path().join("data"))
+        .with_catalog_trusted_key_hex(pubkey_hex);
+    let runtime = Runtime::open(config).await.unwrap();
+
+    // Not yet present under either name.
+    let models_before = runtime.model_list().await.unwrap();
+    assert!(!models_before.iter().any(|m| m.card.id == "refreshed-model"));
+
+    let (json, sig) = signed_test_catalog(2, &key);
+    let fetcher = InMemoryFetcher::new()
+        .with_object("https://example.invalid/catalog.json", json.into_bytes())
+        .with_object("https://example.invalid/catalog.json.sig", sig.into_bytes());
+
+    let outcome = runtime
+        .catalog_refresh_with(
+            "https://example.invalid/catalog.json",
+            "https://example.invalid/catalog.json.sig",
+            &fetcher,
+        )
+        .await
+        .expect("a genuinely newer, validly-signed catalog must be accepted");
+    assert_eq!(outcome.previous_version, 1);
+    assert_eq!(outcome.new_version, 2);
+    assert_eq!(outcome.model_count, 1);
+
+    // Takes effect: every catalog read goes through `effective_catalog`,
+    // so `model_list` (which starts from it) now sees the refreshed
+    // model and no longer the embedded ones.
+    let models_after = runtime.model_list().await.unwrap();
+    assert_eq!(models_after.len(), 1);
+    assert_eq!(models_after[0].card.id, "refreshed-model");
+
+    // A second refresh offering the *same* version again is a no-op
+    // rejection (anti-rollback/replay), not silently reapplied.
+    let (json_again, sig_again) = signed_test_catalog(2, &key);
+    let fetcher2 = InMemoryFetcher::new()
+        .with_object(
+            "https://example.invalid/catalog.json",
+            json_again.into_bytes(),
+        )
+        .with_object(
+            "https://example.invalid/catalog.json.sig",
+            sig_again.into_bytes(),
+        );
+    let err = runtime
+        .catalog_refresh_with(
+            "https://example.invalid/catalog.json",
+            "https://example.invalid/catalog.json.sig",
+            &fetcher2,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AppError::Repo(_)));
+    // Still at version 2 — the rejected replay changed nothing.
+    assert_eq!(runtime.model_list().await.unwrap().len(), 1);
+}
+
+/// The signature-rejection half: a catalog signed by a key the `Runtime`
+/// does *not* trust must never be accepted, however well-formed
+/// everything else about it is.
+#[tokio::test]
+async fn catalog_refresh_rejects_a_catalog_signed_by_an_untrusted_key() {
+    let temp = tempfile::tempdir().unwrap();
+    let ws = valyria_testkit::TempWorkspace::new();
+    let trusted = generate_keypair();
+    let trusted_hex: String = {
+        let mut s = String::new();
+        for b in trusted.verifying_key().to_bytes() {
+            s.push_str(&format!("{b:02x}"));
+        }
+        s
+    };
+    let config = RuntimeConfig::new(ws.path())
+        .with_data_dir(temp.path().join("data"))
+        .with_catalog_trusted_key_hex(trusted_hex);
+    let runtime = Runtime::open(config).await.unwrap();
+
+    let attacker = generate_keypair();
+    let (json, sig) = signed_test_catalog(2, &attacker);
+    let fetcher = InMemoryFetcher::new()
+        .with_object("https://example.invalid/catalog.json", json.into_bytes())
+        .with_object("https://example.invalid/catalog.json.sig", sig.into_bytes());
+
+    let err = runtime
+        .catalog_refresh_with(
+            "https://example.invalid/catalog.json",
+            "https://example.invalid/catalog.json.sig",
+            &fetcher,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AppError::Repo(_)));
+    // Nothing was persisted — still the embedded baseline.
+    assert!(runtime
+        .model_list()
+        .await
+        .unwrap()
+        .iter()
+        .any(|m| m.card.id != "refreshed-model"));
 }

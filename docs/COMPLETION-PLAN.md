@@ -1152,6 +1152,71 @@ recorded here since the plan text above still described it as open work)**
   name`/`--remote-model`/`--context-length`/`--no-native-tools`/
   `--supports-grammar`.
 
+- Signed catalog refresh (protocol 1.15.0, `catalog_refresh` — another
+  backward-compatible new-variant minor bump): real ed25519 crypto, not
+  a stub. `valyria-model-registry::signing` wraps `ed25519-dalek` —
+  `sign`/`verify` over a catalog's *exact* JSON bytes (never a
+  re-serialized form: JSON has no single canonical byte representation,
+  so verifying anything else would open a needless malleability gap
+  between what was signed and what gets parsed), plus `generate_keypair`
+  for dev tooling and tests. `Catalog::verify_and_parse_signed` adds
+  anti-rollback on top of signature verification: `catalog.json`'s
+  already-existing but previously-unused `version` counter must be
+  strictly greater than the currently-cached one, so a validly-signed
+  but stale catalog (a replay) is refused exactly like a forged one,
+  not silently reapplied.
+
+  `CATALOG_PUBLIC_KEY_HEX` is a **real, freshly generated** keypair's
+  public half, compiled in — genuinely generated for this mechanism,
+  not invented placeholder-looking hex (confirmed structurally valid,
+  not just plausible-looking, by round-tripping it through the same
+  parser production uses). Its private half exists nowhere: no real
+  catalog-hosting/signing pipeline exists yet to publish anything under
+  it (see the deferred list), and deliberately never will inside this
+  repository — whoever stands that pipeline up generates their own
+  keypair with `generate_keypair` and replaces the constant. This
+  created a real testability question, resolved architecturally rather
+  than worked around: `RuntimeConfig::catalog_trusted_key_hex` lets a
+  caller trust a different key than the compiled-in one, exactly the
+  same seam shape as `Fetcher` injection elsewhere in this codebase —
+  tests use a throwaway keypair they actually hold the private half of
+  and get the *entire* real pipeline (fetch → verify → anti-rollback →
+  atomic persist → every later catalog read transparently reflecting
+  it, via a new `effective_catalog` helper every `Catalog::embedded()`
+  call site in `valyria-app` now goes through instead) exercised for
+  real, not a stand-in for part of it.
+
+  A second real bug, found by actually running this against a real
+  local HTTP server rather than only `InMemoryFetcher`:
+  `valyria_model_store::HttpFetcher` (reused at first, since it already
+  existed for weight downloads) forces `https_only(true)` and flatly
+  refuses any `http://` URL, including loopback. Right for weights (a
+  large blob whose only independent integrity check — a blake3 hash —
+  comes from the very connection being protected, so transport security
+  is genuinely part of that trust chain) but wrong for a catalog
+  refresh, where every byte is already independently ed25519-verified
+  against a key baked into the binary, not learned from the connection
+  at all — requiring HTTPS specifically would reject legitimate
+  internal/self-hosted mirrors without buying back any authenticity the
+  signature doesn't already provide. Fixed with a small
+  purpose-built `CatalogHttpFetcher` (same `Fetcher` trait, same
+  `reqwest`+`rustls` shape, just without the blanket TLS requirement)
+  rather than loosening the weights fetcher's real security posture.
+
+  Proven for real: `crates/valyria-app/tests/local_catalog_refresh_e2e.rs`
+  (`#[ignore]`d) hand-spawns a real `python3 -m http.server`, serves a
+  real signed catalog + detached signature over real loopback TCP, and
+  drives the actual production `Runtime::catalog_refresh` (the real
+  `CatalogHttpFetcher`, not an injected one) end to end, confirming
+  `model_list` reflects the refreshed catalog afterward. Two further
+  offline tests in `runtime.rs` cover acceptance-of-a-genuinely-newer-
+  catalog (and that it visibly takes effect), rejection of a replayed
+  same-version catalog, and rejection of a catalog signed by a key the
+  `Runtime` doesn't trust.
+
+  A CLI surface shipped alongside it: `valyria catalog-refresh
+  <catalog_url> <signature_url>`.
+
 **Deliberately deferred, with reasons**
 
 - Hardware accelerator-variant detection and engine-variant selection
@@ -1160,20 +1225,20 @@ recorded here since the plan text above still described it as open work)**
   needed before M2's "chosen from `valyria-hardware`, fallback recorded"
   can mean anything on Linux/Windows, and CUDA/ROCm can't be verified at
   all without that hardware.
-- Signed catalog refresh (ed25519): no crypto exists anywhere in
-  `valyria-model-registry`/`valyria-engine-store` yet. The mechanism
-  (verify a detached signature against a compiled-in public key before
-  accepting a refreshed catalog, never downgrade a pinned hash) can be
-  built and tested against a locally-generated test keypair without
-  needing the real production signing key — genuinely a separate chunk,
-  not started this pass.
-- Protocol 1.18's remaining *request* additions (`catalog_refresh`,
-  `pool_status`, `ModelSummaryWire.backend`): nothing to wrap yet until
-  catalog signing exists and endpoints have a wire-visible "backend"
-  label to add to the existing `model_list` response — `model_endpoint_
-  add/remove/list` itself shipped as 1.14.0 above rather than waiting for
-  the rest of 1.18 to be ready together; the event-kind half of 1.18
-  shipped earlier still, as 1.13.1, once the pool wiring needed it.
+- An actual canonical catalog-hosting/signing pipeline (where a
+  production `catalog.json` + its `.sig` would be published, who holds
+  the real private key, how often it's refreshed) — the client-side
+  mechanism above is real and fully tested; there is simply no server
+  side yet, and building one is an infrastructure decision for outside
+  this repository, not a code gap.
+- Protocol 1.18's remaining *request* additions (`pool_status`,
+  `ModelSummaryWire.backend`): nothing to wrap yet until endpoints have
+  a wire-visible "backend" label to add to the existing `model_list`
+  response — `model_endpoint_add/remove/list` and `catalog_refresh`
+  themselves already shipped, as 1.14.0 and 1.15.0 respectively, rather
+  than waiting for the rest of 1.18 to be ready together; the
+  event-kind half of 1.18 shipped earlier still, as 1.13.1, once the
+  pool wiring needed it.
 - App UI (backend/pool-memory-meter in the Models panel, endpoints under
   Settings, a catalog-refresh button): waits on the protocol surface
   above existing to display.

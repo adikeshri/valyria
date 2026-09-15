@@ -527,6 +527,25 @@
       }
     },
     {
+      "description": "Protocol 1.15.0 (M6).",
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "catalog_refresh"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/CatalogRefreshResponse"
+        }
+      }
+    },
+    {
       "type": "object",
       "required": [
         "result",
@@ -602,6 +621,31 @@
         "produced_by": {
           "description": "`researcher` | `planner` | `implementer` | `tester` | `reviewer`.",
           "type": "string"
+        }
+      }
+    },
+    "CatalogRefreshResponse": {
+      "type": "object",
+      "required": [
+        "model_count",
+        "new_version",
+        "previous_version"
+      ],
+      "properties": {
+        "model_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "new_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "previous_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
         }
       }
     },
