@@ -37,6 +37,22 @@ pub enum EngineStoreError {
     },
     #[error("download of {component} {version} was cancelled")]
     Cancelled { component: String, version: String },
+    /// A step of Python-venv provisioning (`python -m venv`, `pip
+    /// install`, …) failed — carries which step and the subprocess's own
+    /// stderr, since these are the only diagnostics a user (or an agent
+    /// debugging on their behalf) has to go on.
+    #[error("mlx venv provisioning failed at `{step}`: {detail}")]
+    VenvProvision { step: String, detail: String },
+    /// `pip install {component}=={expected}` succeeded but the package
+    /// reports a different version than what was pinned — treated as an
+    /// error rather than silently trusted, the same discipline as the
+    /// engine archive's own blake3 check.
+    #[error("{component} version mismatch: pinned {expected}, installed reports {actual}")]
+    VersionMismatch {
+        component: String,
+        expected: String,
+        actual: String,
+    },
     #[error("engine store i/o error: {0}")]
     Io(#[from] std::io::Error),
     #[error("engine store serialization error: {0}")]
@@ -52,6 +68,8 @@ impl ErrorCode for EngineStoreError {
             EngineStoreError::Unpack { .. } => "engine_store.unpack",
             EngineStoreError::MissingBinary { .. } => "engine_store.missing_binary",
             EngineStoreError::Cancelled { .. } => "engine_store.cancelled",
+            EngineStoreError::VenvProvision { .. } => "engine_store.venv_provision",
+            EngineStoreError::VersionMismatch { .. } => "engine_store.version_mismatch",
             EngineStoreError::Io(_) => "engine_store.io",
             EngineStoreError::Serde(_) => "engine_store.serde",
         }
@@ -63,6 +81,7 @@ impl ErrorCode for EngineStoreError {
             EngineStoreError::Download { .. }
                 | EngineStoreError::Io(_)
                 | EngineStoreError::Cancelled { .. }
+                | EngineStoreError::VenvProvision { .. }
         )
     }
 }

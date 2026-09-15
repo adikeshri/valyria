@@ -965,16 +965,63 @@ recorded here since the plan text above still described it as open work)**
   fires and `PrimaryCoder` falls back to `NoModelRuntime::none_bound()`
   exactly as before this chunk.
 
+- MLX runtime adapter (`valyria-runtime-mlx`, no longer a stub) and its
+  engine provisioning (`valyria-engine-store::venv`). Structurally a
+  mirror of the llama.cpp adapter: `MlxServer` spawns and supervises
+  `python -m mlx_lm server --model <dir-or-hf-repo-id> --host 127.0.0.1
+  --port <port>` (process group, graceful-`SIGTERM`-then-hard-kill
+  shutdown, rolling log-tail on failure — the same contract as
+  `LlamaServer`), and `MlxServerRuntime` wraps it in the *same*
+  `OpenAiCompatRuntime<ReqwestTransport>` `LlamaServerRuntime` uses —
+  confirmed live, not assumed, that `mlx_lm.server` answers `/health`
+  and `/v1/chat/completions` in the same shape `llama-server` does, so
+  zero wire-protocol code is MLX-specific.
+
+  Provisioning (`MlxVenvStore`) is a genuinely different shape than the
+  llama.cpp engine's single-archive download: `~/.valyria/engines/mlx/
+  <mlx-lm version>/venv/` is a real Python venv, built from the newest
+  system `python3` on `PATH` ([`find_system_python`]) and pinned to an
+  exact `mlx-lm==<version>` via `pip install`, verified by actually
+  importing the package and checking `mlx_lm.__version__` matches the
+  pin (mismatch or any failed step deletes the half-built venv rather
+  than leaving it for a later caller to trust). No `--require-hashes`
+  transitive wheel-hash lockfile: pip's own resolver plus an exact
+  version pin plus a post-install import-and-check were judged the
+  right amount of rigor for a fast-moving ML dependency tree
+  (`transformers`, `numpy`, …) that doesn't publish such a lockfile
+  itself; the exact pin is still verified, not merely trusted.
+
+  All of this was run for real on this machine, not just unit-tested
+  against fixtures: a real venv provisioned against real PyPI (`mlx-
+  lm==0.31.3` installed and its version verified in ~25s), a real
+  `mlx_lm server` boot against a real small model (`mlx-community/
+  SmolLM-135M-Instruct-4bit`, auto-fetched from the Hugging Face Hub by
+  `mlx_lm.server` itself), a real `/health` 200, and a real `/v1/chat/
+  completions` round trip with genuine generated text. Two real
+  findings from that live run, both reflected in the code: (1) the
+  *dotted* invocation `python -m mlx_lm.server` prints a deprecation
+  warning as of 0.31.x — switched to the `python -m mlx_lm server`
+  subcommand form, which is silent; (2) `mlx-lm==0.31.3`'s own `mlx`
+  dependency has no wheel for system Python 3.9 on this machine (`pip
+  install` fails outright) but installs cleanly under a newer 3.13 also
+  present on `PATH` — `find_system_python`'s newest-first search order
+  is therefore load-bearing, not cosmetic, and is documented as such.
+
+  Not yet done, and explicitly out of scope for this chunk: wiring
+  `valyria-app::Runtime` to actually *choose* this adapter for a given
+  catalog model. `ModelCard` has no "which local engine" field yet (the
+  existing `transport_preference` is about tool-call transport, not
+  engine choice), and `boot_model_server`/`ServerProber`/`AppError::
+  ModelServerStart` are all still hard-typed to `LlamaServerRuntime`/
+  `LlamaError` specifically rather than a shared local-engine
+  abstraction. Closing that gap is a distinct, real design task (an
+  engine-kind field on `ModelCard`, a matching branch in the boot path,
+  and either a shared error type or a second `AppError` variant) — sized
+  similarly to the ModelPool-wiring chunk above, not a small addition to
+  this one.
+
 **Deliberately deferred, with reasons**
 
-- MLX runtime adapter (`valyria-runtime-mlx`, still a bare stub crate):
-  genuinely new work — spawn `mlx_lm.server` the same way `LlamaServer`
-  spawns `llama-server`, wrap it in the same `OpenAiCompatRuntime`. This
-  machine has Apple Silicon and could exercise it for real, but it's a
-  meaningfully-sized standalone chunk (process supervision + an
-  `mlx_lm`-specific Python env under `~/.valyria/engines/mlx/`, pinned
-  versions, hash-verified wheels) on top of the pool-wiring work above,
-  not a small addition to it.
 - Hardware accelerator-variant detection and engine-variant selection
   (Metal/CUDA/ROCm/Vulkan capability flags, `valyria-hardware` currently
   only has an Apple-Silicon heuristic and macOS-only GPU enumeration) —
@@ -1008,8 +1055,11 @@ recorded here since the plan text above still described it as open work)**
   mocked.
 - Deferred: the seeded-bug suite completing on three real adapters
   (llama.cpp already does via the existing `local_model_e2e.rs`
-  end-to-end test; MLX and an openai-compat endpoint don't exist yet to
-  test against) — needs MLX and endpoint support above first.
+  end-to-end test; the MLX adapter itself now exists and was proven for
+  real at the crate level, but `valyria-app::Runtime` has no way yet to
+  boot a model *through* it — see the MLX entry above — and an
+  openai-compat endpoint doesn't exist yet either) — needs that app
+  wiring and endpoint support above first.
 
 ---
 

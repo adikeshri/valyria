@@ -3992,9 +3992,19 @@ dependencies = [
 name = "valyria-runtime-mlx"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "futures",
+ "libc",
  "serde",
+ "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
+ "tokio",
  "tracing",
+ "valyria-model",
+ "valyria-model-registry",
+ "valyria-process",
+ "valyria-runtime-openai-compat",
  "valyria-testkit",
  "valyria-types",
  "valyria-util",

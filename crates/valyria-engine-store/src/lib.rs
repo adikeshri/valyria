@@ -32,6 +32,7 @@ pub mod catalog;
 pub mod error;
 pub mod fetch;
 pub mod store;
+pub mod venv;
 
 pub use catalog::{ArchiveKind, Catalog, EngineEntry, EngineTarget};
 pub use error::{EngineStoreError, Result};
@@ -39,3 +40,4 @@ pub use error::{EngineStoreError, Result};
 pub use fetch::HttpFetcher;
 pub use fetch::{Fetcher, InMemoryFetcher};
 pub use store::{EngineStore, InstallPhase, InstallProgress};
+pub use venv::{find_system_python, MlxVenvStore, MLX_LM_VERSION};

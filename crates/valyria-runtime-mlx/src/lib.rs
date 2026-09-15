@@ -1,18 +1,32 @@
 //! `valyria-runtime-mlx` — layer 4 (Model).
 //!
-//! Apple-silicon MLX adapter.
+//! A managed `python -m mlx_lm.server` subprocess behind a
+//! [`valyria_model::ModelRuntime`]. Structurally the same crate as
+//! `valyria-runtime-llamacpp`: process supervision ([`server`]) plus a
+//! thin composition ([`runtime::MlxServerRuntime`]) over
+//! `valyria_runtime_openai_compat::OpenAiCompatRuntime`, which owns every
+//! byte of the actual wire protocol — `mlx_lm.server` exposes the same
+//! `/health` + `/v1/chat/completions` shape `llama-server` does, so
+//! nothing about the wire layer is MLX-specific.
 //!
-//! Status: **deferred within Phase 9** (open decision 5 — a solo build
-//! defers the MLX/CUDA adapters). MLX is Python-side, so this adapter is a
-//! managed `mlx-lm` server subprocess with a strict handshake; it reuses
-//! the OpenAI-compatible client once a concrete `HttpTransport` exists. The
-//! crate compiles and is wired into the layering check until then.
+//! This crate resolves nothing on its own — it is handed an already
+//! provisioned venv's `python` path and a local MLX model directory
+//! (Hugging Face layout: `config.json`, tokenizer files, `.safetensors`
+//! weights — MLX has no single-file format the way GGUF is one).
+//! Provisioning that venv is `valyria-engine-store`'s job, orchestrated
+//! by the caller so it can emit its own progress events;
+//! `MlxServerRuntime::start` just runs it.
 
-#![forbid(unsafe_code)]
+pub mod error;
+pub mod runtime;
+pub mod server;
 
-/// Marks this crate as present in the workspace topology for the given phase.
-/// Exists so the crate is non-empty and the layering/CI checks have something
-/// real to verify before the phase implementation lands.
+pub use error::{MlxError, Result};
+pub use runtime::{LocalModelServer, MlxServerRuntime};
+pub use server::{MlxServer, MlxServerConfig, DEFAULT_READY_TIMEOUT};
+
+/// Kept for continuity with the crate's original scaffold; the crate is
+/// now implemented.
 pub const PHASE: u8 = 9;
 
 #[cfg(test)]
