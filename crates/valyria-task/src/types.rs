@@ -50,6 +50,13 @@ pub mod kinds {
     pub const LOOP_DETECTED: &str = "loop_detected";
     /// The repair ledger's decision after a non-fixing repair cycle (§30).
     pub const REPAIR_DECISION: &str = "repair_decision";
+    /// One [`crate` — see `valyria_agent::repair::RepairAttempt`] recorded
+    /// against the ledger (M5, C8): payload carries
+    /// `{diagnosis_fingerprint, edit_summary, outcome}` so `RepairLedger`
+    /// can be replayed exactly from the journal after a crash, instead of
+    /// resetting its attempt history and budget to zero on every
+    /// cross-process resume.
+    pub const REPAIR_ATTEMPT: &str = "repair_attempt";
     /// A model-authored plan the runtime validated and accepted (§10). The
     /// plan body itself lives in `plan_revision` (block 800-899); this
     /// payload carries `{revision, hash, step_count}`.

@@ -559,50 +559,79 @@ immediately without a Core change.
 
 ---
 
-### M5 — Planning and multi-agent, complete
+### M5 — Planning and multi-agent  🟡 partially shipped 2026-09-15
 
-**Core**
-- Child tasks: `Task.parent_task`, each with its own journal, budget and
-  cancellation token (cancel propagates down; pause propagates down; a child
-  crash recovers like any task).
-- Role pipeline for `ModelAuthored` multi-step work:
-  1. Researcher (read-only tools) → `ResearchBrief`
-  2. Planner → `Plan`
-  3. Implementer children per wave → `ChangeSet`
-  4. Tester → `VerificationReport`
-  5. Reviewer (no write) → `ReviewFindings`, which can trigger a repair
-     revision
+**Shipped**
 
-  Artifacts are the only channel.
-- Parallel wave executor: `parallelizable` steps in one wave run as
-  concurrent children under a per-workspace concurrency cap. Each child
-  declares its `targets`; overlapping targets serialize; a ledger conflict
-  aborts the later write as `ExternalModification` for that child.
-- Per-step verification: a step's `verification` runs at step end; failure
-  enters Diagnosing scoped to that step before later waves start. The full
-  run before `Completed` stays mandatory.
-- C8: verify state, loop-detector history and repair-ledger counters
-  reconstructed from the journal on resume, like the plan repair budget
-  already is.
+- Child tasks (`valyria-task`): `TaskManager::create_child` links a new
+  task's `parent_task` back to its creator and inherits `workspace_id`
+  from it — the schema/struct field already existed (Phase 8) but had no
+  writer. `children_of` is the read side (direct children only, oldest
+  first — not recursive; a grandchild belongs to its own parent). A child
+  gets a fully independent journal/budget, same as any task — nothing
+  about crash recovery, resume, or `count_model_calls` needed to change,
+  since those were already scoped per-`TaskId`.
+- Cascading pause/cancel: `request_pause`/`request_cancel` now walk every
+  descendant (recursively, via `cascade_signal_to_children`) and write the
+  same durable `pending_signal` onto each active one — a parent pause with
+  no cascade would leave children running unsupervised with no driver
+  left checking on them. Terminal descendants are skipped (nothing will
+  ever read their `pending_signal` again).
+- C8 — verify state reconstructed from the journal on resume: `DIAGNOSIS`
+  journal entries now carry `file_state_hash`/`verification_frontier`/
+  `failure_count`/`files_touched` (previously only used in-process, never
+  persisted), and a new `REPAIR_ATTEMPT` journal entry kind records each
+  `RepairAttempt` before it's folded into the (process-local)
+  `RepairLedger`. `AgentDriver::take_verify_state` is now `async` and, the
+  first time a fresh process touches a task's verify state, replays that
+  task's entire journal through `reconstruct_verify_state` to rebuild the
+  `LoopDetector`'s history and the `RepairLedger`'s attempt count/
+  escalation flags exactly as they'd stand had the process never
+  restarted — the same technique `plan_exec::plan_rejection_count` already
+  used for the plan-repair budget. Proven with both a unit-level replay
+  suite (`driver::reconstruct_verify_state_tests`, 6 tests) and a real
+  crash-and-resume integration test
+  (`a_crash_mid_repair_does_not_reset_the_attempt_budget_or_loop_history`)
+  that aborts a live driver mid-repair-loop, rebuilds a completely fresh
+  `AgentDriver`, and asserts the total repair attempts across both
+  processes still respect the same budget a single uninterrupted process
+  is held to.
 
-**Protocol 1.17** — `task_children`, `task_artifacts`, `plan_revisions`
-(+ diff); `subtask_started` / `subtask_completed`, `artifact_published`
-events; `TaskSummary.parent_task_id`.
+**Deliberately deferred, with reasons**
 
-**App**
-- Task view becomes a tree (parent → role children).
-- Plan view renders the DAG with parallel lanes and live per-step state.
-- Artifact viewer (brief / changeset / report / findings).
-- Plan revision diff.
-- Pause/cancel on a child vs the whole task.
+- Role pipeline wiring (Researcher → Planner → Implementer → Tester →
+  Reviewer spawning real child tasks and publishing `Artifact`s via
+  `PlanStore`): the `AgentRole`/`Artifact`/`StoredArtifact` types and their
+  persistence already exist in full in `valyria-plan` (Phase 8), but
+  wiring them into `valyria-agent`'s actual execution is a substantial
+  driver-shaped feature (a new orchestration mode alongside the existing
+  single-task loop) in its own right, not a small addition on top of
+  child tasks. Tracked as the next M5 chunk.
+- Parallel wave executor: `PlanStep.parallelizable`/`.targets` and
+  `Schedule::waves()` (grouped concurrent steps) already exist and are
+  tested in `valyria-plan`; `plan_exec.rs` still only consumes the
+  flattened sequential `order()`. Concurrent execution needs a
+  target-conflict-to-serialization rule and a per-workspace concurrency
+  cap on top of child tasks, which is a meaningfully separate change from
+  child tasks existing at all.
+- Per-step verification scoped to one wave (rather than the full run
+  before `Completed`): depends on the parallel wave executor above.
+- Protocol 1.17 (`task_children`, `task_artifacts`, `plan_revisions`
+  +diff, `subtask_started`/`subtask_completed`/`artifact_published`
+  events, `TaskSummary.parent_task_id`) and the app surfaces it would
+  drive (task tree, plan DAG with lanes, artifact viewer, plan-revision
+  diff, per-child pause/cancel): none of this has anything to wrap yet
+  until the role pipeline and parallel executor above actually produce
+  child tasks and artifacts during a real run — wiring the protocol first
+  would mean shipping wire types for a feature that doesn't exist.
 
-**Exit:**
-- A two-wave plan with two parallel steps runs concurrently (timestamps
-  overlap), survives `kill -9` mid-wave, and resumes without re-running
-  finished children or double-applying edits.
-- Overlapping targets serialize.
-- A loop detected before a crash is still counted after resume.
-- A Reviewer finding causes a repair revision.
+**Exit (partial):**
+- ✅ A loop detected before a crash is still counted after resume (proven
+  end-to-end, not just at the unit level).
+- ✅ A repair-ledger budget exhausted across a crash does not reset.
+- Deferred to the next M5 chunk: two-wave concurrent execution surviving
+  `kill -9` mid-wave; overlapping targets serializing; a Reviewer finding
+  causing a repair revision.
 
 ---
 

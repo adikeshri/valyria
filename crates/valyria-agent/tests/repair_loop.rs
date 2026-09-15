@@ -8,17 +8,18 @@
 //! `Verifying` runs it itself; the model's only job is the repair edit.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use valyria_agent::AgentDriver;
 use valyria_context::ContextAssembler;
-use valyria_events::{EventBus, EventKind, Seq};
+use valyria_events::{Delivery, EventBus, EventKind, Seq};
 use valyria_ledger::Ledger;
 use valyria_orchestrator::{Role, RoleRouter};
 use valyria_permissions::PermissionEngine;
 use valyria_runtime_fake::{FakeModelRuntime, Scenario, ScriptedTurn};
 use valyria_sandbox::{detect_platform_launcher, ProcessLauncher, SandboxProfile};
 use valyria_store::{Migration, Store};
-use valyria_task::{Budget, TaskManager};
+use valyria_task::{kinds, Budget, JournalEntryKind, JournalSeq, TaskManager};
 use valyria_tools::ToolRuntime;
 use valyria_types::{AgentState, PermissionMode, WorkspaceId};
 use valyria_util::{CancellationToken, Clock, FixedClock};
@@ -160,6 +161,33 @@ fn config_contents(b: &Backing) -> String {
     std::fs::read_to_string(b.ws.full_path("src/config.txt")).unwrap()
 }
 
+async fn wait_for_nth(
+    sub: &mut valyria_events::Subscription,
+    events: &EventBus,
+    kind: EventKind,
+    n: usize,
+) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut seen = 0;
+        loop {
+            match sub.recv().await.unwrap() {
+                Delivery::Event(env) if env.kind == kind => {
+                    seen += 1;
+                    if seen >= n {
+                        return;
+                    }
+                }
+                Delivery::Lagged { resume_from } => {
+                    *sub = events.subscribe_since(resume_from).await.unwrap();
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for event")
+}
+
 async fn kinds_of(b: &Backing) -> Vec<EventKind> {
     b.events
         .replay_since(Seq::ZERO)
@@ -297,6 +325,140 @@ async fn an_unfixable_bug_trips_loop_detection_and_is_handed_off() {
         runs.len()
     );
     assert!(runs.iter().all(|r| !r.passed()));
+}
+
+/// M5, C8: a real crash (aborted, not gracefully paused) mid-repair-loop
+/// must not hand the resumed task a fresh repair budget or an empty loop
+/// detector — otherwise a task that crashes repeatedly could retry
+/// forever across restarts even though a single uninterrupted process
+/// would have given up. Same unfixable-bug scenario as
+/// `an_unfixable_bug_trips_loop_detection_and_is_handed_off`, but the
+/// driver is killed after two verification failures (well before the
+/// 4-attempt repair budget is exhausted) and resumed under a completely
+/// fresh `AgentDriver` — the same "reopen the app" shape every other
+/// crash-recovery test in this workspace uses.
+#[tokio::test]
+async fn a_crash_mid_repair_does_not_reset_the_attempt_budget_or_loop_history() {
+    let backing = seeded_bug_workspace();
+    let mut turns = vec![ScriptedTurn::Finish {
+        summary: "looks fine to me".into(),
+    }];
+    for _ in 0..12 {
+        turns.push(ScriptedTurn::Finish {
+            summary: "still looks fine".into(),
+        });
+    }
+    let (tasks, driver) = build_driver(
+        &backing,
+        Scenario {
+            name: "stuck".into(),
+            turns,
+        },
+    );
+
+    let task = tasks
+        .create(
+            WorkspaceId::new(),
+            "set the answer to 42".into(),
+            Budget::default(),
+        )
+        .await
+        .unwrap();
+
+    let mut sub = backing.events.subscribe_since(Seq::ZERO).await.unwrap();
+    let handle = tokio::spawn({
+        let driver_task = task.id;
+        async move { driver.run(driver_task, CancellationToken::new()).await }
+    });
+
+    // Two failed verification cycles in: at least one repair attempt has
+    // already been recorded, but the 4-attempt budget is nowhere near
+    // exhausted yet.
+    wait_for_nth(&mut sub, &backing.events, EventKind::TestFailed, 2).await;
+    handle.abort();
+    let _ = handle.await;
+
+    let mid_flight = tasks.get(task.id).await.unwrap();
+    assert!(
+        !mid_flight.state.is_terminal(),
+        "task should still be mid-flight: {:?}",
+        mid_flight.state
+    );
+    let attempts_before_crash = tasks
+        .journal_since(task.id, JournalSeq::ZERO)
+        .await
+        .unwrap()
+        .iter()
+        .filter(|e| {
+            matches!(&e.kind, JournalEntryKind::EffectCompleted { outcome_kind, .. } if outcome_kind == kinds::REPAIR_ATTEMPT)
+        })
+        .count();
+    assert!(
+        attempts_before_crash >= 1,
+        "expected at least one repair attempt journaled before the simulated crash"
+    );
+
+    // Fresh manager + driver against the same backing store, exactly as a
+    // restarted process would build them — a brand new, empty
+    // `verify_states` map with nothing cached for this task.
+    // `turn_hint` is a global per-task counter (not reset by a resume), so
+    // the resumed scenario must cover the same index range the original
+    // one did — this scenario is only ever asked for `Finish`, same as
+    // before the crash, so a flat run of them is enough regardless of
+    // exactly which index the crash landed on.
+    let resumed_turns: Vec<ScriptedTurn> = (0..12)
+        .map(|_| ScriptedTurn::Finish {
+            summary: "still looks fine after resume".into(),
+        })
+        .collect();
+    let (tasks2, driver2) = build_driver(
+        &backing,
+        Scenario {
+            name: "stuck-resumed".into(),
+            turns: resumed_turns,
+        },
+    );
+    let recovered = tasks2.recover_incomplete_tasks().await.unwrap();
+    assert_eq!(recovered, vec![task.id]);
+    let paused = tasks2.get(task.id).await.unwrap();
+    let resume_target = paused.paused_from.unwrap();
+    tasks2.transition(task.id, resume_target).await.unwrap();
+    driver2
+        .run(task.id, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let final_task = tasks2.get(task.id).await.unwrap();
+    assert!(
+        matches!(
+            final_task.state,
+            AgentState::WaitingForUser | AgentState::Failed
+        ),
+        "a repair loop resumed after a crash must still converge (hand off), not spin — ended in {:?}",
+        final_task.state
+    );
+
+    // The load-bearing assertion: total repair attempts across *both*
+    // driver instances stay within the same 4-attempt budget a single
+    // uninterrupted process is held to — the resumed driver did not start
+    // counting from zero.
+    let total_attempts = tasks2
+        .journal_since(task.id, JournalSeq::ZERO)
+        .await
+        .unwrap()
+        .iter()
+        .filter(|e| {
+            matches!(&e.kind, JournalEntryKind::EffectCompleted { outcome_kind, .. } if outcome_kind == kinds::REPAIR_ATTEMPT)
+        })
+        .count();
+    assert!(
+        total_attempts <= 4,
+        "expected the repair budget (4 attempts) to survive the crash, got {total_attempts} total attempts"
+    );
+
+    // Never fixed — the scenario never makes a real edit either side of
+    // the crash.
+    assert_eq!(config_contents(&backing), "ANSWER=0\n");
 }
 
 #[tokio::test]

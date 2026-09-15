@@ -45,9 +45,39 @@ impl TaskManager {
         }
     }
 
+    /// Creates a task whose `parent_task` links back to `parent_id` (M5,
+    /// §"Planning and multi-agent"). The child gets its own id, its own
+    /// journal, and its own budget — nothing about tracking or resuming it
+    /// differs from an ordinary top-level task; only `parent_task` and the
+    /// `TaskCreated` fan-out to the parent (`children_of`) distinguish it.
+    /// Inherits `workspace_id` from the parent rather than taking one,
+    /// since a child task spawned by a role pipeline is definitionally
+    /// working in the same workspace as whatever spawned it.
+    pub async fn create_child(
+        &self,
+        parent_id: TaskId,
+        objective: String,
+        budget: Budget,
+    ) -> Result<Task> {
+        let parent = self.get(parent_id).await?;
+        self.create_with_parent(parent.workspace_id, Some(parent_id), objective, budget)
+            .await
+    }
+
     pub async fn create(
         &self,
         workspace_id: WorkspaceId,
+        objective: String,
+        budget: Budget,
+    ) -> Result<Task> {
+        self.create_with_parent(workspace_id, None, objective, budget)
+            .await
+    }
+
+    async fn create_with_parent(
+        &self,
+        workspace_id: WorkspaceId,
+        parent_task: Option<TaskId>,
         objective: String,
         budget: Budget,
     ) -> Result<Task> {
@@ -56,7 +86,7 @@ impl TaskManager {
         let task = Task {
             id,
             workspace_id,
-            parent_task: None,
+            parent_task,
             objective,
             state: AgentState::Idle,
             paused_from: None,
@@ -72,6 +102,7 @@ impl TaskManager {
 
         let id_str = task.id.to_string();
         let ws_str = task.workspace_id.to_string();
+        let parent_str = task.parent_task.map(|p| p.to_string());
         let objective = task.objective.clone();
         let state_text = state_to_text(task.state);
         let plan_scope_json = serde_json::to_string(&task.plan_scope)?;
@@ -88,10 +119,11 @@ impl TaskManager {
                      paused_from, plan_scope, budget_max_steps, budget_max_wall_ms, \
                      budget_max_tokens, index_generation_at_start, created_at_ms, \
                      updated_at_ms, completed_at_ms, recovery_note) \
-                     VALUES (?1,?2,NULL,?3,?4,NULL,?5,?6,?7,?8,NULL,?9,?10,NULL,NULL)",
+                     VALUES (?1,?2,?3,?4,?5,NULL,?6,?7,?8,?9,NULL,?10,?11,NULL,NULL)",
                     rusqlite::params![
                         id_str,
                         ws_str,
+                        parent_str,
                         objective,
                         state_text,
                         plan_scope_json,
@@ -109,6 +141,33 @@ impl TaskManager {
         self.append_journal(id, JournalEntryKind::TaskCreated)
             .await?;
         Ok(task)
+    }
+
+    /// Every task whose `parent_task` is `id`, oldest first — the read side
+    /// of [`TaskManager::create_child`]. Not recursive: a grandchild is a
+    /// child of its own immediate parent, not of `id`, matching how
+    /// `parent_task` is a single hop rather than a materialized path.
+    pub async fn children_of(&self, id: TaskId) -> Result<Vec<Task>> {
+        let id_str = id.to_string();
+        let ids = self
+            .store
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT id FROM tasks WHERE parent_task = ?1 ORDER BY created_at_ms ASC",
+                )?;
+                let ids = stmt
+                    .query_map([&id_str], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(ids)
+            })
+            .await?;
+
+        let mut tasks = Vec::with_capacity(ids.len());
+        for id_str in ids {
+            let child_id: TaskId = id_str.parse().map_err(|_| TaskError::CorruptId(id_str))?;
+            tasks.push(self.get(child_id).await?);
+        }
+        Ok(tasks)
     }
 
     pub async fn get(&self, id: TaskId) -> Result<Task> {
@@ -573,12 +632,43 @@ impl TaskManager {
     /// request).
     pub async fn request_pause(&self, id: TaskId) -> Result<()> {
         self.set_pending_signal(id, ControlSignal::PauseRequested)
+            .await?;
+        self.cascade_signal_to_children(id, ControlSignal::PauseRequested)
             .await
     }
 
     pub async fn request_cancel(&self, id: TaskId) -> Result<()> {
         self.set_pending_signal(id, ControlSignal::CancelRequested)
+            .await?;
+        self.cascade_signal_to_children(id, ControlSignal::CancelRequested)
             .await
+    }
+
+    /// Propagates a pause/cancel request down to every descendant (M5: "cancel
+    /// propagates down; pause propagates down"). A child task has no way to
+    /// notice its parent was paused or cancelled other than checking its own
+    /// `pending_signal` — there is no live in-process channel between a
+    /// parent's driver loop and a child's (see [`crate::types::Task::pending_signal`]
+    /// for why signals are durable rows, not channels, in the first place) —
+    /// so the signal has to be written into every descendant's row directly,
+    /// not just the task named by the caller. Terminal descendants are
+    /// skipped: nothing will ever read a terminal task's `pending_signal`
+    /// again, so writing one there would just be a display artifact ("cancel
+    /// requested" on a task that already finished).
+    fn cascade_signal_to_children<'a>(
+        &'a self,
+        id: TaskId,
+        signal: ControlSignal,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            for child in self.children_of(id).await? {
+                if !child.state.is_terminal() {
+                    self.set_pending_signal(child.id, signal).await?;
+                }
+                self.cascade_signal_to_children(child.id, signal).await?;
+            }
+            Ok(())
+        })
     }
 
     async fn set_pending_signal(&self, id: TaskId, signal: ControlSignal) -> Result<()> {
@@ -1172,5 +1262,126 @@ mod tests {
         let mgr = manager();
         let err = mgr.request_pause(TaskId::new()).await.unwrap_err();
         assert!(matches!(err, TaskError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn create_child_links_parent_and_inherits_workspace() {
+        let mgr = manager();
+        let parent = new_task(&mgr).await;
+
+        let child = mgr
+            .create_child(parent.id, "implement step 1".into(), Budget::default())
+            .await
+            .unwrap();
+
+        assert_eq!(child.parent_task, Some(parent.id));
+        assert_eq!(child.workspace_id, parent.workspace_id);
+        assert_ne!(child.id, parent.id);
+
+        let children = mgr.children_of(parent.id).await.unwrap();
+        assert_eq!(children, vec![child.clone()]);
+        // A task with no children reports an empty list, not an error.
+        assert!(mgr.children_of(child.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn children_of_is_ordered_by_creation_and_scoped_to_direct_children() {
+        let mgr = manager();
+        let parent = new_task(&mgr).await;
+        let first = mgr
+            .create_child(parent.id, "first".into(), Budget::default())
+            .await
+            .unwrap();
+        let second = mgr
+            .create_child(parent.id, "second".into(), Budget::default())
+            .await
+            .unwrap();
+        // A grandchild must not show up under the grandparent.
+        let grandchild = mgr
+            .create_child(first.id, "grandchild".into(), Budget::default())
+            .await
+            .unwrap();
+
+        let children = mgr.children_of(parent.id).await.unwrap();
+        assert_eq!(
+            children.iter().map(|t| t.id).collect::<Vec<_>>(),
+            vec![first.id, second.id]
+        );
+        assert_eq!(mgr.children_of(first.id).await.unwrap(), vec![grandchild]);
+    }
+
+    #[tokio::test]
+    async fn create_child_for_a_missing_parent_errors() {
+        let mgr = manager();
+        let err = mgr
+            .create_child(TaskId::new(), "orphan".into(), Budget::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, TaskError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn request_cancel_cascades_to_active_descendants() {
+        let mgr = manager();
+        let parent = new_task(&mgr).await;
+        let child = mgr
+            .create_child(parent.id, "child".into(), Budget::default())
+            .await
+            .unwrap();
+        let grandchild = mgr
+            .create_child(child.id, "grandchild".into(), Budget::default())
+            .await
+            .unwrap();
+
+        mgr.request_cancel(parent.id).await.unwrap();
+
+        assert_eq!(
+            mgr.get(parent.id).await.unwrap().pending_signal,
+            Some(ControlSignal::CancelRequested)
+        );
+        assert_eq!(
+            mgr.get(child.id).await.unwrap().pending_signal,
+            Some(ControlSignal::CancelRequested)
+        );
+        assert_eq!(
+            mgr.get(grandchild.id).await.unwrap().pending_signal,
+            Some(ControlSignal::CancelRequested)
+        );
+    }
+
+    #[tokio::test]
+    async fn cascaded_signal_skips_already_terminal_children() {
+        let mgr = manager();
+        let parent = new_task(&mgr).await;
+        let done_child = mgr
+            .create_child(parent.id, "already done".into(), Budget::default())
+            .await
+            .unwrap();
+        for state in [
+            AgentState::Understanding,
+            AgentState::Discovery,
+            AgentState::Planning,
+            AgentState::Implementing,
+            AgentState::Verifying,
+            AgentState::Completed,
+        ] {
+            mgr.transition(done_child.id, state).await.unwrap();
+        }
+        let active_child = mgr
+            .create_child(parent.id, "still running".into(), Budget::default())
+            .await
+            .unwrap();
+
+        mgr.request_pause(parent.id).await.unwrap();
+
+        assert_eq!(
+            mgr.get(done_child.id).await.unwrap().pending_signal,
+            None,
+            "a terminal child must not get a pending signal written"
+        );
+        assert_eq!(
+            mgr.get(active_child.id).await.unwrap().pending_signal,
+            Some(ControlSignal::PauseRequested)
+        );
     }
 }

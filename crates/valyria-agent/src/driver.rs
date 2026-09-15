@@ -109,9 +109,21 @@ pub enum PlanningMode {
 
 /// Process-local verify/diagnose/repair bookkeeping for one task. Cloned
 /// out, mutated, and written back by each state handler (only one driver
-/// loop runs per task at a time). Not persisted: a cross-process resume
-/// rebuilds the plan from scratch and the completion report from the
-/// durable `verification_run` rows.
+/// loop runs per task at a time), and cached in `verify_states` for the
+/// rest of this process's lifetime once populated.
+///
+/// `plan`/`executed`/`last_run`/`pending_diagnosis` are *not* persisted: a
+/// cross-process resume rebuilds the escalation plan from scratch (the
+/// next `Verifying` entry runs `valyria_verify::scan` again) and the
+/// completion report from the durable `verification_run` rows — exactly
+/// as before M5.
+///
+/// `detector` and `repair`, however, **are** reconstructed on first
+/// access in a fresh process (M5, C8) — see [`reconstruct_verify_state`].
+/// Losing loop-detector history or the repair attempt budget across a
+/// crash would mean the exact failure mode these two exist to catch
+/// (infinite retries) becomes reachable again just by restarting the
+/// process mid-repair.
 #[derive(Clone, Default)]
 struct VerifyState {
     detector: LoopDetector,
@@ -589,7 +601,7 @@ impl AgentDriver {
     /// Run the next check in the escalation plan. Returns `Flow::Return`
     /// when the task reached a terminal state.
     async fn step_verifying(&self, task_id: TaskId, cancel: &CancellationToken) -> Result<Flow> {
-        let mut vs = self.take_verify_state(task_id);
+        let mut vs = self.take_verify_state(task_id).await?;
         let changed = self.task_changed_files(task_id);
 
         // (Re)build the plan on first entry or after a repair widened it.
@@ -748,7 +760,7 @@ impl AgentDriver {
     }
 
     async fn step_diagnosing(&self, task_id: TaskId, _cancel: &CancellationToken) -> Result<()> {
-        let mut vs = self.take_verify_state(task_id);
+        let mut vs = self.take_verify_state(task_id).await?;
         let changed = self.task_changed_files(task_id);
 
         let failures = vs
@@ -767,6 +779,17 @@ impl AgentDriver {
         let diagnosis = diagnose(&failures, &changed, &neighbors);
         let fingerprint = diagnosis.fingerprint();
 
+        // Loop / progress detection bookkeeping, computed *before* the
+        // DIAGNOSIS journal entry below (M5, C8) — its payload carries
+        // `file_state_hash`/`verification_frontier`/`failure_count`/
+        // `files_touched` precisely so `reconstruct_verify_state` can
+        // replay this exact `observe_*` call after a crash, rather than
+        // losing the loop detector's history on every cross-process resume.
+        for f in changed.iter().cloned() {
+            vs.files_touched.insert(f);
+        }
+        let file_state = self.changed_files_state_hash(&changed);
+
         self.tasks
             .append_journal(
                 task_id,
@@ -784,16 +807,18 @@ impl AgentDriver {
                             .map(|s| s.path.display().to_string())
                             .collect::<Vec<_>>(),
                         "digest": diagnosis.context_digest(3, 3),
+                        "file_state_hash": file_state,
+                        "verification_frontier": vs.executed,
+                        "failure_count": failures.len(),
+                        "files_touched": vs.files_touched
+                            .iter()
+                            .map(|p| p.display().to_string())
+                            .collect::<Vec<_>>(),
                     }),
                 },
             )
             .await?;
 
-        // Loop / progress detection.
-        for f in changed.iter().cloned() {
-            vs.files_touched.insert(f);
-        }
-        let file_state = self.changed_files_state_hash(&changed);
         let step_sig = StepSignature::default()
             .with_error(&fingerprint)
             .with_file_state(file_state);
@@ -915,7 +940,7 @@ impl AgentDriver {
             return Ok(Flow::Continue);
         }
 
-        let mut vs = self.take_verify_state(task_id);
+        let mut vs = self.take_verify_state(task_id).await?;
         let digest = vs
             .pending_diagnosis
             .as_ref()
@@ -998,12 +1023,15 @@ impl AgentDriver {
                 )
             }
             ActionRequest::Ask { .. } => {
-                vs.repair.record(RepairAttempt {
+                let attempt = RepairAttempt {
                     attempt: 0,
                     diagnosis_fingerprint: fingerprint,
                     edit_summary: "model asked a question".into(),
                     outcome: RepairOutcome::NoChange,
-                });
+                };
+                self.journal_repair_attempt(task_id, step_id, &attempt)
+                    .await?;
+                vs.repair.record(attempt);
                 self.put_verify_state(task_id, vs);
                 self.tasks
                     .transition(task_id, AgentState::WaitingForUser)
@@ -1012,12 +1040,15 @@ impl AgentDriver {
             }
         };
 
-        vs.repair.record(RepairAttempt {
+        let attempt = RepairAttempt {
             attempt: 0,
             diagnosis_fingerprint: fingerprint,
             edit_summary,
             outcome,
-        });
+        };
+        self.journal_repair_attempt(task_id, step_id, &attempt)
+            .await?;
+        vs.repair.record(attempt);
         vs.plan = None; // re-verify from the start of the escalation
         vs.executed = 0;
         vs.last_passed = true;
@@ -1345,20 +1376,63 @@ impl AgentDriver {
         ContentHash::of_bytes(&buf)
     }
 
-    fn take_verify_state(&self, task_id: TaskId) -> VerifyState {
+    /// M5, C8: the in-memory cache is process-local, so the *first* time a
+    /// fresh process touches a task's verify state — whether it's genuinely
+    /// new or this is a resume after a crash — this map has nothing for it.
+    /// Rather than assume "nothing in the map" means "nothing has happened
+    /// yet" (true before M5, false after a crash mid-repair), replay the
+    /// task's own journal to rebuild `detector`/`repair` exactly as they
+    /// would stand had the process never died. A task with no history at
+    /// all replays to the same empty detector/ledger this always produced,
+    /// so the change is invisible to every pre-M5 scenario.
+    async fn take_verify_state(&self, task_id: TaskId) -> Result<VerifyState> {
+        if let Some(vs) = self.verify_states.lock().unwrap().get(&task_id).cloned() {
+            return Ok(vs);
+        }
+        let entries = self.tasks.journal_since(task_id, JournalSeq::ZERO).await?;
+        let (detector, repair) = reconstruct_verify_state(&entries, MAX_REPAIR_ATTEMPTS);
+        let vs = VerifyState {
+            detector,
+            repair,
+            ..VerifyState::default()
+        };
         self.verify_states
             .lock()
             .unwrap()
-            .entry(task_id)
-            .or_insert_with(|| VerifyState {
-                repair: RepairLedger::new(MAX_REPAIR_ATTEMPTS),
-                ..VerifyState::default()
-            })
-            .clone()
+            .insert(task_id, vs.clone());
+        Ok(vs)
     }
 
     fn put_verify_state(&self, task_id: TaskId, state: VerifyState) {
         self.verify_states.lock().unwrap().insert(task_id, state);
+    }
+
+    /// Durably records one [`RepairAttempt`] before it's folded into the
+    /// (process-local) ledger, so [`reconstruct_verify_state`] can replay
+    /// it — and thus the ledger's attempt budget and escalation history —
+    /// after a crash (M5, C8).
+    async fn journal_repair_attempt(
+        &self,
+        task_id: TaskId,
+        step_id: StepId,
+        attempt: &RepairAttempt,
+    ) -> Result<()> {
+        self.tasks
+            .append_journal(
+                task_id,
+                JournalEntryKind::EffectCompleted {
+                    effect_id: EffectId::new(),
+                    step_id,
+                    outcome_kind: kinds::REPAIR_ATTEMPT.into(),
+                    payload: serde_json::json!({
+                        "diagnosis_fingerprint": attempt.diagnosis_fingerprint,
+                        "edit_summary": attempt.edit_summary,
+                        "outcome": repair_outcome_tag(attempt.outcome),
+                    }),
+                },
+            )
+            .await?;
+        Ok(())
     }
 
     /// Graph neighbours of `changed`'s files — every file whose graph
@@ -1702,6 +1776,127 @@ fn describe_finding(f: &LoopFinding) -> String {
     }
 }
 
+/// M5, C8: rebuilds a [`LoopDetector`] and [`RepairLedger`] by replaying
+/// one task's journal from the start, in order — the same technique
+/// `plan_exec::plan_rejection_count` already uses for the plan-repair
+/// budget. Every mutation the live driver ever makes to these two structs
+/// is driven by data this function can also see in the journal (the
+/// `DIAGNOSIS` entry carries the loop detector's inputs; `REPAIR_ATTEMPT`
+/// and the `decision` field of `REPAIR_DECISION` carry the ledger's), so a
+/// task with no gaps in its journal reconstructs to bit-for-bit the same
+/// state a process that never crashed would have — a crash simply cannot
+/// be distinguished from a resume by anything downstream of this.
+fn reconstruct_verify_state(
+    entries: &[valyria_task::JournalEntry],
+    max_repair_attempts: u32,
+) -> (LoopDetector, RepairLedger) {
+    let mut detector = LoopDetector::default();
+    let mut repair = RepairLedger::new(max_repair_attempts);
+    let mut files_touched: BTreeSet<PathBuf> = BTreeSet::new();
+
+    for entry in entries {
+        let JournalEntryKind::EffectCompleted {
+            outcome_kind,
+            payload,
+            ..
+        } = &entry.kind
+        else {
+            continue;
+        };
+        match outcome_kind.as_str() {
+            kinds::VERIFY_RESULT => {
+                if payload.get("passed").and_then(|v| v.as_bool()) == Some(true) {
+                    detector.observe_failure(None);
+                }
+            }
+            kinds::DIAGNOSIS => {
+                let fingerprint = payload
+                    .get("fingerprint")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let file_state_hash: ContentHash = payload
+                    .get("file_state_hash")
+                    .cloned()
+                    .and_then(|v| serde_json::from_value(v).ok())
+                    .unwrap_or_else(|| ContentHash::of_bytes(b""));
+                let verification_frontier = payload
+                    .get("verification_frontier")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize;
+                let failure_count = payload
+                    .get("failure_count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize;
+                if let Some(paths) = payload.get("files_touched").and_then(|v| v.as_array()) {
+                    for p in paths {
+                        if let Some(s) = p.as_str() {
+                            files_touched.insert(PathBuf::from(s));
+                        }
+                    }
+                }
+
+                let step_sig = StepSignature::default()
+                    .with_error(fingerprint)
+                    .with_file_state(file_state_hash);
+                let _finding = detector
+                    .observe_step(step_sig)
+                    .or_else(|| detector.observe_failure(Some(fingerprint)))
+                    .or_else(|| {
+                        detector.observe_progress(ProgressMetric {
+                            verification_frontier,
+                            failure_count,
+                            files_touched: files_touched.clone(),
+                        })
+                    });
+            }
+            kinds::REPAIR_ATTEMPT => {
+                let diagnosis_fingerprint = payload
+                    .get("diagnosis_fingerprint")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let edit_summary = payload
+                    .get("edit_summary")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let outcome = match payload.get("outcome").and_then(|v| v.as_str()) {
+                    Some("fixed") => RepairOutcome::Fixed,
+                    Some("improved") => RepairOutcome::Improved,
+                    Some("regressed") => RepairOutcome::Regressed,
+                    _ => RepairOutcome::NoChange,
+                };
+                repair.record(RepairAttempt {
+                    attempt: 0,
+                    diagnosis_fingerprint,
+                    edit_summary,
+                    outcome,
+                });
+            }
+            kinds::REPAIR_DECISION => {
+                let decision = payload.get("decision").and_then(|v| v.as_str());
+                match decision {
+                    Some("escalate_strategy") => repair.mark_escalated(),
+                    Some("switch_role") => repair.mark_switched_role(),
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    (detector, repair)
+}
+
+fn repair_outcome_tag(outcome: RepairOutcome) -> &'static str {
+    match outcome {
+        RepairOutcome::Fixed => "fixed",
+        RepairOutcome::Improved => "improved",
+        RepairOutcome::NoChange => "no_change",
+        RepairOutcome::Regressed => "regressed",
+    }
+}
+
 fn describe_decision(d: &RepairDecision) -> String {
     match d {
         RepairDecision::Continue => "continue".into(),
@@ -1742,6 +1937,180 @@ mod diagnostics_tests {
         assert_eq!(v["kind"], "timeout");
         assert_eq!(v["location"].as_array().unwrap().len(), 0);
         assert!(v["failing_test"].is_null());
+    }
+}
+
+#[cfg(test)]
+mod reconstruct_verify_state_tests {
+    use super::*;
+    use valyria_task::JournalEntry;
+    use valyria_types::Timestamp;
+
+    fn entry(kind: JournalEntryKind) -> JournalEntry {
+        JournalEntry {
+            seq: JournalSeq::ZERO,
+            task_id: TaskId::new(),
+            kind,
+            created_at: Timestamp::from_millis(0),
+        }
+    }
+
+    fn verify_result(passed: bool) -> JournalEntry {
+        entry(JournalEntryKind::EffectCompleted {
+            effect_id: EffectId::new(),
+            step_id: StepId::new(),
+            outcome_kind: kinds::VERIFY_RESULT.into(),
+            payload: serde_json::json!({"passed": passed}),
+        })
+    }
+
+    /// `frontier` also seeds the file-state hash — a real repair cycle
+    /// edits the file between diagnoses, so the same failure fingerprint
+    /// recurring across cycles never carries an *identical* file state too
+    /// (that combination is what `ExactRepeat` — "the literal same step
+    /// again" — detects, a distinct class from `RepeatedFailure` — "the
+    /// same failure, but the agent keeps trying different things").
+    fn diagnosis(fingerprint: &str, frontier: usize) -> JournalEntry {
+        entry(JournalEntryKind::EffectCompleted {
+            effect_id: EffectId::new(),
+            step_id: StepId::new(),
+            outcome_kind: kinds::DIAGNOSIS.into(),
+            payload: serde_json::json!({
+                "summary": "boom",
+                "fingerprint": fingerprint,
+                "suspects": [],
+                "digest": "",
+                "file_state_hash": ContentHash::of_bytes(format!("{fingerprint}#{frontier}").as_bytes()),
+                "verification_frontier": frontier,
+                "failure_count": 1,
+                "files_touched": ["src/lib.rs"],
+            }),
+        })
+    }
+
+    fn repair_attempt(fingerprint: &str, outcome: &str) -> JournalEntry {
+        entry(JournalEntryKind::EffectCompleted {
+            effect_id: EffectId::new(),
+            step_id: StepId::new(),
+            outcome_kind: kinds::REPAIR_ATTEMPT.into(),
+            payload: serde_json::json!({
+                "diagnosis_fingerprint": fingerprint,
+                "edit_summary": "an edit",
+                "outcome": outcome,
+            }),
+        })
+    }
+
+    fn repair_decision(decision: &str) -> JournalEntry {
+        entry(JournalEntryKind::EffectCompleted {
+            effect_id: EffectId::new(),
+            step_id: StepId::new(),
+            outcome_kind: kinds::REPAIR_DECISION.into(),
+            payload: serde_json::json!({"decision": decision}),
+        })
+    }
+
+    #[test]
+    fn an_empty_journal_reconstructs_to_the_same_empty_state_a_fresh_task_starts_with() {
+        let (detector, repair) = reconstruct_verify_state(&[], MAX_REPAIR_ATTEMPTS);
+        assert_eq!(detector.step_count(), 0);
+        assert_eq!(repair.count(), 0);
+        assert_eq!(repair.decide("fp", None), RepairDecision::Continue);
+    }
+
+    /// The core C8 guarantee: a repeated-failure loop that would have
+    /// tripped `RepeatedFailure` had the process never restarted still
+    /// trips it after reconstruction — the third occurrence of the same
+    /// fingerprint counts the two that happened "before the crash" too.
+    #[test]
+    fn repeated_failure_history_survives_reconstruction() {
+        let entries = vec![
+            diagnosis("same-fingerprint", 0),
+            diagnosis("same-fingerprint", 1),
+        ];
+        let (mut detector, _) = reconstruct_verify_state(&entries, MAX_REPAIR_ATTEMPTS);
+
+        // A third occurrence of the identical fingerprint (different file
+        // state, as a real edit-between-cycles would produce), observed as
+        // the live driver would on the next cycle, must trip
+        // RepeatedFailure — proving the first two are genuinely counted,
+        // not discarded.
+        let step_sig = StepSignature::default()
+            .with_error("same-fingerprint")
+            .with_file_state(ContentHash::of_bytes(b"same-fingerprint#2"));
+        let finding = detector
+            .observe_step(step_sig)
+            .or_else(|| detector.observe_failure(Some("same-fingerprint")));
+        assert!(
+            matches!(finding, Some(LoopFinding::RepeatedFailure { count: 3, .. })),
+            "{finding:?}"
+        );
+    }
+
+    /// A passing VERIFY_RESULT between two failures must clear the streak
+    /// on reconstruction exactly as it does live (`observe_failure(None)`
+    /// on a pass) — otherwise a resumed task would spuriously trip
+    /// RepeatedFailure on failures that aren't actually consecutive.
+    #[test]
+    fn a_pass_in_the_journal_clears_the_failure_streak_on_reconstruction() {
+        let entries = vec![
+            diagnosis("fp", 0),
+            diagnosis("fp", 1),
+            verify_result(true), // clears the streak
+        ];
+        let (mut detector, _) = reconstruct_verify_state(&entries, MAX_REPAIR_ATTEMPTS);
+        let step_sig = StepSignature::default()
+            .with_error("fp")
+            .with_file_state(ContentHash::of_bytes(b"fp#2"));
+        let finding = detector
+            .observe_step(step_sig)
+            .or_else(|| detector.observe_failure(Some("fp")));
+        assert_eq!(finding, None, "the pass should have reset the streak");
+    }
+
+    /// The repair budget itself must not reset on a crash — replaying the
+    /// same number of REPAIR_ATTEMPT entries the live ledger would have
+    /// recorded must exhaust the same budget, or a resumed task could
+    /// retry forever across repeated restarts (exactly the bug C8 exists
+    /// to close).
+    #[test]
+    fn repair_attempt_budget_survives_reconstruction() {
+        let entries = vec![
+            repair_attempt("fp", "improved"),
+            repair_attempt("fp", "no_change"),
+        ];
+        let (_, repair) = reconstruct_verify_state(&entries, 2);
+        assert_eq!(repair.count(), 2);
+        assert!(matches!(
+            repair.decide("fp", None),
+            RepairDecision::GiveUp { .. }
+        ));
+    }
+
+    /// `mark_escalated`/`mark_switched_role` are replayed from the
+    /// `REPAIR_DECISION` entries' own `decision` field — reconstruction
+    /// must land on `SwitchRole` next, not re-offer `EscalateStrategy`,
+    /// for a task that had already escalated before the crash.
+    #[test]
+    fn escalation_state_survives_reconstruction() {
+        let entries = vec![
+            repair_attempt("fp", "no_change"),
+            repair_attempt("fp", "no_change"),
+            repair_decision("escalate_strategy"),
+        ];
+        let (_, repair) = reconstruct_verify_state(&entries, 9);
+        assert_eq!(repair.decide("fp", None), RepairDecision::SwitchRole);
+    }
+
+    #[test]
+    fn files_touched_accumulates_across_diagnosis_entries_in_order() {
+        let entries = vec![diagnosis("fp1", 0), diagnosis("fp2", 1)];
+        // Two distinct fingerprints and frontiers: the progress metric only
+        // fires once the earlier detectors return None on both cycles, but
+        // reconstruction must not panic or lose track of accumulation
+        // regardless — this is primarily a no-panic / determinism check.
+        let (detector, _) = reconstruct_verify_state(&entries, MAX_REPAIR_ATTEMPTS);
+        assert_eq!(detector.step_count(), 2);
     }
 }
 
