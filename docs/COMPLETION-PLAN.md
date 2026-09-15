@@ -468,42 +468,94 @@ immediately without a Core change.
 
 ---
 
-### M4 — Tools, user interaction, git writes
+### M4 — Tools, user interaction, git writes  🟡 partially shipped 2026-09-15
 
-**Core**
-- C6 (write/interaction tools):
-  - `apply_patch` (multi-file unified diff through the edit engine's ladder
-    and ledger).
-  - `git_commit`, `git_branch`, `git_stash`, `git_checkout` — each its own
-    permission category. History rewrite stays denied by default in every
-    mode.
-  - `ask_user` → `WaitingForUser` with a structured question.
-  - `report_finding` → a `ReviewFindings` artifact.
-  - `plan_update` → a new plan revision; scope expansion is a permission
-    event.
-- `task_respond { task_id, answer }` resumes a `WaitingForUser` task with the
-  answer journaled as `Trust::Instruction` from the user.
-- Structured context on `task_create`: `attachments[] { path, range?,
-  selection_text? }` enter context as pinned, provenance-tagged items (not
-  objective text).
+**Core — shipped:**
+- The `ask_user` half of C6, done differently than planned: rather than a
+  new tool, `ActionRequest::Ask` (`FinishReason::Ask`, already wired since
+  before M4) already parks a task in `WAITING_FOR_USER` with the model's
+  question — the actual gap was that nothing could ever answer it.
+  `AgentDriver::respond_to_user(task_id, answer)` (new) journals the
+  answer as a `kinds::USER_RESPONSE` entry (`Trust::Instruction` — the
+  user speaking) and resumes to `Implementing`. `build_conversation` was
+  rewritten from its old tool-only, `EffectId`-correlated two-pass replay
+  into a single seq-ordered merge across *every* turn kind — tool call/
+  result/denial (still `EffectId`-correlated) and now question/answer
+  (paired by adjacency, since a model-asked question has no effect id to
+  correlate against) — so the turn immediately after an answer actually
+  carries both the question and the answer in the model's message
+  history, proven against a real captured `GenerateRequest`, not just a
+  state-machine assertion. `valyria_app::Runtime::respond_to_user` mirrors
+  `resolve_permission_scoped`'s wrapper shape exactly (spawn a fresh
+  driver run if the answer leaves the task live).
+- `git_commit`, the first of C6's git-write tools. `valyria-git` has no
+  write API at all (confirmed, not assumed), so this shells to the real
+  `git` binary through the same sandboxed-process path `run_command`
+  already uses (`ctx.launcher.wrap` + `valyria_process::run`) rather than
+  building gix-based write support from scratch — `git add <paths|-A>`
+  then `git commit -m <message>`, both risk-classified through the
+  existing `classify_command` (so a genuinely dangerous invocation still
+  gets caught by the same mechanism every shell command does), under
+  `PermissionCategory::Filesystem`/`ActionKind::Write` (a plain commit is
+  not `GitHistoryModification` — that category, denied by default, is
+  for force-push/hard-reset/rebase/filter-branch, none of which this tool
+  can invoke). Proven against a real repository: the test asserts the
+  actual `git log`/`git status`/`git show` afterward, not just that the
+  tool reported success.
+- **A real sandbox bug found and fixed along the way, not scoped work**:
+  writing `git_commit`'s test revealed that the macOS Seatbelt profile
+  denied writes to `/dev/null` — `git`, like most well-behaved CLI tools,
+  opens it unconditionally as part of ordinary operation, and with no
+  workspace-write-scope covering it, the "no explicit allowance" default
+  denied it. This wasn't about `/dev/null`'s safety (there is nothing to
+  leak or persist by writing to a discard sink); it was `render_profile`
+  literally having no rule for it. Fixed: `/dev/null`, `/dev/zero`,
+  `/dev/random`, `/dev/urandom` are now always readable/writable
+  regardless of the configured write scope. A dedicated end-to-end
+  sandbox test (`end_to_end_dev_null_is_always_writable`) guards it
+  directly, independent of `git_commit`.
+- A latent bug in the test suite's own `expect_success` helper (`valyria-
+  tools/tests/integration.rs`) surfaced by the same investigation: it
+  asserted internal *consistency* between `outcome.is_success()` and
+  `record.success` but never that the outcome was actually a success —
+  so a tool call that failed *consistently* (both fields agreeing it
+  failed) passed straight through a helper whose name promised the
+  opposite. Fixed with one added assertion; every existing caller was
+  already only ever feeding it genuine successes, so this changed no
+  other test's outcome.
 
-**Protocol 1.16** — `task_respond`; `TaskCreateRequest.attachments`;
-`user_question` event; `permission_rules` (list/revoke persisted grants).
-
-**App**
-- The reply composer answers `user_question` in Chat.
-- Attach selection/file from the editor and explorer; the retired "preamble"
-  path is deleted.
-- Git commit/branch from the Review surface goes through Core (approval UI
-  shows it).
-- Permission rules page (list + revoke).
+**Deliberately deferred, with reasons:**
+- **`apply_patch`, `git_branch`, `git_stash`, `git_checkout`,
+  `report_finding`, `plan_update`** — each real, separate tool-surface
+  work; `git_commit` was the one git-write tool built and proven this
+  pass, not all four from the original write-up.
+- **Structured `task_create` attachments** — the "preamble text" path
+  this would replace is untouched; a real, separate feature.
+- **Protocol 1.16 and the app surfaces it would drive** (`task_respond`
+  as a wire method — the mechanism exists in Core now, but nothing
+  exposes it over the protocol yet — `TaskCreateRequest.attachments`,
+  `user_question` event, `permission_rules`, the app's reply composer,
+  attachment UI, and permission-rules page) — not started.
 
 **Exit:**
-- A fake-model scenario asks a question, the app/CLI answers, the task uses
-  the answer.
-- An agent commit requires approval in Assisted mode and appears in `git_log`.
-- `git push --force` / `reset --hard` are refused in Autonomous mode.
-- Attachments appear in `context_retrieved` with `reason: attached`.
+- ✅ A fake-model scenario asks a question, `respond_to_user` answers it,
+  and the *next model call's actual message history* — not just the
+  journal or the state machine — carries both
+  (`valyria-agent/tests/conversation_history.rs::
+  respond_to_user_answers_the_question_and_the_next_turn_sees_both`).
+- ✅ `git_commit` produces a real commit a real `git log`/`show` confirms,
+  and a nothing-to-commit call fails cleanly rather than silently
+  succeeding (`valyria-tools/tests/integration.rs`).
+- Deferred (see above): approval-gated commits in Assisted mode specifically
+  (the general permission-mode machinery already governs every write tool
+  including this one, but no dedicated test targets `git_commit`
+  specifically the way the write-up describes); `git push --force`/
+  `reset --hard` refusal (no tool can invoke them at all yet — `git_branch`/
+  `stash`/`checkout` don't exist, and `git_commit` has no path to them);
+  attachments in `context_retrieved`.
+- ✅ `cargo test --workspace` clean (1218 passed, 4 pre-existing
+  `#[ignore]`, 0 failed), `cargo fmt --check` and `cargo clippy --workspace
+  --all-targets -D warnings` both clean.
 
 ---
 

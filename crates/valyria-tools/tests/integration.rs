@@ -55,6 +55,17 @@ fn expect_success(result: InvocationResult) -> ToolOutcome {
         InvocationResult::Executed { outcome, record } => {
             assert!(record.authorized);
             assert_eq!(outcome.is_success(), record.success);
+            // M4: the helper's own name is the contract — every prior
+            // caller already only ever fed it a genuinely successful
+            // outcome (the consistency check above was the only thing
+            // enforced, so a silently-failing tool call would pass
+            // straight through unnoticed, which is exactly what a
+            // git_commit sandbox regression did here before this line
+            // existed).
+            assert!(
+                outcome.is_success(),
+                "expected a successful outcome, got {outcome:?}"
+            );
             outcome
         }
         other => panic!("expected Executed, got {other:?}"),
@@ -462,6 +473,7 @@ async fn descriptors_cover_every_registered_tool() {
         "git_log",
         "git_show",
         "git_blame",
+        "git_commit",
         "run_command",
         "run_test",
         "run_formatter",
@@ -525,5 +537,96 @@ async fn a_secret_read_from_a_file_is_redacted_before_it_reaches_the_model_or_th
     // output would land in.
     if let Some(stdout) = &record.stdout {
         assert!(!stdout.contains("AKIAABCDEFGHIJKLMNOP"));
+    }
+}
+
+/// M4 (`docs/COMPLETION-PLAN.md`): `git_commit` — the first git *write*
+/// tool. `valyria-git` has no write API, so this shells to the real `git`
+/// binary (same sandboxed-process path `run_command` uses) rather than
+/// building one; the test proves the actual repository ends up committed,
+/// not just that the tool reports success.
+#[tokio::test]
+async fn git_commit_stages_and_commits_real_changes() {
+    let h = harness(PermissionMode::Autonomous);
+    let dir = h.ctx.workspace_root.as_path();
+    let run = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap()
+    };
+    run(&["init", "-q", "-b", "main"]);
+    run(&["config", "user.email", "t@example.com"]);
+    run(&["config", "user.name", "T"]);
+    std::fs::write(dir.join("README.md"), "hi").unwrap();
+    run(&["add", "."]);
+    run(&["commit", "-q", "-m", "init"]);
+
+    std::fs::write(dir.join("README.md"), "changed by the agent").unwrap();
+    std::fs::write(dir.join("new.txt"), "brand new file").unwrap();
+
+    let result = h
+        .runtime
+        .invoke(
+            &h.ctx,
+            "git_commit",
+            serde_json::json!({"message": "agent: update README and add new.txt"}),
+        )
+        .await;
+    expect_success(result);
+
+    // The real repository actually has a new commit with both files, not
+    // just a tool that claimed success.
+    let log = run(&["log", "--oneline", "-1"]);
+    let log_text = String::from_utf8_lossy(&log.stdout);
+    assert!(log_text.contains("agent: update README and add new.txt"));
+
+    let status = run(&["status", "--porcelain"]);
+    assert!(
+        status.stdout.is_empty(),
+        "expected a clean working tree after commit, got: {}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+
+    let show = run(&["show", "--stat", "HEAD"]);
+    let show_text = String::from_utf8_lossy(&show.stdout);
+    assert!(show_text.contains("README.md"));
+    assert!(show_text.contains("new.txt"));
+}
+
+/// A `git_commit` with nothing staged and nothing to commit reports
+/// failure cleanly rather than silently succeeding.
+#[tokio::test]
+async fn git_commit_with_nothing_to_commit_fails_cleanly() {
+    let h = harness(PermissionMode::Autonomous);
+    let dir = h.ctx.workspace_root.as_path();
+    let run = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap()
+    };
+    run(&["init", "-q", "-b", "main"]);
+    run(&["config", "user.email", "t@example.com"]);
+    run(&["config", "user.name", "T"]);
+    std::fs::write(dir.join("README.md"), "hi").unwrap();
+    run(&["add", "."]);
+    run(&["commit", "-q", "-m", "init"]);
+
+    let result = h
+        .runtime
+        .invoke(
+            &h.ctx,
+            "git_commit",
+            serde_json::json!({"message": "nothing changed"}),
+        )
+        .await;
+    match result {
+        InvocationResult::Executed { outcome, .. } => {
+            assert!(!outcome.is_success(), "expected failure, nothing to commit");
+        }
+        other => panic!("expected Executed, got {other:?}"),
     }
 }

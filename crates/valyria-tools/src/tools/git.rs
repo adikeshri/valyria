@@ -1,12 +1,20 @@
-//! Git tools (§17): `git_status`, `git_diff`, `git_log`, `git_show`. Scoped
-//! to exactly what `valyria-git` implements today — `git_blame` is
+//! Git tools (§17): `git_status`, `git_diff`, `git_log`, `git_show` (reads,
+//! via `valyria-git`/`gix`), and `git_commit` (M4, a write — `valyria-git`
+//! has no write API, so this shells to the real `git` binary through the
+//! same sandboxed-process path `run_command` uses, exactly like
+//! `valyria-git`'s own test fixtures already do for setup). `git_blame` is
 //! registered but not yet implemented (blame lands with a future
 //! `valyria-git` pass).
+
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::Value;
 use valyria_git::Repo;
-use valyria_permissions::{ActionKind, Authorization, PermissionRequest, RiskLevel};
+use valyria_permissions::{
+    classify_command, ActionKind, Authorization, PermissionRequest, RiskLevel,
+};
+use valyria_process::{CommandSpec, EnvPolicy};
 use valyria_types::PermissionCategory;
 
 use crate::canonical::canonical_input_hash;
@@ -302,5 +310,163 @@ impl Tool for GitBlameTool {
             "tools.not_yet_implemented",
             "git_blame is not implemented yet",
         )
+    }
+}
+
+// ---------------------------------------------------------------- git_commit
+
+fn git_command_spec(ctx: &ToolCtx, args: &[&str], timeout_secs: u64) -> Result<CommandSpec> {
+    let env = EnvPolicy::inherit_filtered().build(&std::env::vars().collect());
+    let spec = CommandSpec::new("git", ctx.workspace_root.as_path())
+        .args(args.iter().map(|s| s.to_string()))
+        .env(env)
+        .timeout(Duration::from_secs(timeout_secs));
+    // D10: same confinement path every process-executing tool goes
+    // through — real on a platform that has it, `PermissiveSandbox`'s
+    // honest no-op otherwise.
+    Ok(ctx.launcher.wrap(spec, &ctx.sandbox_profile)?)
+}
+
+async fn run_git(ctx: &ToolCtx, args: &[&str]) -> std::result::Result<(bool, String), String> {
+    let spec = git_command_spec(ctx, args, 60).map_err(|e| e.to_string())?;
+    match valyria_process::run(&spec, ctx.cancel.clone()).await {
+        Ok(result) => {
+            let combined = format!(
+                "$ git {}\n{}{}",
+                args.join(" "),
+                result.stdout.text,
+                result.stderr.text
+            );
+            Ok((result.success(), combined))
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+pub struct GitCommitTool {
+    descriptor: ToolDescriptor,
+}
+
+impl Default for GitCommitTool {
+    fn default() -> Self {
+        Self {
+            descriptor: ToolDescriptor {
+                name: "git_commit",
+                description: "Stage and commit changes to the repository. `paths` limits \
+                    staging to specific files/directories; omitted stages every change \
+                    (`git add -A`). History-rewriting operations (force-push, hard reset, \
+                    rebase, filter-branch) are a separate, denied-by-default category — this \
+                    tool only ever adds a normal commit on the current branch.",
+                input_schema: object_schema(
+                    serde_json::json!({
+                        "message": {"type": "string", "description": "The commit message."},
+                        "paths": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Files/directories to stage. Omit to stage every change."
+                        },
+                    }),
+                    &["message"],
+                ),
+                side_effect: SideEffect::WritesFilesystem,
+            },
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for GitCommitTool {
+    fn descriptor(&self) -> &ToolDescriptor {
+        &self.descriptor
+    }
+
+    fn preflight(&self, ctx: &ToolCtx, input: &Value) -> Result<PermissionRequest> {
+        // Presence/shape check only — the message text itself doesn't
+        // affect the permission decision.
+        require_str(input, "message", "git_commit")?;
+        let paths: Vec<String> = input
+            .get("paths")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let args: Vec<String> = std::iter::once("commit".to_string())
+            .chain(paths.iter().cloned())
+            .collect();
+        let risk = classify_command("git", &args);
+        Ok(PermissionRequest {
+            task_id: ctx.task_id,
+            step_id: ctx.step_id,
+            tool: "git_commit",
+            category: PermissionCategory::Filesystem,
+            action: ActionKind::Write,
+            risk,
+            input_hash: canonical_input_hash(input),
+            target: if paths.is_empty() {
+                "repository (all changes)".to_string()
+            } else {
+                paths.join(", ")
+            },
+            in_plan_scope: true,
+        })
+    }
+
+    async fn execute(&self, ctx: &ToolCtx, auth: &Authorization, input: Value) -> ToolOutcome {
+        if let Err(e) = verify_authorization(auth, ctx.task_id, ctx.step_id, "git_commit", &input) {
+            return ToolOutcome::failure("tools.authorization_mismatch", e.to_string());
+        }
+        let message = match require_str(&input, "message", "git_commit") {
+            Ok(m) => m.to_string(),
+            Err(e) => return ToolOutcome::failure("tools.invalid_input", e.to_string()),
+        };
+        let paths: Vec<String> = input
+            .get("paths")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let add_args: Vec<&str> = if paths.is_empty() {
+            vec!["add", "-A"]
+        } else {
+            let mut a = vec!["add"];
+            a.extend(paths.iter().map(String::as_str));
+            a
+        };
+        let (add_ok, add_log) = match run_git(ctx, &add_args).await {
+            Ok(r) => r,
+            Err(e) => return ToolOutcome::failure("tools.git_failed", e),
+        };
+        if !add_ok {
+            return ToolOutcome::Failure {
+                code: "tools.git_failed",
+                message: "git add failed".into(),
+                rendered: add_log,
+            };
+        }
+
+        let (commit_ok, commit_log) = match run_git(ctx, &["commit", "-m", &message]).await {
+            Ok(r) => r,
+            Err(e) => return ToolOutcome::failure("tools.git_failed", e),
+        };
+        let rendered = format!("{add_log}\n{commit_log}");
+        if commit_ok {
+            ToolOutcome::success(
+                serde_json::json!({ "message": message, "paths": paths }),
+                rendered,
+            )
+        } else {
+            ToolOutcome::Failure {
+                code: "tools.git_failed",
+                message: "git commit failed (nothing to commit, or git itself refused)".into(),
+                rendered,
+            }
+        }
     }
 }

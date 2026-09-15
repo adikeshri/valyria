@@ -9,7 +9,7 @@ pub use environment::InspectEnvironmentTool;
 pub use fs::{
     DeleteFileTool, EditFileTool, ListDirectoryTool, MoveFileTool, ReadFileTool, WriteFileTool,
 };
-pub use git::{GitBlameTool, GitDiffTool, GitLogTool, GitShowTool, GitStatusTool};
+pub use git::{GitBlameTool, GitCommitTool, GitDiffTool, GitLogTool, GitShowTool, GitStatusTool};
 pub use process::{RunCommandTool, RunFormatterTool, RunLinterTool, RunTestTool};
 pub use search::{SearchTool, SymbolSearchTool};
 
@@ -35,6 +35,7 @@ pub fn all_tools() -> ToolRegistry {
         Arc::new(GitLogTool::default()),
         Arc::new(GitShowTool::default()),
         Arc::new(GitBlameTool::default()),
+        Arc::new(GitCommitTool::default()),
         Arc::new(RunCommandTool::default()),
         Arc::new(RunTestTool::default()),
         Arc::new(RunFormatterTool::default()),
