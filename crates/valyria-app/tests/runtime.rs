@@ -178,6 +178,63 @@ async fn resuming_a_task_with_a_pending_cancel_actually_cancels_it() {
 }
 
 #[tokio::test]
+async fn resuming_an_already_paused_task_with_a_stale_pending_pause_actually_resumes_it() {
+    // Regression test for a real bug: a task that is already `Paused` can
+    // still have `pending_signal = PAUSE` sitting in its row — either a
+    // pause that raced with this very resume call, or a leftover from
+    // whatever put it in `Paused` in the first place. `resume_task` used
+    // to treat `PauseRequested` exactly like `CancelRequested` and carry
+    // it through the resume, re-arming it on the freshly-transitioned
+    // task. The spawned driver checks `pending_signal` before doing any
+    // work (`AgentDriver::run`), so it re-paused immediately — turning
+    // "resume" into a no-op that silently re-pauses on every call, with
+    // the task never making progress (observed in production as a
+    // Paused/Repairing flap that repeated the same turn six times before
+    // eventually failing).
+    let temp = tempfile::tempdir().unwrap();
+    let ws = valyria_testkit::TempWorkspace::new();
+    let data_dir = temp.path().join("data");
+    let config = RuntimeConfig::new(ws.path()).with_data_dir(data_dir.clone());
+
+    let workspace_id;
+    let task_id = valyria_types::TaskId::new();
+    {
+        let runtime = Runtime::open(config.clone()).await.unwrap();
+        workspace_id = runtime.workspace_id();
+    }
+    {
+        // Already `Paused` (from `Implementing`), with a `PAUSE` signal
+        // still sitting in the row — the exact shape a racing/stale pause
+        // request leaves behind.
+        let conn = rusqlite::Connection::open(data_dir.join("workspace.db")).unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, workspace_id, objective, state, paused_from, \
+             pending_signal, plan_scope, created_at_ms, updated_at_ms) VALUES \
+             (?1, ?2, 'add a function', 'PAUSED', 'IMPLEMENTING', 'PAUSE', '[]', 0, 0)",
+            rusqlite::params![task_id.to_string(), workspace_id.to_string()],
+        )
+        .unwrap();
+    }
+
+    let runtime2 = Runtime::open(config).await.unwrap();
+    runtime2.resume_task(task_id).await.unwrap();
+
+    // `resume_task` itself synchronously transitions the task out of
+    // `Paused` *before* the buggy re-arm would even run (that happens a
+    // moment later, inside the spawned driver's first loop iteration) —
+    // so checking right away always sees a non-Paused state regardless of
+    // the bug. Give the spawned driver time to run and, if the fix isn't
+    // in place, re-pause it, then check where it actually settled.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let status = runtime2.task_status(task_id).await.unwrap();
+    assert_ne!(
+        status.state,
+        AgentState::Paused,
+        "a stale/racing pause must not survive an explicit resume and re-pause the task"
+    );
+}
+
+#[tokio::test]
 async fn subscribe_events_survives_a_manufactured_lag_with_no_gap() {
     let temp = tempfile::tempdir().unwrap();
     let ws = valyria_testkit::TempWorkspace::new();

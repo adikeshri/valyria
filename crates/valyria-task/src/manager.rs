@@ -349,16 +349,28 @@ impl TaskManager {
     /// step driver hands to the model on the next call. Derived from the
     /// durable journal, not cached, so it's correct immediately after a
     /// crash-recovery resume with no special-casing.
+    ///
+    /// A `MODEL_COMPLETION` that is the *last* journal entry doesn't count:
+    /// the step driver always appends a follow-through entry (a `TOOL`
+    /// effect, or the `StateChanged` from an `Ask`/`Finish` decision)
+    /// immediately after journaling the model's decision, so a completion
+    /// with nothing after it means a crash landed in that exact gap — the
+    /// decision was made but never acted on. Counting it anyway would hand
+    /// out a turn index one too high on resume, silently skipping the
+    /// un-acted-on decision instead of redoing it.
     pub async fn count_model_calls(&self, id: TaskId) -> Result<usize> {
         let entries = self.journal_since(id, JournalSeq::ZERO).await?;
+        let last_index = entries.len().saturating_sub(1);
         Ok(entries
             .iter()
-            .filter(|e| {
-                matches!(
-                    &e.kind,
-                    JournalEntryKind::EffectCompleted { outcome_kind, .. }
-                        if outcome_kind == kinds::MODEL_COMPLETION
-                )
+            .enumerate()
+            .filter(|(i, e)| {
+                *i != last_index
+                    && matches!(
+                        &e.kind,
+                        JournalEntryKind::EffectCompleted { outcome_kind, .. }
+                            if outcome_kind == kinds::MODEL_COMPLETION
+                    )
             })
             .count())
     }
@@ -978,7 +990,70 @@ mod tests {
         )
         .await
         .unwrap();
+        // Completed, but nothing has followed it yet: the step driver
+        // hasn't acted on this decision, so it doesn't count as a resolved
+        // turn (see `count_model_calls_ignores_a_dangling_completion`).
+        assert_eq!(mgr.count_model_calls(task.id).await.unwrap(), 0);
+
+        // The follow-through the driver always appends right after a
+        // decision (here, the resulting tool call being issued) is what
+        // actually resolves the turn.
+        mgr.append_journal(
+            task.id,
+            JournalEntryKind::EffectIssued {
+                effect_id: EffectId::new(),
+                step_id: StepId::new(),
+                effect_kind: kinds::TOOL.into(),
+                payload: serde_json::json!({"tool": "read_file", "input": {}}),
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(mgr.count_model_calls(task.id).await.unwrap(), 1);
+    }
+
+    /// Guards the crash window this fixes: a process can die in the gap
+    /// between journaling a model's decision and journaling the effect of
+    /// acting on it (the step driver always appends the latter right after
+    /// the former, but a crash can land in between). If `count_model_calls`
+    /// counted that dangling completion, resume would derive the *next*
+    /// turn index and silently skip the decision that was never acted on
+    /// instead of redoing it.
+    #[tokio::test]
+    async fn count_model_calls_ignores_a_dangling_completion() {
+        let mgr = manager();
+        let task = new_task(&mgr).await;
+
+        let effect_id = EffectId::new();
+        let step_id = StepId::new();
+        mgr.append_journal(
+            task.id,
+            JournalEntryKind::EffectIssued {
+                effect_id,
+                step_id,
+                effect_kind: kinds::MODEL_CALL.into(),
+                payload: serde_json::json!({}),
+            },
+        )
+        .await
+        .unwrap();
+        mgr.append_journal(
+            task.id,
+            JournalEntryKind::EffectCompleted {
+                effect_id,
+                step_id,
+                outcome_kind: kinds::MODEL_COMPLETION.into(),
+                payload: serde_json::json!({}),
+            },
+        )
+        .await
+        .unwrap();
+
+        // Nothing appended after the completion: simulates a crash right
+        // after the model's decision was journaled but before the driver
+        // acted on it. Must not count — the next turn asked for must be
+        // this same turn again, not the one after it.
+        assert_eq!(mgr.count_model_calls(task.id).await.unwrap(), 0);
     }
 
     #[tokio::test]

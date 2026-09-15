@@ -87,26 +87,40 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let watcher = Watcher::new(dir.path(), Duration::from_millis(200)).unwrap();
 
-        for i in 0..5 {
-            std::fs::write(dir.path().join(format!("f{i}.txt")), b"x").unwrap();
+        let expected_names: BTreeSet<String> = (0..5).map(|i| format!("f{i}.txt")).collect();
+        for name in &expected_names {
+            std::fs::write(dir.path().join(name), b"x").unwrap();
         }
 
-        let mut seen = BTreeSet::new();
+        let mut seen_names = BTreeSet::new();
         // Drain whatever batches arrive within a generous window; the
         // point under test is that all five files are eventually reported,
         // not the exact number of batches (debouncer coalescing behavior
-        // is not something this crate should assert exact shape of).
+        // is not something this crate should assert exact shape of), nor
+        // the exact set of paths: some backends (e.g. macOS FSEvents) also
+        // report the containing directory itself as changed, and may
+        // report it via a canonicalized (symlink-resolved) path that
+        // doesn't textually match `dir.path()` even though it's the same
+        // directory — real OS-layer noise, not something this crate's
+        // watcher introduces. Compare by file name only, exactly as
+        // `reports_a_batched_change_after_a_write` above does, to sidestep
+        // both.
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while std::time::Instant::now() < deadline && seen.len() < 5 {
+        while std::time::Instant::now() < deadline && !expected_names.is_subset(&seen_names) {
             if let Some(change) = watcher.recv_timeout(Duration::from_millis(500)) {
-                seen.extend(change.paths);
+                seen_names.extend(
+                    change
+                        .paths
+                        .iter()
+                        .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
+                        .map(String::from),
+                );
             }
         }
 
-        assert_eq!(
-            seen.len(),
-            5,
-            "expected all 5 files to be reported, saw {seen:?}"
+        assert!(
+            expected_names.is_subset(&seen_names),
+            "expected all 5 files to be reported, saw {seen_names:?}"
         );
     }
 }
