@@ -37,6 +37,17 @@ pub struct ParsedArgs {
     /// auth token from this file (G10); for `--connect`, present it. When
     /// unset the daemon relies on the peer-uid check alone.
     pub auth_token_file: Option<PathBuf>,
+    /// `--display-name <name>` for `valyria model-endpoint add`.
+    pub display_name: Option<String>,
+    /// `--remote-model <name>` for `valyria model-endpoint add` — the
+    /// exact `"model"` value the target server expects on each request.
+    pub remote_model: Option<String>,
+    /// `--context-length <n>` for `valyria model-endpoint add`.
+    pub context_length: Option<u32>,
+    /// `--no-native-tools` for `valyria model-endpoint add`.
+    pub no_native_tools: bool,
+    /// `--supports-grammar` for `valyria model-endpoint add`.
+    pub supports_grammar: bool,
 }
 
 pub fn parse(raw: &[String]) -> Result<ParsedArgs, String> {
@@ -84,6 +95,24 @@ pub fn parse(raw: &[String]) -> Result<ParsedArgs, String> {
                 let v = raw.get(i).ok_or("--auth-token-file needs a path")?;
                 parsed.auth_token_file = Some(PathBuf::from(v));
             }
+            "--display-name" => {
+                i += 1;
+                let v = raw.get(i).ok_or("--display-name needs a value")?;
+                parsed.display_name = Some(v.clone());
+            }
+            "--remote-model" => {
+                i += 1;
+                let v = raw.get(i).ok_or("--remote-model needs a value")?;
+                parsed.remote_model = Some(v.clone());
+            }
+            "--context-length" => {
+                i += 1;
+                let v = raw.get(i).ok_or("--context-length needs a value")?;
+                parsed.context_length = Some(
+                    v.parse()
+                        .map_err(|_| format!("invalid --context-length `{v}`"))?,
+                );
+            }
             "--events" => parsed.events = true,
             "--json" => parsed.json = true,
             "--dry-run" => parsed.dry_run = true,
@@ -91,6 +120,8 @@ pub fn parse(raw: &[String]) -> Result<ParsedArgs, String> {
             "--accept-license" | "--yes" => parsed.accept_license = true,
             "--allow" => parsed.allow = true,
             "--deny" => parsed.deny = true,
+            "--no-native-tools" => parsed.no_native_tools = true,
+            "--supports-grammar" => parsed.supports_grammar = true,
             other => parsed.positional.push(other.to_string()),
         }
         i += 1;

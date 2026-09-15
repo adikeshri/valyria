@@ -15,11 +15,13 @@ use valyria_events::{EventBus, EventKind, NewEvent};
 use valyria_index::IndexStore;
 use valyria_ledger::Ledger;
 use valyria_memory::{MemoryStore, RetrievalRequest};
-use valyria_model::{GenerateRequest, LocalModelServer, Message, ModelRuntime, SamplingParams};
+use valyria_model::{
+    Capabilities, GenerateRequest, LocalModelServer, Message, ModelRuntime, SamplingParams,
+};
 use valyria_model_registry::{
     score_card_for_role, CardScore, Catalog, EngineKind, ModelCard, ModelRole, RoleBinding,
 };
-use valyria_model_store::{HttpFetcher, ModelStore, NullProber};
+use valyria_model_store::{EndpointRow, HttpFetcher, ModelStore, NullProber};
 use valyria_orchestrator::{
     EvictReason, ModelPool, NoModelRuntime, PoolError, PoolEvent, Role, RoleRouter,
 };
@@ -28,6 +30,7 @@ use valyria_plan::{PlanRevision, PlanStore, RollbackError, RollbackReport, Store
 use valyria_runtime_fake::{FakeModelRuntime, Scenario};
 use valyria_runtime_llamacpp::LlamaServerRuntime;
 use valyria_runtime_mlx::MlxServerRuntime;
+use valyria_runtime_openai_compat::{OpenAiCompatRuntime, ReqwestTransport};
 use valyria_sandbox::{detect_platform_launcher, ProcessLauncher, SandboxProfile};
 use valyria_store::Store;
 use valyria_task::{Budget, ControlSignal, Task, TaskManager};
@@ -108,6 +111,28 @@ pub struct ModelListEntryView {
     pub installed: bool,
     /// `ModelRole` names this model is bound to, sorted.
     pub active_roles: Vec<String>,
+}
+
+/// One row of [`Runtime::model_endpoint_list`] — a registered external
+/// endpoint with its currently-bound roles.
+#[derive(Debug, Clone)]
+pub struct ModelEndpointView {
+    pub row: EndpointRow,
+    /// `ModelRole` names this endpoint is bound to, sorted.
+    pub active_roles: Vec<String>,
+}
+
+/// The optional fields of [`Runtime::model_endpoint_add`], bundled so the
+/// method stays a handful of parameters instead of eight independent
+/// ones. Every field defaults sensibly when omitted — see the field docs
+/// on [`valyria_protocol::ModelEndpointAddRequest`], which this mirrors.
+#[derive(Debug, Clone, Default)]
+pub struct ModelEndpointOptions<'a> {
+    pub display_name: Option<&'a str>,
+    pub remote_model_name: Option<&'a str>,
+    pub context_length: Option<u32>,
+    pub supports_native_tools: Option<bool>,
+    pub supports_grammar: Option<bool>,
 }
 
 /// Loads a scenario TOML file into a `Scenario` `RuntimeConfig` can be
@@ -349,6 +374,22 @@ impl Runtime {
                     tracing::warn!(role = %role_str, "unknown role in model_role_binding, skipping");
                     continue;
                 };
+                // A persisted binding can name an external endpoint
+                // instead of an installed catalog model — cheap and
+                // synchronous to re-point (no process to spawn or wait
+                // on), unlike the local-server boot below.
+                if let Some(row) = global.models().endpoint(&model_id).await? {
+                    match Runtime::endpoint_runtime(&row) {
+                        Ok(rt) => {
+                            bound_roles.insert(role);
+                            orchestrator.bind_single(role, model_id.clone(), rt);
+                        }
+                        Err(e) => {
+                            tracing::warn!(role = %role_str, endpoint = %model_id, error = %e, "could not rebuild endpoint runtime at startup");
+                        }
+                    }
+                    continue;
+                }
                 if !model_store.is_installed(&model_id) {
                     continue;
                 }
@@ -1348,6 +1389,9 @@ impl Runtime {
     /// `/health` before returning — an explicit user action, so unlike the
     /// background boot loop, blocking here is the right trade.
     pub async fn model_activate(&self, id: &str, role: ModelRole) -> Result<()> {
+        if let Some(row) = self.global.models().endpoint(id).await? {
+            return self.activate_endpoint(&row, role).await;
+        }
         if !self.model_store().is_installed(id) {
             return Err(AppError::ModelStore(
                 valyria_model_store::ModelStoreError::NotInstalled { id: id.to_string() },
@@ -1496,6 +1540,147 @@ impl Runtime {
                 .map(|p| p.tokens_per_sec as f64),
             active_roles,
         })
+    }
+
+    /// Register (or replace) an already-running external OpenAI-
+    /// compatible server (Ollama, LM Studio, vLLM, …). Core neither
+    /// downloads nor supervises its process — [`Self::model_activate`]
+    /// just points a client at `base_url` once this exists. `id` must
+    /// not collide with an embedded-catalog model id, so `model_activate`
+    /// never has to guess which of two same-named things a caller meant.
+    pub async fn model_endpoint_add(
+        &self,
+        id: &str,
+        base_url: &str,
+        opts: ModelEndpointOptions<'_>,
+    ) -> Result<()> {
+        if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
+            return Err(AppError::Repo(format!(
+                "endpoint base_url must start with http:// or https://, got {base_url:?}"
+            )));
+        }
+        let scheme_len = base_url.find("://").unwrap() + 3;
+        if base_url[scheme_len..].trim_start_matches('/').is_empty() {
+            return Err(AppError::Repo(format!(
+                "endpoint base_url {base_url:?} has no host"
+            )));
+        }
+        if let Ok(catalog) = Catalog::embedded() {
+            if catalog.get(id).is_some() {
+                return Err(AppError::Repo(format!(
+                    "`{id}` is already an embedded catalog model id; pick a different endpoint id"
+                )));
+            }
+        }
+        let now = SystemClock.now().as_millis() as i64;
+        self.global
+            .models()
+            .add_endpoint(
+                id,
+                base_url,
+                opts.display_name.unwrap_or(id),
+                opts.remote_model_name.unwrap_or(id),
+                opts.context_length.unwrap_or(8192),
+                opts.supports_native_tools.unwrap_or(true),
+                opts.supports_grammar.unwrap_or(false),
+                now,
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Unregister endpoint `id`. Any role currently bound to it is
+    /// rebound to [`NoModelRuntime::none_bound`] first — mirrors
+    /// [`Self::model_remove`]'s "never leave a role pointing at
+    /// something that no longer exists" contract.
+    pub async fn model_endpoint_remove(&self, id: &str) -> Result<()> {
+        if !self.use_fake_model {
+            for (role_str, bound_id) in self.global.models().role_bindings().await? {
+                if bound_id != id {
+                    continue;
+                }
+                let Ok(role) = role_str.parse::<ModelRole>() else {
+                    continue;
+                };
+                self.orchestrator
+                    .bind_single(role, "none", Arc::new(NoModelRuntime::none_bound()));
+            }
+        }
+        let removed = self.global.models().remove_endpoint(id).await?;
+        if !removed {
+            return Err(AppError::Repo(format!("no such model endpoint `{id}`")));
+        }
+        let _ = self.global.models().clear_bindings_for(id).await;
+        Ok(())
+    }
+
+    /// Every registered external endpoint, with the roles each currently
+    /// serves.
+    pub async fn model_endpoint_list(&self) -> Result<Vec<ModelEndpointView>> {
+        let bindings = self.global.models().role_bindings().await?;
+        let mut out = Vec::new();
+        for row in self.global.models().endpoints().await? {
+            let mut active_roles: Vec<String> = bindings
+                .iter()
+                .filter(|(_, m)| m == &row.id)
+                .map(|(role, _)| role.clone())
+                .collect();
+            active_roles.sort();
+            out.push(ModelEndpointView { row, active_roles });
+        }
+        Ok(out)
+    }
+
+    /// [`Self::model_activate`]'s endpoint branch: no process to spawn or
+    /// wait on, so this is synchronous relative to the local-model path —
+    /// the RPC's own success/failure already tells the caller everything
+    /// `model_server_starting`/`_ready`/`_failed` exist to report for a
+    /// managed local server, so this deliberately emits none of them.
+    async fn activate_endpoint(&self, row: &EndpointRow, role: ModelRole) -> Result<()> {
+        let now = SystemClock.now().as_millis() as i64;
+        self.global
+            .models()
+            .set_role_binding(role.as_str(), &row.id, now)
+            .await?;
+
+        if self.use_fake_model {
+            return Ok(());
+        }
+
+        // A role previously served by a *locally managed* server must not
+        // leak its process just because the role now points elsewhere —
+        // `model_runtimes` only ever replaces an entry via `swap`, which
+        // nothing calls on this path since there is no new local handle
+        // to register in its place.
+        if let Some(old) = self.model_runtimes.take(role).await {
+            tokio::spawn(async move { old.shutdown().await });
+        }
+
+        let runtime = Self::endpoint_runtime(row)?;
+        self.orchestrator.bind_single(role, row.id.clone(), runtime);
+        Ok(())
+    }
+
+    /// Build the (unstarted-by-us, already-running) [`ModelRuntime`] for
+    /// endpoint `row` — a thin `OpenAiCompatRuntime` pointed at its
+    /// `base_url`, using `remote_model_name` (not `row.id`) as the wire
+    /// `"model"` field. The same real bug confirmed live against the
+    /// managed MLX adapter — a server that treats a *mismatched* `"model"`
+    /// field as a load target rather than ignoring it — applies here too,
+    /// for any endpoint whose server enforces it; getting this field right
+    /// is the caller's job via `remote_model_name` at `model_endpoint_add`
+    /// time, not something Core can discover on its own.
+    fn endpoint_runtime(row: &EndpointRow) -> Result<Arc<dyn ModelRuntime>> {
+        let transport = ReqwestTransport::new(row.base_url.clone())
+            .map_err(|e| AppError::Repo(format!("endpoint `{}`: {e}", row.id)))?;
+        let capabilities = Capabilities {
+            context_length: row.context_length,
+            supports_native_tools: row.supports_native_tools,
+            supports_grammar: row.supports_grammar,
+            supports_streaming: true,
+        };
+        let rt = OpenAiCompatRuntime::new(transport, row.remote_model_name.clone(), capabilities);
+        Ok(Arc::new(rt))
     }
 
     fn spawn_driver(&self, task_id: TaskId) {

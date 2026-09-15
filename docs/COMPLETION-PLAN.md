@@ -1104,6 +1104,54 @@ recorded here since the plan text above still described it as open work)**
   test's dependence on ambient real memory rather than a fixed/mocked
   hardware report is what's fragile.
 
+- `model_endpoint_add/remove/list` (protocol 1.14.0 — new `Request`/
+  `Response` variants, a backward-compatible minor bump): register an
+  already-running external OpenAI-compatible server (Ollama, LM Studio,
+  vLLM, …) that Core neither downloads nor supervises the process of.
+  `ModelCard`-style catalog machinery doesn't fit an endpoint (there is
+  no card, no license, no download) so this is a parallel, smaller
+  mechanism: a new `model_endpoint` table (`valyria-model-store`, version
+  903) storing `id`, `base_url`, `display_name`, `remote_model_name`,
+  `context_length`, `supports_native_tools`, `supports_grammar`; `Runtime::
+  model_endpoint_add` validates `base_url`'s shape and refuses an `id`
+  that collides with an embedded catalog model (so `model_activate` never
+  has to guess which of two same-named things a caller meant);
+  `model_activate`/`Runtime::open`'s startup rebind loop both check the
+  endpoint table before falling through to the installed-catalog path,
+  so one `model_activate` call and one persisted `model_role_binding` row
+  work for either kind of model transparently. Activating an endpoint is
+  synchronous (no process to spawn or wait on) and deliberately emits no
+  `model_server_starting/_ready/_failed` events — those describe managed
+  local server *lifecycle*, which an endpoint doesn't have; the RPC's own
+  success/failure already says everything there is to say.
+
+  A second real bug, the same shape as MLX's: `remote_model_name` exists
+  as its own field (not reused from `id`) specifically because the wire
+  `"model"` value a target server expects to see is not always the name
+  Core knows it by — confirmed as a load-bearing distinction, not
+  speculative caution, by the MLX chunk's own live finding above. A
+  caller that doesn't know their server needs an exact match can omit it
+  and get a reasonable default (`id`), same as every other optional field
+  here.
+
+  Proven for real, not just offline: `crates/valyria-app/tests/
+  local_model_endpoint_e2e.rs` (`#[ignore]`d) hand-spawns a real
+  `mlx_lm.server` with plain `std::process::Command` — deliberately
+  bypassing `valyria-runtime-mlx` entirely, so `Runtime` never sees the
+  process and only ever touches `base_url` — registers it as an
+  endpoint, activates it, runs a real task through it to a terminal
+  state, then removes the endpoint and confirms a role that was pointing
+  at it fails fast afterward rather than hanging or silently succeeding
+  against a stale handle. A second, offline test (`runtime.rs`) covers
+  the CRUD/validation/replace-on-duplicate-add contract without touching
+  the network at all, using the same fake-backend pattern every other
+  persistence-only test in that file already uses.
+
+  A CLI surface shipped alongside it (`valyria model-endpoint {list,add,
+  remove}`), not left for a later pass — `ParsedArgs` gained `--display-
+  name`/`--remote-model`/`--context-length`/`--no-native-tools`/
+  `--supports-grammar`.
+
 **Deliberately deferred, with reasons**
 
 - Hardware accelerator-variant detection and engine-variant selection
@@ -1112,8 +1160,6 @@ recorded here since the plan text above still described it as open work)**
   needed before M2's "chosen from `valyria-hardware`, fallback recorded"
   can mean anything on Linux/Windows, and CUDA/ROCm can't be verified at
   all without that hardware.
-- `model_endpoint_add/remove/list` for existing local OpenAI-compatible
-  servers.
 - Signed catalog refresh (ed25519): no crypto exists anywhere in
   `valyria-model-registry`/`valyria-engine-store` yet. The mechanism
   (verify a detached signature against a compiled-in public key before
@@ -1121,10 +1167,13 @@ recorded here since the plan text above still described it as open work)**
   built and tested against a locally-generated test keypair without
   needing the real production signing key — genuinely a separate chunk,
   not started this pass.
-- Protocol 1.18's *request* additions (`model_endpoint_add/remove/list`,
-  `catalog_refresh`, `pool_status`, `ModelSummaryWire.backend`): nothing
-  to wrap yet until endpoints and catalog signing exist — the event-kind
-  half of 1.18 shipped early, as 1.13.1, once the pool wiring needed it.
+- Protocol 1.18's remaining *request* additions (`catalog_refresh`,
+  `pool_status`, `ModelSummaryWire.backend`): nothing to wrap yet until
+  catalog signing exists and endpoints have a wire-visible "backend"
+  label to add to the existing `model_list` response — `model_endpoint_
+  add/remove/list` itself shipped as 1.14.0 above rather than waiting for
+  the rest of 1.18 to be ready together; the event-kind half of 1.18
+  shipped earlier still, as 1.13.1, once the pool wiring needed it.
 - App UI (backend/pool-memory-meter in the Models panel, endpoints under
   Settings, a catalog-refresh button): waits on the protocol surface
   above existing to display.
@@ -1141,10 +1190,13 @@ recorded here since the plan text above still described it as open work)**
   local adapter — `local_mlx_e2e.rs` (real `model_install` → `model_
   activate` → task → `model_remove`) passes for real, not mocked; see the
   MLX entry above for what that run found and fixed.
-- Deferred: the seeded-bug suite completing on *three* real adapters —
-  llama.cpp and MLX both do now; an openai-compat endpoint adapter
-  doesn't exist yet (`model_endpoint_add/remove/list`, deferred above) to
-  be the third.
+- Deferred: the seeded-bug *suite* (`valyria-bench`'s scenario harness)
+  running against a real external endpoint the way it does for the
+  managed llama.cpp/MLX adapters. `model_endpoint_add/remove/list`
+  itself is shipped and real-tested (see the entry above,
+  `local_model_endpoint_e2e.rs`) — what's left is wiring that specific
+  path into the bench harness's own scenario runner, not building the
+  feature.
 
 ---
 

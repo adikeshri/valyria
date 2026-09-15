@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
-use valyria_app::{EmbeddedClient, Runtime, RuntimeConfig};
+use valyria_app::{AppError, EmbeddedClient, ModelEndpointOptions, Runtime, RuntimeConfig};
 use valyria_events::{EventKind, NewEvent};
 use valyria_model_registry::{Catalog, ModelRole};
 use valyria_model_store::{Manifest, ModelStore};
@@ -426,4 +426,109 @@ async fn subscribe_events_survives_a_manufactured_lag_with_no_gap() {
         received += 1;
     }
     assert_eq!(received, FLOOD);
+}
+
+/// M6: `model_endpoint_add/remove/list` and `model_activate`'s endpoint
+/// branch — real CRUD and persistence, no network needed (the default
+/// fake backend still writes and reads the real `model_endpoint`/
+/// `model_role_binding` tables; only the actual HTTP round trip against
+/// an endpoint's server is faked away, exactly like every other
+/// fake-backend test in this file).
+#[tokio::test]
+async fn model_endpoint_add_activate_list_remove_round_trip() {
+    let temp = tempfile::tempdir().unwrap();
+    let ws = valyria_testkit::TempWorkspace::new();
+    let config = RuntimeConfig::new(ws.path()).with_data_dir(temp.path().join("data"));
+    let runtime = Runtime::open(config).await.unwrap();
+
+    // A malformed base_url is refused before anything is persisted.
+    let err = runtime
+        .model_endpoint_add("bad", "not-a-url", ModelEndpointOptions::default())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AppError::Repo(_)));
+    assert!(runtime.model_endpoint_list().await.unwrap().is_empty());
+
+    // An id colliding with a real embedded catalog model is refused too —
+    // `model_activate` must never have to guess which of two same-named
+    // things a caller meant.
+    let catalog = Catalog::embedded().unwrap();
+    let real_catalog_id = catalog.cards().first().unwrap().id.clone();
+    let err = runtime
+        .model_endpoint_add(
+            &real_catalog_id,
+            "http://127.0.0.1:11434/v1",
+            ModelEndpointOptions::default(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AppError::Repo(_)));
+
+    runtime
+        .model_endpoint_add(
+            "ollama-local",
+            "http://127.0.0.1:11434/v1",
+            ModelEndpointOptions {
+                display_name: Some("My Ollama"),
+                remote_model_name: Some("qwen2.5-coder:7b"),
+                context_length: Some(32768),
+                supports_native_tools: Some(true),
+                supports_grammar: Some(false),
+            },
+        )
+        .await
+        .unwrap();
+
+    let endpoints = runtime.model_endpoint_list().await.unwrap();
+    assert_eq!(endpoints.len(), 1);
+    assert_eq!(endpoints[0].row.id, "ollama-local");
+    assert_eq!(endpoints[0].row.base_url, "http://127.0.0.1:11434/v1");
+    assert_eq!(endpoints[0].row.display_name, "My Ollama");
+    assert_eq!(endpoints[0].row.remote_model_name, "qwen2.5-coder:7b");
+    assert_eq!(endpoints[0].row.context_length, 32768);
+    assert!(endpoints[0].row.supports_native_tools);
+    assert!(!endpoints[0].row.supports_grammar);
+    assert!(endpoints[0].active_roles.is_empty());
+
+    // Re-adding the same id replaces rather than erroring.
+    runtime
+        .model_endpoint_add(
+            "ollama-local",
+            "http://127.0.0.1:11434/v1",
+            ModelEndpointOptions {
+                display_name: Some("Renamed"),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let endpoints = runtime.model_endpoint_list().await.unwrap();
+    assert_eq!(endpoints.len(), 1);
+    assert_eq!(endpoints[0].row.display_name, "Renamed");
+    // Defaults applied when the field is omitted on this second add.
+    assert_eq!(endpoints[0].row.remote_model_name, "ollama-local");
+    assert_eq!(endpoints[0].row.context_length, 8192);
+
+    runtime
+        .model_activate("ollama-local", ModelRole::PrimaryCoder)
+        .await
+        .unwrap();
+    let endpoints = runtime.model_endpoint_list().await.unwrap();
+    assert_eq!(endpoints[0].active_roles, vec!["primary_coder".to_string()]);
+
+    // Removing an active endpoint unbinds every role pointing at it —
+    // proven against the persisted binding (the fake backend never
+    // touches the orchestrator's in-memory state, so that part of
+    // `model_endpoint_remove`'s contract is covered by the endpoint's
+    // own real-backend behavior instead, exercised manually against a
+    // real server elsewhere in this session).
+    runtime.model_endpoint_remove("ollama-local").await.unwrap();
+    assert!(runtime.model_endpoint_list().await.unwrap().is_empty());
+
+    // Removing something already gone is a clean not-found error.
+    let err = runtime
+        .model_endpoint_remove("ollama-local")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AppError::Repo(_)));
 }

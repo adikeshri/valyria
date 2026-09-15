@@ -37,6 +37,7 @@ valyria-engine-store = { workspace = true }
 valyria-runtime-fake = { workspace = true }
 valyria-runtime-llamacpp = { workspace = true }
 valyria-runtime-mlx = { workspace = true }
+valyria-runtime-openai-compat = { workspace = true }
 valyria-orchestrator = { workspace = true }
 valyria-context = { workspace = true }
 valyria-instructions = { workspace = true }
@@ -60,3 +61,4 @@ rustix = { workspace = true }
 [dev-dependencies]
 valyria-testkit = { workspace = true }
 tempfile = { workspace = true }
+reqwest = { workspace = true }

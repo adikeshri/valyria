@@ -170,6 +170,27 @@ pub fn model_remove(response: &Response) {
     println!("removed — {} reclaimed", bytes(r.freed_bytes));
 }
 
+pub fn model_endpoint_list(response: &Response) {
+    let Response::ModelEndpointList(r) = response else {
+        return;
+    };
+    if r.endpoints.is_empty() {
+        println!("(no registered endpoints)");
+        return;
+    }
+    for e in &r.endpoints {
+        let roles = if e.active_roles.is_empty() {
+            String::new()
+        } else {
+            format!("  [{}]", e.active_roles.join(", "))
+        };
+        println!(
+            "{:<24} {:<40} model={:<24} ctx={}{roles}",
+            e.id, e.base_url, e.remote_model_name, e.context_length
+        );
+    }
+}
+
 pub fn memory_list(response: &Response) {
     let Response::MemoryList(r) = response else {
         return;

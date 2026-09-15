@@ -3460,6 +3460,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures",
+ "reqwest",
  "rusqlite",
  "rustix 0.38.44",
  "serde",
@@ -3492,6 +3493,7 @@ dependencies = [
  "valyria-runtime-fake",
  "valyria-runtime-llamacpp",
  "valyria-runtime-mlx",
+ "valyria-runtime-openai-compat",
  "valyria-sandbox",
  "valyria-search",
  "valyria-store",

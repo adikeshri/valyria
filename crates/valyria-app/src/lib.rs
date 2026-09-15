@@ -31,8 +31,8 @@ pub use doctor::{CheckStatus, Doctor, DoctorCheck, DoctorReport};
 pub use error::{AppError, Result};
 pub use global::{global_migrations, GlobalStore, WorkspaceRegistration};
 pub use runtime::{
-    load_scenario, ConfigWriteScope, GitStatusView, LedgerChangeView, ModelInspectView, Runtime,
-    RuntimeConfig,
+    load_scenario, ConfigWriteScope, GitStatusView, LedgerChangeView, ModelEndpointOptions,
+    ModelEndpointView, ModelInspectView, Runtime, RuntimeConfig,
 };
 pub use storage::{PurgeOutcome, PurgeScope, StorageEntry, StorageInspector, StorageReport};
 

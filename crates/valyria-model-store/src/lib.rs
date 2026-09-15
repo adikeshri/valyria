@@ -33,7 +33,7 @@ pub mod manifest;
 pub mod probe;
 pub mod store;
 
-pub use db::{InstalledModelRow, InstalledModelStore, MIGRATIONS};
+pub use db::{EndpointRow, InstalledModelRow, InstalledModelStore, MIGRATIONS};
 pub use error::{ModelStoreError, Result};
 pub use fetch::{Fetcher, InMemoryFetcher, RemoteObject};
 #[cfg(feature = "http")]
