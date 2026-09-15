@@ -365,6 +365,31 @@ impl Runtime {
             clock.clone(),
         ));
 
+        // M2: a real local-model install has real content worth retrieving
+        // for, so `open` bootstraps the index synchronously and wires a
+        // `LiveRetriever::Search` into the driver — the Fake backend keeps
+        // `LiveRetriever::empty()` (every pre-M2 fake-model scenario's
+        // exact behaviour, and every timing-sensitive CLI kill/resume test
+        // stays unaffected by index-bootstrap latency it never needed).
+        // Synchronous and blocking here rather than the staged, non-
+        // blocking background bootstrap the design calls for
+        // (docs/COMPLETION-PLAN.md's own M2 write-up) — a scoped-down
+        // first cut; failure degrades to no retrieval rather than failing
+        // `open` outright, matching how a missing LSP server or sandbox
+        // mechanism degrades elsewhere rather than erroring.
+        let retriever = if use_fake_model {
+            valyria_context::LiveRetriever::empty()
+        } else {
+            match bootstrap_index_for_retrieval(config.workspace_path.clone(), &index, &store).await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, "index bootstrap for retrieval failed; continuing with no repository retrieval");
+                    valyria_context::LiveRetriever::empty()
+                }
+            }
+        };
+
         let driver = Arc::new(
             AgentDriver::new(
                 tasks.clone(),
@@ -381,7 +406,9 @@ impl Runtime {
                 launcher,
                 sandbox_profile,
             )
-            .with_planning_mode(config.planning_mode),
+            .with_planning_mode(config.planning_mode)
+            .with_retriever(retriever)
+            .with_store(store.clone()),
         );
 
         Ok(Self {
@@ -1593,6 +1620,60 @@ async fn resolve_or_install_engine(
             Err(AppError::EngineStore(e))
         }
     }
+}
+
+/// `Runtime::open`'s M2 bootstrap: build (or catch up) the file/symbol
+/// index and its import/call graph, then wrap it as a
+/// `LiveRetriever::Search` the driver can query every turn. Mirrors
+/// `Runtime::reindex` exactly (same pipeline, same steps) — kept as its
+/// own free function because `reindex` needs `&self` for its `Result`
+/// error path and event-free contract, while this one runs *during*
+/// `open`, before `Self` exists, and its errors are caught and degraded
+/// rather than propagated (see the call site's comment).
+async fn bootstrap_index_for_retrieval(
+    workspace_path: PathBuf,
+    index: &IndexStore,
+    store: &Arc<Store>,
+) -> Result<valyria_context::LiveRetriever> {
+    let registry = valyria_lang::LanguageRegistry::with_builtin_languages()
+        .map_err(|e| AppError::Repo(format!("language registry: {e}")))?;
+    let pipeline =
+        valyria_index::IndexPipeline::new(workspace_path.clone(), registry.clone(), index.clone());
+    let delta = pipeline.bootstrap_unstaged(&|_| {}).await?;
+    valyria_graph::GraphStore::new(store.clone())
+        .build_for(index, delta.generation)
+        .await
+        .map_err(|e| AppError::Repo(format!("graph build: {e}")))?;
+
+    let embedder: Arc<dyn valyria_embed::Embedder> =
+        Arc::new(valyria_embed::HashingEmbedder::default());
+    let embed = valyria_embed::EmbedStore::new(store.clone());
+    let embed_pipeline = valyria_embed::EmbedPipeline::new(
+        workspace_path.clone(),
+        registry.clone(),
+        embedder.clone(),
+        embed.clone(),
+    );
+    // Embeddings are the slowest stage and the least essential — lexical
+    // and symbol search (and therefore retrieval) already work without
+    // them (§9.4.15's staged-availability design). A failure here
+    // degrades to search without semantic ranking rather than losing
+    // retrieval entirely.
+    if let Err(e) = embed_pipeline.bootstrap(index, delta.generation).await {
+        tracing::warn!(error = %e, "embedding bootstrap failed; retrieval continues without semantic ranking");
+    }
+
+    let engine = valyria_search::SearchEngine::new(
+        workspace_path,
+        index.clone(),
+        valyria_graph::GraphStore::new(store.clone()),
+        embed,
+        embedder,
+        registry,
+    );
+    Ok(valyria_context::LiveRetriever::Search(
+        valyria_context::SearchRetriever::new(engine, index.clone()),
+    ))
 }
 
 /// Resolve the engine (installing it if needed) and boot a `llama-server`

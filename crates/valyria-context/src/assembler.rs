@@ -135,6 +135,7 @@ mod tests {
             step_id: StepId::new(),
             cancel: valyria_util::CancellationToken::new(),
             launcher: StdArc::from(detect_platform_launcher()),
+            store: None,
         };
         (ctx, ContextAssembler::new(runtime), blob_dir)
     }

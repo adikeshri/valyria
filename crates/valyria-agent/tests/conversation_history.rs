@@ -182,11 +182,14 @@ async fn implementing_turns_carry_a_system_prompt_tools_and_replay_tool_history(
     );
     assert!(!first.tools.is_empty(), "tools are bound to the request");
     assert!(first.tools.iter().any(|t| t.name == "read_file"));
+    // M2: search/symbol_search are real now and offered to the model;
+    // git_blame is still the one genuinely not-yet-implemented tool
+    // (valyria-git has no blame implementation at all — see
+    // docs/COMPLETION-PLAN.md).
+    assert!(first.tools.iter().any(|t| t.name == "search"));
+    assert!(first.tools.iter().any(|t| t.name == "symbol_search"));
     assert!(
-        !first
-            .tools
-            .iter()
-            .any(|t| t.name == "search" || t.name == "symbol_search"),
+        !first.tools.iter().any(|t| t.name == "git_blame"),
         "not-yet-implemented tools are excluded: {:?}",
         first.tools.iter().map(|t| &t.name).collect::<Vec<_>>()
     );

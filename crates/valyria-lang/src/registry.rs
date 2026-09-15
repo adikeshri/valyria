@@ -15,7 +15,7 @@ use crate::parse::CompiledLanguage;
 use crate::provider::{matches_path, LanguageProvider};
 use crate::symbol::FileFacts;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct LanguageRegistry {
     languages: BTreeMap<&'static str, Arc<CompiledLanguage>>,
 }

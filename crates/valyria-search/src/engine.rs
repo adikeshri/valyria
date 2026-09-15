@@ -23,6 +23,7 @@ const HISTORY_DEPTH: usize = 200;
 /// How far the import-distance feature traverses from the anchors.
 const DISTANCE_DEPTH: usize = 4;
 
+#[derive(Clone)]
 pub struct SearchEngine {
     root: PathBuf,
     index: IndexStore,

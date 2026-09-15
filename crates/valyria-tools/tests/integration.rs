@@ -39,6 +39,7 @@ fn harness(mode: PermissionMode) -> Harness {
         step_id: StepId::new(),
         cancel: valyria_util::CancellationToken::new(),
         launcher: Arc::from(detect_platform_launcher()),
+        store: None,
     };
 
     Harness {
@@ -401,19 +402,43 @@ async fn git_status_reports_a_dirty_workspace() {
 #[tokio::test]
 async fn not_yet_implemented_tools_fail_cleanly() {
     let h = harness(PermissionMode::Autonomous);
-    for tool in ["search", "symbol_search", "git_blame"] {
-        let input = if tool == "git_blame" {
-            serde_json::json!({"path": "f.txt"})
-        } else {
-            serde_json::json!({"query": "foo"})
-        };
-        let result = h.runtime.invoke(&h.ctx, tool, input).await;
+    let result = h
+        .runtime
+        .invoke(&h.ctx, "git_blame", serde_json::json!({"path": "f.txt"}))
+        .await;
+    match result {
+        InvocationResult::Executed { outcome, .. } => {
+            assert!(
+                !outcome.is_success(),
+                "git_blame should report failure, not succeed"
+            );
+        }
+        other => panic!("expected Executed(Failure) for git_blame, got {other:?}"),
+    }
+}
+
+/// M2 (`docs/COMPLETION-PLAN.md`): `search` / `symbol_search` are real now
+/// — implemented, not stubbed — but this harness's `ToolCtx` has no
+/// workspace database (`store: None`, matching a context built before an
+/// index bootstrap ever ran), so they degrade to a plain, honest failure
+/// rather than panicking or silently returning nothing.
+#[tokio::test]
+async fn search_tools_without_a_store_degrade_to_a_clean_failure() {
+    let h = harness(PermissionMode::Autonomous);
+    for tool in ["search", "symbol_search"] {
+        let result = h
+            .runtime
+            .invoke(&h.ctx, tool, serde_json::json!({"query": "foo"}))
+            .await;
         match result {
             InvocationResult::Executed { outcome, .. } => {
                 assert!(
                     !outcome.is_success(),
                     "{tool} should report failure, not succeed"
                 );
+                if let ToolOutcome::Failure { code, .. } = outcome {
+                    assert_eq!(code, "tools.search_unavailable");
+                }
             }
             other => panic!("expected Executed(Failure) for {tool}, got {other:?}"),
         }

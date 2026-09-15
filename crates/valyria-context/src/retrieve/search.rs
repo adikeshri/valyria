@@ -23,6 +23,7 @@ use crate::error::{ContextError, Result};
 use crate::retrieve::{RetrievalQuery, Retriever};
 
 /// Wraps a [`SearchEngine`] and the [`IndexStore`] behind it.
+#[derive(Clone)]
 pub struct SearchRetriever {
     engine: SearchEngine,
     index: IndexStore,

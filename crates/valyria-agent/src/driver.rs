@@ -30,7 +30,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use valyria_context::{
-    AssembledContext, ContextAssembler, ContextEngine, ContextQuery, EngineInput, StaticRetriever,
+    AssembledContext, AssembledPrompt, ContextAssembler, ContextEngine, ContextQuery, EngineInput,
+    LiveRetriever,
 };
 use valyria_instructions::Discovery;
 use valyria_ledger::Ledger;
@@ -138,6 +139,16 @@ pub struct AgentDriver {
     pub(crate) verification_log: Arc<VerificationLog>,
     pub(crate) plan_store: Arc<PlanStore>,
     pub(crate) planning_mode: PlanningMode,
+    /// Real repository retrieval for every implementing/repairing turn's
+    /// context (M2). Defaults to `LiveRetriever::Static(empty)` — every
+    /// pre-M2 scenario's exact behaviour; set via `with_retriever`.
+    pub(crate) retriever: LiveRetriever,
+    /// The workspace database, handed to every `ToolCtx` this driver
+    /// builds (M2) so `search` / `symbol_search` can open the index/graph
+    /// tables. `None` — every pre-M2 scenario's exact behaviour (those
+    /// tools report plainly that no index is available) — unless
+    /// `with_store` was called.
+    pub(crate) store: Option<Arc<valyria_store::Store>>,
     pub(crate) workspace_root: WorkspaceRoot,
     pub(crate) hash_cache: Arc<HashCache>,
     pub(crate) clock: Arc<dyn Clock>,
@@ -178,6 +189,8 @@ impl AgentDriver {
             verification_log,
             plan_store,
             planning_mode: PlanningMode::Passthrough,
+            retriever: LiveRetriever::empty(),
+            store: None,
             workspace_root,
             hash_cache,
             clock,
@@ -192,6 +205,23 @@ impl AgentDriver {
     /// default so every pre-Phase-8 scenario keeps its exact behaviour.
     pub fn with_planning_mode(mut self, mode: PlanningMode) -> Self {
         self.planning_mode = mode;
+        self
+    }
+
+    /// Wire real repository retrieval into every implementing/repairing
+    /// turn's context (§4.24/M2). `LiveRetriever::Static(empty)` — every
+    /// pre-M2 scenario's exact behaviour — is the default; call this with
+    /// `LiveRetriever::Search(..)` once an index generation exists for the
+    /// workspace.
+    pub fn with_retriever(mut self, retriever: LiveRetriever) -> Self {
+        self.retriever = retriever;
+        self
+    }
+
+    /// Give every tool call this driver issues access to the workspace
+    /// database (M2), so `search` / `symbol_search` can open the index.
+    pub fn with_store(mut self, store: Arc<valyria_store::Store>) -> Self {
+        self.store = Some(store);
         self
     }
 
@@ -298,21 +328,25 @@ impl AgentDriver {
     }
 
     /// The system + task-intent messages every implementing/repairing turn
-    /// opens with: the runtime policy and any repo instructions
-    /// (`VALYRIA.md`/`AGENTS.md`/`CLAUDE.md`), then the objective. Rebuilt
-    /// fresh every call rather than cached — `Discovery::discover` reads a
-    /// handful of size-capped files, negligible next to a model call, and
-    /// it means an instruction file edited mid-task takes effect on the
-    /// very next turn. `StaticRetriever::empty()`: real semantic codebase
-    /// retrieval is `SearchRetriever`'s job, an explicit follow-up (this
-    /// call site is the one-line swap when that lands).
+    /// opens with: the runtime policy, any repo instructions
+    /// (`VALYRIA.md`/`AGENTS.md`/`CLAUDE.md`), retrieved repository context
+    /// (M2 — real when `self.retriever` is `LiveRetriever::Search`, empty
+    /// otherwise), then the objective. Rebuilt fresh every call rather than
+    /// cached — `Discovery::discover` reads a handful of size-capped files
+    /// and a retrieval is one ranked-search call, both negligible next to
+    /// a model call, and it means an instruction file edited (or the index
+    /// advancing a generation) mid-task takes effect on the very next
+    /// turn.
     async fn system_and_task_messages(&self, task_id: TaskId) -> Result<Vec<Message>> {
         let objective = self.tasks.get(task_id).await?.objective;
         let instructions = Discovery::new(self.workspace_root.as_path()).discover()?;
-        let engine = ContextEngine::new(StaticRetriever::empty());
+        let engine = ContextEngine::new(self.retriever.clone());
         let input = EngineInput::new(objective, DEFAULT_CONTEXT_BUDGET_TOKENS)
             .with_instructions(instructions);
-        Ok(engine.build(input).await?.messages)
+        let assembled = engine.build(input).await?;
+        self.journal_prompt_context_retrieved(task_id, &assembled, DEFAULT_CONTEXT_BUDGET_TOKENS)
+            .await?;
+        Ok(assembled.messages)
     }
 
     /// Reconstruct this task's tool-call history as alternating
@@ -1222,6 +1256,72 @@ impl AgentDriver {
         self.verify_states.lock().unwrap().insert(task_id, state);
     }
 
+    /// [`Self::journal_context_retrieved`]'s sibling for
+    /// [`system_and_task_messages`](Self::system_and_task_messages)'s
+    /// `ContextEngine`/`EngineInput` pipeline (M2), which assembles an
+    /// [`AssembledPrompt`] (a [`valyria_context::ContextSnapshot`] of
+    /// [`valyria_context::assemble::AssembledItem`]s) rather than the
+    /// Discovery step's [`AssembledContext`] of `ContextItem`s — distinct
+    /// types from two still-separate pipelines, so this can't share the
+    /// other method's body, but produces the identical `context_retrieved`
+    /// journal/event shape. Per-item token counts are estimated
+    /// (`rendered.chars().count() / 4`, the common rule-of-thumb ratio) —
+    /// `AssembledItem` doesn't carry a real count the way `ContextItem`
+    /// does, and this is a diagnostic field only, not budget enforcement
+    /// (`assembled.total_tokens`, used for `budget_used` below, *is* the
+    /// pipeline's real, budget-accurate figure).
+    async fn journal_prompt_context_retrieved(
+        &self,
+        task_id: TaskId,
+        assembled: &AssembledPrompt,
+        budget_total: usize,
+    ) -> Result<()> {
+        let items: Vec<serde_json::Value> = assembled
+            .snapshot
+            .items
+            .iter()
+            .map(|item| {
+                let path = match &item.provenance.source {
+                    ProvenanceSource::File { path } => path.clone(),
+                    ProvenanceSource::Instruction { path } => path.clone(),
+                    ProvenanceSource::ToolOutput { invocation } => format!("tool:{invocation}"),
+                    ProvenanceSource::Git { commit } => format!("git:{commit}"),
+                    ProvenanceSource::Memory { id } => format!("memory:{id}"),
+                    ProvenanceSource::ModelTurn => "<model turn>".to_string(),
+                };
+                let reason = if item.provenance.retrieval_path.is_empty() {
+                    "explicit".to_string()
+                } else {
+                    item.provenance.retrieval_path.join(" -> ")
+                };
+                serde_json::json!({
+                    "path": path,
+                    "reason": reason,
+                    "trust_level": trust_level_str(item.trust),
+                    "tokens": item.rendered.chars().count() / 4,
+                    "score": item.provenance.score,
+                })
+            })
+            .collect();
+
+        self.tasks
+            .append_journal(
+                task_id,
+                JournalEntryKind::EffectCompleted {
+                    effect_id: EffectId::new(),
+                    step_id: StepId::new(),
+                    outcome_kind: kinds::CONTEXT_RETRIEVED.into(),
+                    payload: serde_json::json!({
+                        "items": items,
+                        "budget_used": assembled.total_tokens,
+                        "budget_total": budget_total,
+                    }),
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
     /// Whether a `RepairDecision::SwitchRole` has escalated this task away
     /// from `FastCoder` for the remainder of the run — a cheap peek at
     /// `repair_role_primary` (bumped in `step_diagnosing`'s `SwitchRole`
@@ -1328,6 +1428,7 @@ impl AgentDriver {
             cancel,
             launcher: self.launcher.clone(),
             sandbox_profile: self.sandbox_profile.clone(),
+            store: self.store.clone(),
         }
     }
 }

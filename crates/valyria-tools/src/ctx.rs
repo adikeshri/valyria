@@ -11,6 +11,7 @@ use valyria_util::CancellationToken;
 use valyria_vfs::{HashCache, WorkspaceRoot};
 
 use valyria_ledger::Ledger;
+use valyria_store::Store;
 
 #[derive(Clone)]
 pub struct ToolCtx {
@@ -26,4 +27,15 @@ pub struct ToolCtx {
     /// what `launcher.confinement_level()` reports, never a silent no-op.
     pub launcher: Arc<dyn ProcessLauncher>,
     pub sandbox_profile: SandboxProfile,
+    /// The workspace's SQLite store, if this context has one (M2) — what
+    /// `search` / `symbol_search` open the index/graph/embed tables
+    /// through. Just a handle: opening `IndexStore`/`GraphStore`/
+    /// `EmbedStore::new(store.clone())` and building a fresh
+    /// `LanguageRegistry` is cheap (they wrap this same `Arc`, and grammar
+    /// compilation costs single-digit milliseconds — negligible next to a
+    /// model call), so nothing about the index needs to be threaded
+    /// through here beyond this one `Arc`. `None` in a `ToolCtx` built for
+    /// a test with no workspace database at all — the search tools report
+    /// that plainly rather than panicking.
+    pub store: Option<Arc<Store>>,
 }
