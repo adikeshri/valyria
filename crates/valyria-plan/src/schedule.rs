@@ -65,6 +65,18 @@ impl Schedule {
     pub fn remaining(&self, done: &BTreeSet<PlanStepId>) -> usize {
         self.order.iter().filter(|id| !done.contains(*id)).count()
     }
+
+    /// The [`Group`] `id` belongs to (M5: the parallel wave executor uses
+    /// this to decide whether the next incomplete step is a solo step —
+    /// run inline, exactly as before M5 — or part of a real multi-step
+    /// parallel bucket that should be handed to concurrent child tasks).
+    /// `None` for an id not in this schedule at all.
+    pub fn group_for(&self, id: &PlanStepId) -> Option<&Group> {
+        self.waves
+            .iter()
+            .flat_map(|wave| wave.iter())
+            .find(|group| group.contains(id))
+    }
 }
 
 /// Build the schedule from a validated plan (whose waves are already
@@ -181,6 +193,21 @@ mod tests {
         done.insert(id("c"));
         assert!(s.next_incomplete(&done).is_none());
         assert_eq!(s.remaining(&done), 0);
+    }
+
+    #[test]
+    fn group_for_finds_the_parallel_bucket_a_step_belongs_to() {
+        let s = schedule(&validated(vec![
+            step("a", &[], false),
+            step("b", &["a"], true),
+            step("c", &["a"], true),
+            step("d", &["b", "c"], false),
+        ]));
+        assert_eq!(s.group_for(&id("b")), Some(&vec![id("b"), id("c")]));
+        assert_eq!(s.group_for(&id("c")), Some(&vec![id("b"), id("c")]));
+        assert_eq!(s.group_for(&id("a")), Some(&vec![id("a")]));
+        assert_eq!(s.group_for(&id("d")), Some(&vec![id("d")]));
+        assert_eq!(s.group_for(&PlanStepId::new("nope").unwrap()), None);
     }
 
     #[test]

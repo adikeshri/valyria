@@ -265,13 +265,21 @@ impl AgentDriver {
     /// `model_role` picks. `run` is a thin `None`-forwarding wrapper around
     /// this, so every pre-M5 call site's behavior is unchanged bit-for-bit.
     ///
-    /// The role pipeline ([`crate::role_pipeline`]) uses this for its
-    /// Implementer child: without it, that child's `Planning`/`Implementing`
-    /// calls would resolve through the exact same global FastCoder-bound
-    /// check every ordinary task's does, which is indistinguishable from —
-    /// and would collide with — whatever role-specific model the pipeline's
-    /// other roles (Researcher, Reviewer) are bound to.
-    pub(crate) async fn run_with_role(
+    /// `model_role`'s "prefer `FastCoder` whenever it's bound" check is
+    /// *global* — it has no way to know a `FastCoder` binding exists for a
+    /// completely unrelated reason (the M1 repair-escalation ladder is its
+    /// only original purpose). The role pipeline
+    /// ([`crate::role_pipeline`]) and the parallel wave executor
+    /// (`crate::plan_exec::run_parallel_step_child`) both bind roles other
+    /// than `PrimaryCoder` for their own child tasks; without a way to pin
+    /// a specific task's `Planning`/`Implementing` calls to a role, *any*
+    /// of those bindings existing anywhere in the process would silently
+    /// redirect an unrelated ordinary task's calls too. `pub`, not
+    /// `pub(crate)`, so a caller assembling a driver with several such
+    /// bindings (a parallel-wave-capable setup, say) can pin an ordinary
+    /// top-level task's own role explicitly rather than leaving it to
+    /// `model_role`'s ambient, whole-process-wide guess.
+    pub async fn run_with_role(
         &self,
         task_id: TaskId,
         cancel: CancellationToken,
@@ -629,7 +637,7 @@ impl AgentDriver {
     /// when the task reached a terminal state.
     async fn step_verifying(&self, task_id: TaskId, cancel: &CancellationToken) -> Result<Flow> {
         let mut vs = self.take_verify_state(task_id).await?;
-        let changed = self.task_changed_files(task_id);
+        let changed = self.task_changed_files(task_id).await;
 
         // (Re)build the plan on first entry or after a repair widened it.
         if vs.plan.is_none() {
@@ -788,7 +796,7 @@ impl AgentDriver {
 
     async fn step_diagnosing(&self, task_id: TaskId, _cancel: &CancellationToken) -> Result<()> {
         let mut vs = self.take_verify_state(task_id).await?;
-        let changed = self.task_changed_files(task_id);
+        let changed = self.task_changed_files(task_id).await;
 
         let failures = vs
             .last_run
@@ -1079,9 +1087,9 @@ impl AgentDriver {
         vs.plan = None; // re-verify from the start of the escalation
         vs.executed = 0;
         vs.last_passed = true;
+        let changed_now = self.task_changed_files(task_id).await;
         vs.detector.observe_step(
-            StepSignature::default()
-                .with_file_state(self.changed_files_state_hash(&self.task_changed_files(task_id))),
+            StepSignature::default().with_file_state(self.changed_files_state_hash(&changed_now)),
         );
 
         let state_now = self.tasks.get(task_id).await?.state;
@@ -1374,16 +1382,33 @@ impl AgentDriver {
 
     // --- helpers ---------------------------------------------------
 
-    pub(crate) fn task_changed_files(&self, task_id: TaskId) -> Vec<PathBuf> {
-        let mut files: Vec<PathBuf> = self
-            .ledger
-            .entries_for_task(task_id)
-            .into_iter()
-            .map(|e| e.path)
-            .collect();
-        files.sort();
-        files.dedup();
-        files
+    /// Every file `task_id` has touched — its own ledger entries plus,
+    /// recursively, every descendant's (M5: a parallel-wave step or a
+    /// role-pipeline Implementer runs as its own child task with its own
+    /// `task_id`, so its edits are recorded in the ledger under *that* id,
+    /// not the parent's; without this, a checkpoint taken after a
+    /// parallel wave — or the final Diagnosing pass's suspect-file
+    /// computation — would silently miss every file a child touched).
+    pub(crate) fn task_changed_files<'a>(
+        &'a self,
+        task_id: TaskId,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<PathBuf>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut files: Vec<PathBuf> = self
+                .ledger
+                .entries_for_task(task_id)
+                .into_iter()
+                .map(|e| e.path)
+                .collect();
+            if let Ok(children) = self.tasks.children_of(task_id).await {
+                for child in children {
+                    files.extend(self.task_changed_files(child.id).await);
+                }
+            }
+            files.sort();
+            files.dedup();
+            files
+        })
     }
 
     /// A hash over the current on-disk content of every file the task has

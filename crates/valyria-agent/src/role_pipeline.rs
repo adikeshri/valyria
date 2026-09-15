@@ -161,7 +161,7 @@ impl AgentDriver {
         self.run_with_role(implementer.id, cancel.child(), Some(implementer_role))
             .await?;
         let implementer_final = self.tasks.get(implementer.id).await?;
-        let changed = self.task_changed_files(implementer.id);
+        let changed = self.task_changed_files(implementer.id).await;
         self.save_role_artifact(
             task_id,
             AgentRole::Implementer,

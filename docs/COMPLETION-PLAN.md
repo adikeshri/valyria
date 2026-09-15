@@ -691,23 +691,98 @@ immediately without a Core change.
   immaterial for a passing implementation, but a real gap if a role
   pipeline's Implementer needs to self-repair while a differently-bound
   role (e.g. Researcher's `FastCoder`) is also active.
-- Parallel wave executor: `PlanStep.parallelizable`/`.targets` and
-  `Schedule::waves()` (grouped concurrent steps) already exist and are
-  tested in `valyria-plan`; `plan_exec.rs` still only consumes the
-  flattened sequential `order()`. Concurrent execution needs a
-  target-conflict-to-serialization rule and a per-workspace concurrency
-  cap on top of child tasks, which is a meaningfully separate change from
-  child tasks existing at all.
 - Per-step verification scoped to one wave (rather than the full run
-  before `Completed`): depends on the parallel wave executor above.
+  before `Completed`): the mandatory full `Verifying` suite after the
+  whole plan remains the only verification pass — a parallel-wave child
+  deliberately never reaches its own `Verifying` (see below).
 - Protocol 1.17 (`task_children`, `task_artifacts`, `plan_revisions`
   +diff, `subtask_started`/`subtask_completed`/`artifact_published`
   events, `TaskSummary.parent_task_id`) and the app surfaces it would
   drive (task tree, plan DAG with lanes, artifact viewer, plan-revision
-  diff, per-child pause/cancel): none of this has anything to wrap yet
-  until the role pipeline and parallel executor above actually produce
-  child tasks and artifacts during a real run — wiring the protocol first
-  would mean shipping wire types for a feature that doesn't exist.
+  diff, per-child pause/cancel): now that both the role pipeline and the
+  parallel wave executor produce real child tasks and artifacts during a
+  run, this is the next well-scoped M5 chunk.
+- Wave-crash mid-resume: a parallel batch killed partway through leaves
+  whichever children hadn't finished stuck (their parent never folds a
+  non-terminal child's result back in, so the parent itself stays
+  `Implementing` rather than silently marking the wave done) — safe, but
+  resuming doesn't yet re-drive just the unfinished children specifically;
+  the whole `step_implementing_plan` call re-enters and re-derives the
+  group's incomplete set from scratch, which is correct but not proven
+  under an actual `kill -9` the way the single-task walking-skeleton tests
+  prove sequential resume.
+
+**Shipped (continued)**
+
+- Parallel wave executor (`valyria-agent::plan_exec`): a wave's
+  `parallelizable` steps — the `Schedule::waves()`/`Group` grouping
+  `valyria-plan` already computed and tested — now actually run as
+  concurrent child tasks instead of the flattened sequential `order()`.
+  `Schedule::group_for` (new) finds which group the next incomplete step
+  belongs to; a group with more than one still-incomplete member hands
+  off to `run_parallel_group`, which partitions it into target-conflict-
+  free batches (`partition_conflict_free` — steps whose declared `targets`
+  overlap are never scheduled concurrently, computed statically from the
+  plan's own declarations before anything runs, not discovered after the
+  fact from the ledger) capped at `MAX_PARALLEL_CHILDREN` (4) concurrent
+  children per batch, runs each batch via `futures::future::join_all`, and
+  folds every success back into the parent's own journal
+  (`PLAN_STEP_STARTED`/`PLAN_STEP_COMPLETED`, a checkpoint if declared) so
+  the ordinary schedule-driven loop treats them exactly like sequential
+  steps on its next iteration. Any child that doesn't cleanly complete
+  (needs permission, asks the user, or fails) fails the whole wave rather
+  than attempting a partial resume — a bounded, honest limitation, not a
+  silent gap.
+
+  `AgentDriver::task_changed_files` is now recursive over a task's
+  children (a parallel step's edits are ledger-recorded under its own
+  child `task_id`, invisible to the parent's own entries otherwise) —
+  needed for checkpoints, loop-detector file-state hashing and Diagnosing
+  suspects to see what a wave's children actually touched.
+
+  This surfaced two more real bugs, both fixed:
+  - **The same role-blind-routing hazard from role-pipeline wiring,
+    recurring in the *ordinary* (non-role-pipeline) single-task path.**
+    `model_role`'s "prefer `FastCoder` whenever it's bound" check is
+    global and purpose-blind: the moment a driver binds `FastCoder` for
+    *any* reason (parallel-wave children benefit from a cheaper model
+    since there are many of them — `run_parallel_step_child` prefers it
+    when bound), every *other*, unrelated task's ordinary `Planning`/
+    `Implementing` calls silently get redirected to it too, with no way
+    to opt out. Fixed by making `AgentDriver::run_with_role` — already
+    added for role-pipeline wiring — `pub` instead of `pub(crate)`, so a
+    caller assembling a driver with several such bindings can pin an
+    ordinary top-level task's own role explicitly rather than trusting
+    `model_role`'s ambient, whole-process-wide guess.
+  - **Parallel-wave children never reached a terminal state.** The first
+    implementation returned as soon as a child's one step was marked
+    complete, leaving the child parked at `Implementing` forever —
+    indistinguishable from a task a crash actually interrupted, and
+    exactly the class of bug `role_pipeline::finish_role_child` already
+    exists to prevent for role children. Fixed the same way: walk the
+    child through `Verifying` → `Completed` as pure bookkeeping
+    (`transition` has no side effects beyond journaling; the real
+    verification command only ever runs inside `step_verifying`'s own
+    handler, which this never calls) once its step is done.
+
+  Proven in `plan_loop.rs`: `parallel_steps_in_one_wave_run_as_concurrent_
+  child_tasks` (two `parallelizable` steps with disjoint targets spawn two
+  children, both linked to the parent via `parent_task` and terminal, both
+  steps recorded complete on the parent, exactly one plan revision — no
+  spurious re-planning) and `a_parallel_group_with_overlapping_targets_
+  still_completes_via_serialized_batches` (two steps sharing a target
+  still both complete, proving `run_parallel_group` correctly walks
+  multiple batches rather than assuming one always covers a whole group).
+  `partition_conflict_free` itself has a direct unit-test suite (4 tests)
+  covering disjoint targets landing in one batch, an overlap forcing a
+  separate one, a step joining the first non-conflicting batch rather than
+  always opening a new one, and read-only (no-target) steps never
+  conflicting. Proving genuine *wall-clock* concurrency (the original
+  spec's "timestamps overlap") isn't practical with the fake-model test
+  harness, which has no controllable per-call delay primitive without
+  risking flakiness — these tests instead prove functional and structural
+  correctness of the orchestration, which is where the real, new risk
+  was (and where both bugs above were actually found).
 
 **Exit (partial):**
 - ✅ A loop detected before a crash is still counted after resume (proven
@@ -718,10 +793,15 @@ immediately without a Core change.
   routed to its own model, with a real file edit landing on disk.
 - ✅ A Reviewer finding blocks completion (hands off to a human) rather
   than being silently ignored.
-- Deferred to the next M5 chunk: two-wave concurrent execution surviving
-  `kill -9` mid-wave; overlapping targets serializing; a Reviewer finding
+- ✅ Two parallel steps in one wave run as concurrent child tasks, both
+  linked back to the parent and both completing correctly.
+- ✅ Overlapping targets serialize into separate batches rather than
+  racing.
+- Deferred to the next M5 chunk: `kill -9` mid-wave resuming just the
+  unfinished children (rather than being merely safe); a Reviewer finding
   causing an automatic repair *revision* (today it hands off to a human
-  instead); role-pipeline coordinator crash-recovery.
+  instead); role-pipeline coordinator crash-recovery; protocol 1.17 and
+  its app surfaces.
 
 ---
 
