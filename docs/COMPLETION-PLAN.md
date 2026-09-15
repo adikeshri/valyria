@@ -695,17 +695,23 @@ immediately without a Core change.
   before `Completed`): the mandatory full `Verifying` suite after the
   whole plan remains the only verification pass — a parallel-wave child
   deliberately never reaches its own `Verifying` (see below).
-- App surfaces for the protocol below (task tree, plan DAG with lanes,
-  artifact viewer, plan-revision diff, per-child pause/cancel): the Core
-  wire types and their dispatch are shipped (see below) and reachable
-  from the Rust `EmbeddedClient`, but `valyria-app`'s TypeScript side —
-  `valyria-bridge`'s Rust wrapper methods, `valyria-bridge-host`'s
-  JSON-RPC dispatch, the `Requests` interface in
-  `extension/src/bridge/protocol.ts`, `@valyria/protocol`'s vendored
-  schemas + Zod decoder registry, `@valyria/state`'s reducer/selectors for
-  the two new subtask events, and any actual webview UI — is genuinely
-  separate, substantial frontend work across a second repository, not yet
-  started. Tracked as the next M5 chunk.
+- Actual webview UI for the protocol below (a task-tree view, plan DAG
+  with lanes, artifact viewer, plan-revision diff, per-child pause/
+  cancel), and the `@valyria/state` reducer/selectors that would let such
+  UI update live from `subtask_started`/`subtask_completed`/
+  `artifact_published` rather than only via an explicit fetch. As of
+  `valyria-app`'s `chore/m0-baseline` (core.lock.json bumped to this
+  repo's own `chore/m0-baseline`, pushed), the *entire plumbing layer*
+  beneath such UI is real and tested end to end — `valyria-bridge`'s
+  `CoreClient::task_children`/`task_artifacts`/`plan_revisions`,
+  `valyria-bridge-host`'s `task/children`/`task/artifacts`/`plan/
+  revisions` JSON-RPC dispatch, the `Requests` interface in
+  `extension/src/bridge/protocol.ts`, and `@valyria/protocol`'s vendored
+  schemas + generated types + Zod decoders (including real typed
+  decoders, not just a passthrough catch-all, for the three new event
+  kinds) — so a caller can request and get back typed, validated data
+  today. Only the visual presentation layer itself remains. Tracked as
+  the next M5 chunk.
 - Wave-crash mid-resume: a parallel batch killed partway through leaves
   whichever children hadn't finished stuck (their parent never folds a
   non-terminal child's result back in, so the parent itself stays
@@ -838,12 +844,14 @@ immediately without a Core change.
 - ✅ Overlapping targets serialize into separate batches rather than
   racing.
 - ✅ `task_children`/`task_artifacts`/`plan_revisions` are real, callable
-  requests, server-side, over both transports.
-- Deferred to the next M5 chunk: the `valyria-app` TypeScript/bridge/
-  webview surface for the protocol above; `kill -9` mid-wave resuming
-  just the unfinished children (rather than being merely safe); a
-  Reviewer finding causing an automatic repair *revision* (today it hands
-  off to a human instead); role-pipeline coordinator crash-recovery.
+  requests, server-side, over both transports, *and* end-to-end through
+  `valyria-app`'s bridge and TypeScript type/decoder layer — a caller on
+  the app side can request and validate real data today.
+- Deferred to the next M5 chunk: the actual webview UI to display any of
+  this; `kill -9` mid-wave resuming just the unfinished children (rather
+  than being merely safe); a Reviewer finding causing an automatic repair
+  *revision* (today it hands off to a human instead); role-pipeline
+  coordinator crash-recovery.
 
 ---
 
