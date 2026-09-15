@@ -695,13 +695,17 @@ immediately without a Core change.
   before `Completed`): the mandatory full `Verifying` suite after the
   whole plan remains the only verification pass — a parallel-wave child
   deliberately never reaches its own `Verifying` (see below).
-- Protocol 1.17 (`task_children`, `task_artifacts`, `plan_revisions`
-  +diff, `subtask_started`/`subtask_completed`/`artifact_published`
-  events, `TaskSummary.parent_task_id`) and the app surfaces it would
-  drive (task tree, plan DAG with lanes, artifact viewer, plan-revision
-  diff, per-child pause/cancel): now that both the role pipeline and the
-  parallel wave executor produce real child tasks and artifacts during a
-  run, this is the next well-scoped M5 chunk.
+- App surfaces for the protocol below (task tree, plan DAG with lanes,
+  artifact viewer, plan-revision diff, per-child pause/cancel): the Core
+  wire types and their dispatch are shipped (see below) and reachable
+  from the Rust `EmbeddedClient`, but `valyria-app`'s TypeScript side —
+  `valyria-bridge`'s Rust wrapper methods, `valyria-bridge-host`'s
+  JSON-RPC dispatch, the `Requests` interface in
+  `extension/src/bridge/protocol.ts`, `@valyria/protocol`'s vendored
+  schemas + Zod decoder registry, `@valyria/state`'s reducer/selectors for
+  the two new subtask events, and any actual webview UI — is genuinely
+  separate, substantial frontend work across a second repository, not yet
+  started. Tracked as the next M5 chunk.
 - Wave-crash mid-resume: a parallel batch killed partway through leaves
   whichever children hadn't finished stuck (their parent never folds a
   non-terminal child's result back in, so the parent itself stays
@@ -784,6 +788,42 @@ immediately without a Core change.
   correctness of the orchestration, which is where the real, new risk
   was (and where both bugs above were actually found).
 
+- Protocol 1.13.0 — the Core (Rust) half of what the original plan called
+  "Protocol 1.17" (§3's evolution table used the plan's own milestone
+  numbering; the actually-enforced `PROTOCOL_VERSION` constant follows
+  its own minor-bump rule and lands at 1.13.0). `valyria-events::
+  EventKind` gains three variants (`SubtaskStarted`, `SubtaskCompleted`,
+  `ArtifactPublished`), each with a pinned `event_payloads` struct and a
+  `docs/protocol/events/*.schema.json` entry. `TaskManager::create_child`
+  now journals `subtask_started` onto the *parent's* journal (not the
+  child's own — a client watching the parent is who needs to learn a
+  child started), and `TaskManager::transition` journals
+  `subtask_completed` onto the parent whenever a child reaches a terminal
+  state; `role_pipeline::save_role_artifact` journals `artifact_published`
+  after every `PlanStore::save_artifact` (`PlanStore` itself has no
+  `EventBus` — layer 5, no event-projection concept — so this goes
+  through the same journal→`project_events` path every other agent-driven
+  event does, not a parallel emission mechanism). `TaskSummary` gains an
+  additive `parent_task_id: Option<String>`. Three new request/response
+  pairs — `task_children`, `task_artifacts`, `plan_revisions` (the last
+  carrying each revision's structural diff against the one before it,
+  via `Plan::diff`, already built in Phase 8) — are wired all the way
+  through `valyria-app`'s `Runtime` (three new thin wrapper methods) and
+  `EmbeddedClient`'s dispatch (three new match arms + wire-mapping
+  helpers), so they're callable today through the in-process client and
+  the daemon transport alike (`SocketClient` is a pure backend swap over
+  the same `Request`/`Response` types, unchanged). New capability token
+  `multi_agent`. `cargo xtask schema` regenerated `docs/protocol/`;
+  `cargo xtask check-protocol` and `check-layering` both pass.
+
+  Proven with protocol round-trip tests (`envelope::tests::multi_agent_
+  request_and_response_variants_round_trip`), two new `valyria-task`
+  tests proving the parent/not-the-child fan-out precisely
+  (`subtask_events_project_onto_the_parents_own_stream`,
+  `a_top_level_task_never_fires_subtask_events`), and a new assertion in
+  the role-pipeline end-to-end test confirming all five artifacts each
+  fire their own `artifact_published` event with the right `kind`.
+
 **Exit (partial):**
 - ✅ A loop detected before a crash is still counted after resume (proven
   end-to-end, not just at the unit level).
@@ -797,11 +837,13 @@ immediately without a Core change.
   linked back to the parent and both completing correctly.
 - ✅ Overlapping targets serialize into separate batches rather than
   racing.
-- Deferred to the next M5 chunk: `kill -9` mid-wave resuming just the
-  unfinished children (rather than being merely safe); a Reviewer finding
-  causing an automatic repair *revision* (today it hands off to a human
-  instead); role-pipeline coordinator crash-recovery; protocol 1.17 and
-  its app surfaces.
+- ✅ `task_children`/`task_artifacts`/`plan_revisions` are real, callable
+  requests, server-side, over both transports.
+- Deferred to the next M5 chunk: the `valyria-app` TypeScript/bridge/
+  webview surface for the protocol above; `kill -9` mid-wave resuming
+  just the unfinished children (rather than being merely safe); a
+  Reviewer finding causing an automatic repair *revision* (today it hands
+  off to a human instead); role-pipeline coordinator crash-recovery.
 
 ---
 

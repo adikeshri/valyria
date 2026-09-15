@@ -71,6 +71,17 @@ pub enum EventKind {
     /// A per-role model server was stopped — payload `{ role, id,
     /// reason }`.
     ModelServerStopped,
+    /// A child task was created under a parent (M5, `valyria-task::
+    /// TaskManager::create_child`) — projected onto the *parent's* event
+    /// stream, not the child's own. Payload `{ child_task_id, objective }`.
+    SubtaskStarted,
+    /// A child task reached a terminal state (M5) — projected onto the
+    /// *parent's* event stream. Payload `{ child_task_id, final_state }`.
+    SubtaskCompleted,
+    /// A role-pipeline `Artifact` was persisted to the `PlanStore` (M5,
+    /// `valyria-agent::role_pipeline`) — payload `{ role, kind }`
+    /// (`valyria-plan::roles::{AgentRole, ArtifactKind}::as_str`).
+    ArtifactPublished,
 }
 
 impl EventKind {
@@ -110,6 +121,9 @@ impl EventKind {
         EventKind::ModelServerReady,
         EventKind::ModelServerFailed,
         EventKind::ModelServerStopped,
+        EventKind::SubtaskStarted,
+        EventKind::SubtaskCompleted,
+        EventKind::ArtifactPublished,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -146,6 +160,9 @@ impl EventKind {
             EventKind::ModelServerReady => "model_server_ready",
             EventKind::ModelServerFailed => "model_server_failed",
             EventKind::ModelServerStopped => "model_server_stopped",
+            EventKind::SubtaskStarted => "subtask_started",
+            EventKind::SubtaskCompleted => "subtask_completed",
+            EventKind::ArtifactPublished => "artifact_published",
         }
     }
 }
@@ -182,13 +199,16 @@ mod tests {
         for k in EventKind::ALL {
             let _: &str = k.as_str();
         }
-        assert_eq!(EventKind::ALL.len(), 32);
+        assert_eq!(EventKind::ALL.len(), 35);
     }
 
     #[test]
     fn newer_kinds_round_trip_through_their_strings() {
         for (kind, s) in [
             (EventKind::ContextRetrieved, "context_retrieved"),
+            (EventKind::SubtaskStarted, "subtask_started"),
+            (EventKind::SubtaskCompleted, "subtask_completed"),
+            (EventKind::ArtifactPublished, "artifact_published"),
             (EventKind::PlanCheckpoint, "plan_checkpoint"),
             (EventKind::ModelInstallProgress, "model_install_progress"),
             (EventKind::ModelInstallCompleted, "model_install_completed"),

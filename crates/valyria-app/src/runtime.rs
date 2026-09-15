@@ -20,7 +20,7 @@ use valyria_model_registry::{score_card_for_role, CardScore, Catalog, ModelCard,
 use valyria_model_store::{HttpFetcher, ModelStore, NullProber};
 use valyria_orchestrator::{NoModelRuntime, Role, RoleRouter};
 use valyria_permissions::PermissionEngine;
-use valyria_plan::{PlanRevision, PlanStore, RollbackError, RollbackReport};
+use valyria_plan::{PlanRevision, PlanStore, RollbackError, RollbackReport, StoredArtifact};
 use valyria_runtime_fake::{FakeModelRuntime, Scenario};
 use valyria_runtime_llamacpp::{LlamaServerRuntime, LocalModelServer};
 use valyria_sandbox::{detect_platform_launcher, ProcessLauncher, SandboxProfile};
@@ -633,6 +633,27 @@ impl Runtime {
 
     pub async fn list_tasks(&self) -> Result<Vec<Task>> {
         Ok(self.tasks.list(self.workspace_id).await?)
+    }
+
+    /// M5, protocol 1.13.0: every direct child of a task, oldest first.
+    pub async fn task_children(&self, task_id: TaskId) -> Result<Vec<Task>> {
+        Ok(self.tasks.children_of(task_id).await?)
+    }
+
+    /// Every role-pipeline artifact produced against a task, oldest first.
+    pub async fn task_artifacts(&self, task_id: TaskId) -> Result<Vec<StoredArtifact>> {
+        self.plan_store
+            .artifacts_for_task(task_id)
+            .await
+            .map_err(|e| AppError::Plan(e.to_string()))
+    }
+
+    /// Every plan revision for a task, oldest first.
+    pub async fn plan_revisions(&self, task_id: TaskId) -> Result<Vec<PlanRevision>> {
+        self.plan_store
+            .all_revisions(task_id)
+            .await
+            .map_err(|e| AppError::Plan(e.to_string()))
     }
 
     /// The completion report (§15, D4) — assembled *only* from persisted

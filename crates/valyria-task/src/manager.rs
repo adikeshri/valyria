@@ -7,7 +7,7 @@ use std::sync::Arc;
 use rusqlite::OptionalExtension;
 use valyria_events::{EventBus, EventKind, NewEvent};
 use valyria_store::Store;
-use valyria_types::{AgentState, Generation, TaskId, WorkspaceId};
+use valyria_types::{AgentState, EffectId, Generation, StepId, TaskId, WorkspaceId};
 use valyria_util::Clock;
 
 use crate::codec::{signal_from_text, signal_to_text, state_from_text, state_to_text};
@@ -140,6 +140,28 @@ impl TaskManager {
 
         self.append_journal(id, JournalEntryKind::TaskCreated)
             .await?;
+
+        // M5: fan out onto the *parent's* journal, not the child's own —
+        // a client watching the parent's event stream is exactly who
+        // needs to learn a child started, and the child's own
+        // `task_created` (above) already covers a client watching the
+        // child directly.
+        if let Some(parent_id) = task.parent_task {
+            self.append_journal(
+                parent_id,
+                JournalEntryKind::EffectCompleted {
+                    effect_id: EffectId::new(),
+                    step_id: StepId::new(),
+                    outcome_kind: kinds::SUBTASK_STARTED.into(),
+                    payload: serde_json::json!({
+                        "child_task_id": task.id.to_string(),
+                        "objective": task.objective,
+                    }),
+                },
+            )
+            .await?;
+        }
+
         Ok(task)
     }
 
@@ -335,6 +357,32 @@ impl TaskManager {
 
         self.append_journal(id, JournalEntryKind::StateChanged { from, to })
             .await?;
+
+        // M5: fan out onto the *parent's* journal when a child reaches a
+        // terminal state — the counterpart to `SUBTASK_STARTED` in
+        // `create_with_parent`. Every legal `-> to.is_terminal()` edge
+        // passes through here exactly once (states don't self-loop, so a
+        // task can't re-enter the same terminal state to double-fire
+        // this), matching the existing `TaskCompleted`/`TaskFailed`/
+        // `TaskPaused` event projection's own "fires once, on the actual
+        // transition" guarantee.
+        if to.is_terminal() {
+            if let Some(parent_id) = task.parent_task {
+                self.append_journal(
+                    parent_id,
+                    JournalEntryKind::EffectCompleted {
+                        effect_id: EffectId::new(),
+                        step_id: StepId::new(),
+                        outcome_kind: kinds::SUBTASK_COMPLETED.into(),
+                        payload: serde_json::json!({
+                            "child_task_id": id.to_string(),
+                            "final_state": to.to_string(),
+                        }),
+                    },
+                )
+                .await?;
+            }
+        }
         Ok(())
     }
 
@@ -784,6 +832,18 @@ impl TaskManager {
                 }
                 kinds::PLAN_ROLLBACK => {
                     self.emit(task_id, EventKind::FileChanged, payload.clone())
+                        .await?;
+                }
+                kinds::SUBTASK_STARTED => {
+                    self.emit(task_id, EventKind::SubtaskStarted, payload.clone())
+                        .await?;
+                }
+                kinds::SUBTASK_COMPLETED => {
+                    self.emit(task_id, EventKind::SubtaskCompleted, payload.clone())
+                        .await?;
+                }
+                kinds::ARTIFACT_PUBLISHED => {
+                    self.emit(task_id, EventKind::ArtifactPublished, payload.clone())
                         .await?;
                 }
                 _ => {}
@@ -1262,6 +1322,84 @@ mod tests {
         let mgr = manager();
         let err = mgr.request_pause(TaskId::new()).await.unwrap_err();
         assert!(matches!(err, TaskError::NotFound(_)));
+    }
+
+    /// M5, protocol 1.13.0: `subtask_started`/`subtask_completed` fan out
+    /// onto the *parent's* event stream, not the child's own.
+    #[tokio::test]
+    async fn subtask_events_project_onto_the_parents_own_stream() {
+        let store = Arc::new(
+            Store::open_in_memory(&{
+                let mut m: Vec<valyria_store::Migration> = valyria_events::MIGRATIONS.to_vec();
+                m.extend(crate::migrations::MIGRATIONS.iter().copied());
+                m
+            })
+            .unwrap(),
+        );
+        let events = Arc::new(EventBus::new(store.clone()));
+        let clock: Arc<dyn Clock> = Arc::new(FixedClock::at_millis(1_000_000));
+        let mgr = TaskManager::new(store, events.clone(), clock);
+
+        let parent = new_task(&mgr).await;
+        let child = mgr
+            .create_child(parent.id, "do the sub-thing".into(), Budget::default())
+            .await
+            .unwrap();
+
+        let all_events = events
+            .replay_since(valyria_events::Seq::ZERO)
+            .await
+            .unwrap();
+        let started = all_events
+            .iter()
+            .find(|e| e.kind == EventKind::SubtaskStarted)
+            .expect("expected a subtask_started event");
+        assert_eq!(started.task_id, Some(parent.id));
+        assert_eq!(started.payload["child_task_id"], child.id.to_string());
+        assert_eq!(started.payload["objective"], "do the sub-thing");
+        // Not duplicated onto the child's own stream.
+        assert!(!all_events
+            .iter()
+            .any(|e| e.task_id == Some(child.id) && e.kind == EventKind::SubtaskStarted));
+
+        mgr.transition(child.id, AgentState::Understanding)
+            .await
+            .unwrap();
+        mgr.transition(child.id, AgentState::Cancelled)
+            .await
+            .unwrap();
+
+        let all_events = events
+            .replay_since(valyria_events::Seq::ZERO)
+            .await
+            .unwrap();
+        let completed = all_events
+            .iter()
+            .find(|e| e.kind == EventKind::SubtaskCompleted)
+            .expect("expected a subtask_completed event");
+        assert_eq!(completed.task_id, Some(parent.id));
+        assert_eq!(completed.payload["child_task_id"], child.id.to_string());
+        assert_eq!(completed.payload["final_state"], "CANCELLED");
+    }
+
+    /// A top-level task (no parent) never fires either subtask event.
+    #[tokio::test]
+    async fn a_top_level_task_never_fires_subtask_events() {
+        let mgr = manager();
+        let task = new_task(&mgr).await;
+        mgr.transition(task.id, AgentState::Understanding)
+            .await
+            .unwrap();
+        mgr.transition(task.id, AgentState::Cancelled)
+            .await
+            .unwrap();
+
+        let entries = mgr.journal_since(task.id, JournalSeq::ZERO).await.unwrap();
+        assert!(!entries.iter().any(|e| matches!(
+            &e.kind,
+            JournalEntryKind::EffectCompleted { outcome_kind, .. }
+                if outcome_kind == kinds::SUBTASK_STARTED || outcome_kind == kinds::SUBTASK_COMPLETED
+        )));
     }
 
     #[tokio::test]

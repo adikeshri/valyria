@@ -73,11 +73,80 @@ pub struct TaskSummary {
     pub state: String,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
+    /// The parent task this one was spawned under (M5, `TaskManager::
+    /// create_child`), or `None` for an ordinary top-level task. Additive
+    /// as of protocol 1.13.0 — an older client ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_task_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct TaskListResponse {
     pub tasks: Vec<TaskSummary>,
+}
+
+/// M5, protocol 1.13.0: every direct child of a task (`TaskManager::
+/// children_of` — not recursive; a grandchild belongs to its own parent).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TaskChildrenResponse {
+    pub children: Vec<TaskSummary>,
+}
+
+/// One role-pipeline `Artifact` as stored (M5, `valyria_plan::roles::
+/// StoredArtifact`). `artifact` carries the role-specific payload
+/// verbatim (`ResearchBrief`/`Plan`/`ChangeSet`/`VerificationReport`/
+/// `ReviewFindings`) — deliberately raw JSON rather than one struct per
+/// variant, matching how `WireEvent.payload` stays open per §4.27's own
+/// event-payload convention; `kind` names which shape it is.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ArtifactWire {
+    /// `researcher` | `planner` | `implementer` | `tester` | `reviewer`.
+    pub produced_by: String,
+    /// `research_brief` | `plan` | `change_set` | `verification_report` |
+    /// `review_findings`.
+    pub kind: String,
+    pub artifact: serde_json::Value,
+    pub created_at_ms: u64,
+}
+
+/// M5, protocol 1.13.0: every artifact produced against a task, oldest
+/// first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TaskArtifactsResponse {
+    pub artifacts: Vec<ArtifactWire>,
+}
+
+/// One persisted plan revision (M5, `valyria_plan::model::PlanRevision`),
+/// with its structural diff against the immediately preceding revision —
+/// `diff_from_parent` is `None` for the first revision (`parent_hash` is
+/// also `None` then) and whenever the parent revision itself is no longer
+/// stored (defensive; `PlanStore` never actually deletes a revision).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct PlanRevisionWire {
+    pub revision: u32,
+    pub parent_hash: Option<String>,
+    pub rationale: String,
+    pub content_hash: String,
+    pub steps: Vec<PlanStepSummary>,
+    pub created_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_from_parent: Option<PlanDiffWire>,
+}
+
+/// `valyria_plan::model::PlanDiff` — added/removed/changed step ids
+/// against the prior revision.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct PlanDiffWire {
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+    pub changed: Vec<String>,
+}
+
+/// M5, protocol 1.13.0: every plan revision for a task, oldest first —
+/// "each revision journaled and diffable" (§4.25).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct PlanRevisionsResponse {
+    pub revisions: Vec<PlanRevisionWire>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

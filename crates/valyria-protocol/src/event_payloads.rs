@@ -53,6 +53,9 @@ pub const EVENT_KINDS: &[&str] = &[
     "model_server_ready",
     "model_server_failed",
     "model_server_stopped",
+    "subtask_started",
+    "subtask_completed",
+    "artifact_published",
 ];
 
 /// `state_changed` — an `AgentState` transition.
@@ -216,6 +219,34 @@ pub struct ModelServerStoppedPayload {
     pub reason: String,
 }
 
+/// `subtask_started` — projected onto the *parent's* event stream when
+/// `TaskManager::create_child` mints a child task (M5).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SubtaskStartedPayload {
+    pub child_task_id: String,
+    pub objective: String,
+}
+
+/// `subtask_completed` — projected onto the *parent's* event stream when a
+/// child task reaches a terminal state (M5).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SubtaskCompletedPayload {
+    pub child_task_id: String,
+    /// `completed` | `failed` | `cancelled`.
+    pub final_state: String,
+}
+
+/// `artifact_published` — a role-pipeline `Artifact` was persisted (M5,
+/// `valyria-agent::role_pipeline`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ArtifactPublishedPayload {
+    /// `researcher` | `planner` | `implementer` | `tester` | `reviewer`.
+    pub role: String,
+    /// `research_brief` | `plan` | `change_set` | `verification_report` |
+    /// `review_findings`.
+    pub kind: String,
+}
+
 /// A parsed verification failure location (§19, §35, G15).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct FailureLocationPayload {
@@ -284,6 +315,9 @@ pub fn payload_schemas() -> Vec<(&'static str, String)> {
         ("model_server_stopped", s::<ModelServerStoppedPayload>()),
         ("verification_evidence", s::<VerificationEvidencePayload>()),
         ("test_failed", s::<VerificationEvidencePayload>()),
+        ("subtask_started", s::<SubtaskStartedPayload>()),
+        ("subtask_completed", s::<SubtaskCompletedPayload>()),
+        ("artifact_published", s::<ArtifactPublishedPayload>()),
     ]
 }
 

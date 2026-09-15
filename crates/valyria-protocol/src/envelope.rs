@@ -13,11 +13,11 @@ use crate::messages::{
     LedgerChangesRequest, LedgerChangesResponse, MemoryListRequest, MemoryListResponse,
     ModelActivateRequest, ModelIdRequest, ModelInspectResponse, ModelInstallRequest,
     ModelListResponse, ModelRecommendRequest, ModelRecommendResponse, ModelRemoveResponse,
-    PermissionResolveRequest, PlanGetResponse, PurgeResponse, SearchQueryRequest,
-    SearchQueryResponse, StorageInspectResponse, StoragePurgeRequest, TaskCreateRequest,
-    TaskCreateResponse, TaskIdRequest, TaskListResponse, TaskReportResponse, TaskRollbackRequest,
-    TaskRollbackResponse, TaskStatusRequest, TaskStatusResponse, WireError,
-    WorkspaceStatusResponse,
+    PermissionResolveRequest, PlanGetResponse, PlanRevisionsResponse, PurgeResponse,
+    SearchQueryRequest, SearchQueryResponse, StorageInspectResponse, StoragePurgeRequest,
+    TaskArtifactsResponse, TaskChildrenResponse, TaskCreateRequest, TaskCreateResponse,
+    TaskIdRequest, TaskListResponse, TaskReportResponse, TaskRollbackRequest, TaskRollbackResponse,
+    TaskStatusRequest, TaskStatusResponse, WireError, WorkspaceStatusResponse,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -29,6 +29,14 @@ pub enum Request {
     TaskList(Empty),
     TaskReport(TaskIdRequest),
     TaskPlan(TaskIdRequest),
+    /// Every direct child of a task, oldest first. Protocol 1.13.0 (M5).
+    TaskChildren(TaskIdRequest),
+    /// Every role-pipeline artifact produced against a task, oldest first.
+    /// Protocol 1.13.0 (M5).
+    TaskArtifacts(TaskIdRequest),
+    /// Every plan revision for a task, oldest first, each with its diff
+    /// against the immediately preceding one. Protocol 1.13.0 (M5).
+    PlanRevisions(TaskIdRequest),
     TaskRollback(TaskRollbackRequest),
     TaskPause(TaskIdRequest),
     TaskResume(TaskIdRequest),
@@ -76,6 +84,9 @@ pub enum Response {
     TaskList(TaskListResponse),
     TaskReport(TaskReportResponse),
     TaskPlan(PlanGetResponse),
+    TaskChildren(TaskChildrenResponse),
+    TaskArtifacts(TaskArtifactsResponse),
+    PlanRevisions(PlanRevisionsResponse),
     TaskRollback(TaskRollbackResponse),
     WorkspaceStatus(WorkspaceStatusResponse),
     DoctorRun(DoctorRunResponse),
@@ -124,6 +135,35 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         let back: Request = serde_json::from_str(&json).unwrap();
         assert_eq!(req, back);
+    }
+
+    /// M5, protocol 1.13.0.
+    #[test]
+    fn multi_agent_request_and_response_variants_round_trip() {
+        let req = Request::TaskChildren(TaskIdRequest {
+            task_id: "task_01".into(),
+        });
+        assert_eq!(
+            serde_json::to_value(&req).unwrap()["method"],
+            "task_children"
+        );
+        let back: Request = serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
+        assert_eq!(req, back);
+
+        let resp = Response::TaskArtifacts(TaskArtifactsResponse {
+            artifacts: vec![crate::messages::ArtifactWire {
+                produced_by: "researcher".into(),
+                kind: "research_brief".into(),
+                artifact: serde_json::json!({"summary": "x"}),
+                created_at_ms: 1,
+            }],
+        });
+        let back: Response = serde_json::from_str(&serde_json::to_string(&resp).unwrap()).unwrap();
+        assert_eq!(resp, back);
+
+        let resp = Response::PlanRevisions(PlanRevisionsResponse { revisions: vec![] });
+        let back: Response = serde_json::from_str(&serde_json::to_string(&resp).unwrap()).unwrap();
+        assert_eq!(resp, back);
     }
 
     #[test]

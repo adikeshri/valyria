@@ -359,6 +359,7 @@ impl AgentDriver {
         role: AgentRole,
         artifact: Artifact,
     ) -> Result<()> {
+        let kind = artifact.kind();
         self.plan_store
             .save_artifact(&StoredArtifact {
                 task_id,
@@ -367,7 +368,28 @@ impl AgentDriver {
                 created_at: self.clock.now(),
             })
             .await
-            .map_err(plan_err)
+            .map_err(plan_err)?;
+        // Protocol 1.13.0: `PlanStore` has no `EventBus` of its own (a
+        // layer-5 crate with no event-projection concept), so the
+        // artifact_published event is journaled here, on the task the
+        // artifact belongs to, the same way every other agent-driven
+        // event reaches a client — through `TaskManager::project_events`,
+        // never a parallel emission path.
+        self.tasks
+            .append_journal(
+                task_id,
+                valyria_task::JournalEntryKind::EffectCompleted {
+                    effect_id: valyria_types::EffectId::new(),
+                    step_id: valyria_types::StepId::new(),
+                    outcome_kind: kinds::ARTIFACT_PUBLISHED.into(),
+                    payload: serde_json::json!({
+                        "role": role.as_str(),
+                        "kind": kind.as_str(),
+                    }),
+                },
+            )
+            .await?;
+        Ok(())
     }
 
     /// A bounded Reason/Select/Execute loop for a read-only role

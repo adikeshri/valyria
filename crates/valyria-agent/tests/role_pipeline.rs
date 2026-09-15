@@ -307,6 +307,32 @@ async fn the_full_role_pipeline_runs_end_to_end_and_persists_every_artifact() {
         &changeset_artifact.artifact,
         Artifact::ChangeSet { files_changed, .. } if files_changed.iter().any(|f| f.contains("a.txt"))
     ));
+
+    // Protocol 1.13.0: every one of the five saved artifacts fired its own
+    // `artifact_published` event on the coordinator's stream.
+    let published_kinds: std::collections::HashSet<String> = backing
+        .events
+        .replay_since(valyria_events::Seq::ZERO)
+        .await
+        .unwrap()
+        .iter()
+        .filter(|e| e.kind == valyria_events::EventKind::ArtifactPublished)
+        .filter_map(|e| e.payload.get("kind")?.as_str().map(str::to_string))
+        .collect();
+    assert_eq!(
+        published_kinds,
+        [
+            "research_brief",
+            "plan",
+            "change_set",
+            "verification_report",
+            "review_findings",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect(),
+        "{published_kinds:?}"
+    );
 }
 
 /// A Reviewer that flags a problem must not let the coordinator complete —
