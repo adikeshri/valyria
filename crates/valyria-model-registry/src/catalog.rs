@@ -110,8 +110,17 @@ mod tests {
 
     #[test]
     fn every_embedded_content_hash_is_64_hex() {
+        // Every `EngineKind::LlamaCpp` card is independently verified by a
+        // real blake3 hex digest of the downloaded file. `Mlx` cards carry
+        // a documented sentinel instead (`valyria-model-store`'s
+        // `MLX_LAZY_DOWNLOAD_SENTINEL`) — there is no single file *this*
+        // catalog controls to hash, since `mlx_lm.server` resolves and
+        // caches the weights itself from the repo id in `source_url`.
         let catalog = Catalog::embedded().unwrap();
         for c in catalog.cards() {
+            if c.engine == crate::card::EngineKind::Mlx {
+                continue;
+            }
             assert_eq!(c.content_hash.len(), 64, "{}", c.id);
             assert!(
                 c.content_hash.chars().all(|ch| ch.is_ascii_hexdigit()),

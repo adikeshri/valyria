@@ -112,6 +112,33 @@
       "content_hash": "db03d15627cf6d7e262fa793a7bffc12d276745b1ca37f7899f279d7ac6ab72e",
       "license_name": "MIT",
       "license_url": null
+    },
+    {
+      "id": "qwen2.5-coder-7b-instruct-mlx-4bit",
+      "family": "qwen2.5-coder",
+      "display_name": "Qwen2.5-Coder 7B Instruct (MLX, 4-bit)",
+      "parameters_b": 7.0,
+      "quantization": "q4_0",
+      "context_length": 32768,
+      "file_size_bytes": 4284346255,
+      "recommended_sampling": { "temperature": 0.2, "top_p": 0.9, "max_tokens": null, "stop": [] },
+      "role_suitability": {
+        "primary_coder": 91,
+        "fast_coder": 77,
+        "planner": 69,
+        "reviewer": 73,
+        "summarizer": 67,
+        "autocomplete": 54
+      },
+      "requirement": { "min_ram_bytes": 5500000000, "min_vram_bytes": 5500000000 },
+      "transport_preference": "native",
+      "engine": "mlx",
+      "supports_native_tools": true,
+      "supports_grammar": true,
+      "source_url": "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
+      "content_hash": "mlx-lazy-download",
+      "license_name": "Apache-2.0",
+      "license_url": "https://huggingface.co/mlx-community/Qwen2.5-Coder-7B-Instruct-4bit"
     }
   ]
 }

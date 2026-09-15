@@ -25,7 +25,7 @@ pub mod license;
 pub mod role;
 pub mod select;
 
-pub use card::{ModelCard, Quantization, TransportPreference};
+pub use card::{EngineKind, ModelCard, Quantization, TransportPreference};
 pub use catalog::Catalog;
 pub use error::{RegistryError, Result};
 pub use license::{has_license_text, license_text};

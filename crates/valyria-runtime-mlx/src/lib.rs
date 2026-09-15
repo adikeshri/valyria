@@ -22,8 +22,12 @@ pub mod runtime;
 pub mod server;
 
 pub use error::{MlxError, Result};
-pub use runtime::{LocalModelServer, MlxServerRuntime};
+pub use runtime::MlxServerRuntime;
 pub use server::{MlxServer, MlxServerConfig, DEFAULT_READY_TIMEOUT};
+/// Re-exported for convenience — its canonical home is
+/// `valyria_model::LocalModelServer`, shared with every other
+/// local-engine adapter (`valyria-runtime-llamacpp` included).
+pub use valyria_model::LocalModelServer;
 
 /// Kept for continuity with the crate's original scaffold; the crate is
 /// now implemented.

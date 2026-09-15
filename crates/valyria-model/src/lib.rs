@@ -21,5 +21,5 @@ pub use completion::{Chunk, Completion, FinishReason, TokenUsage};
 pub use error::{ModelError, Result};
 pub use message::{Message, Role, ToolCall, ToolSpec};
 pub use request::GenerateRequest;
-pub use runtime::ModelRuntime;
+pub use runtime::{LocalModelServer, ModelRuntime};
 pub use sampling::SamplingParams;

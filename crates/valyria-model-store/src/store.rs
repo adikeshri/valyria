@@ -13,7 +13,7 @@ use std::io::{BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use valyria_hardware::{fits, Fit, HardwareReport};
-use valyria_model_registry::ModelCard;
+use valyria_model_registry::{EngineKind, ModelCard};
 use valyria_util::{CancellationToken, ContentHash};
 
 use crate::error::{ModelStoreError, Result};
@@ -24,6 +24,16 @@ use crate::probe::Prober;
 /// Download chunk size. Small enough that a cancel is responsive, large
 /// enough that per-request overhead is negligible for multi-GB files.
 const CHUNK_BYTES: u64 = 8 * 1024 * 1024;
+
+/// `Manifest.content_hash` for an `EngineKind::Mlx` card: there is no
+/// single file this store downloaded and hashed, so there is nothing
+/// meaningful for `verify_integrity` to re-check — the actual weights are
+/// a Hugging Face repo snapshot resolved and cached by `mlx_lm.server`
+/// itself on first boot, whose own transfer integrity is HF's concern,
+/// not this store's. Mirrors the same honest-sentinel pattern used by
+/// `crates/valyria-app/tests/local_model_e2e.rs`'s hand-installed test
+/// fixture.
+const MLX_LAZY_DOWNLOAD_SENTINEL: &str = "mlx-lazy-download";
 
 /// Which stage of an install a [`InstallProgress`] update is reporting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -238,95 +248,129 @@ impl ModelStore {
 
         let dir = self.model_dir(&id);
         fs::create_dir_all(&dir)?;
-        let weights_name = weights_filename(&plan.card);
-        let final_path = dir.join(&weights_name);
-        let part_path = dir.join(format!("{weights_name}.part"));
 
-        let head =
-            fetcher
-                .head(&plan.card.source_url)
-                .await
-                .map_err(|e| ModelStoreError::Download {
+        // MLX models are a directory of files (config, tokenizer,
+        // .safetensors) resolved and cached by `mlx_lm.server` itself from
+        // the Hugging Face Hub on first boot — there is no single
+        // downloadable object for this store's byte-range fetch+blake3
+        // pipeline to act on. `source_url` holds the upstream HF repo id
+        // for this engine; it is recorded as `weights_file` verbatim (not
+        // joined under this model's directory — it is a locator, not a
+        // filename) so the boot path can pass it straight through as
+        // `--model <repo-id>`.
+        let (weights_locator, size_bytes, content_hash, probe_target): (
+            String,
+            u64,
+            String,
+            PathBuf,
+        ) = if plan.card.engine == EngineKind::Mlx {
+            progress(InstallProgress {
+                phase: InstallPhase::Verifying,
+                downloaded_bytes: 0,
+                total_bytes: 0,
+            });
+            let repo_id = plan.card.source_url.clone();
+            (
+                repo_id.clone(),
+                0,
+                MLX_LAZY_DOWNLOAD_SENTINEL.to_string(),
+                PathBuf::from(repo_id),
+            )
+        } else {
+            let weights_name = weights_filename(&plan.card);
+            let final_path = dir.join(&weights_name);
+            let part_path = dir.join(format!("{weights_name}.part"));
+
+            let head = fetcher.head(&plan.card.source_url).await.map_err(|e| {
+                ModelStoreError::Download {
                     id: id.clone(),
                     detail: format!("HEAD failed: {e}"),
-                })?;
+                }
+            })?;
 
-        // Resume from an existing `.part`, unless the server can't range or
-        // the partial is somehow already larger than the object.
-        let mut offset = match fs::metadata(&part_path) {
-            Ok(m) if head.supports_ranges && m.len() <= head.len => m.len(),
-            Ok(_) => {
-                fs::remove_file(&part_path)?;
-                0
-            }
-            Err(_) => 0,
-        };
+            // Resume from an existing `.part`, unless the server can't
+            // range or the partial is somehow already larger than the
+            // object.
+            let mut offset = match fs::metadata(&part_path) {
+                Ok(m) if head.supports_ranges && m.len() <= head.len => m.len(),
+                Ok(_) => {
+                    fs::remove_file(&part_path)?;
+                    0
+                }
+                Err(_) => 0,
+            };
 
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(offset == 0)
-            .open(&part_path)?;
-        file.seek(SeekFrom::Start(offset))?;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(offset == 0)
+                .open(&part_path)?;
+            file.seek(SeekFrom::Start(offset))?;
 
-        while offset < head.len {
-            if cancel.is_cancelled() {
-                // Leave the `.part` behind so a retry resumes.
-                return Err(ModelStoreError::Cancelled { id });
-            }
-            let end = (offset + CHUNK_BYTES).min(head.len);
-            let bytes = fetcher
-                .get_range(&plan.card.source_url, offset, end)
-                .await
-                .map_err(|e| ModelStoreError::Download {
-                    id: id.clone(),
-                    detail: e.to_string(),
-                })?;
-            if bytes.is_empty() {
-                return Err(ModelStoreError::Download {
-                    id,
-                    detail: format!("server returned 0 bytes at offset {offset} of {}", head.len),
+            while offset < head.len {
+                if cancel.is_cancelled() {
+                    // Leave the `.part` behind so a retry resumes.
+                    return Err(ModelStoreError::Cancelled { id });
+                }
+                let end = (offset + CHUNK_BYTES).min(head.len);
+                let bytes = fetcher
+                    .get_range(&plan.card.source_url, offset, end)
+                    .await
+                    .map_err(|e| ModelStoreError::Download {
+                        id: id.clone(),
+                        detail: e.to_string(),
+                    })?;
+                if bytes.is_empty() {
+                    return Err(ModelStoreError::Download {
+                        id,
+                        detail: format!(
+                            "server returned 0 bytes at offset {offset} of {}",
+                            head.len
+                        ),
+                    });
+                }
+                file.write_all(&bytes)?;
+                offset += bytes.len() as u64;
+                progress(InstallProgress {
+                    phase: InstallPhase::Downloading,
+                    downloaded_bytes: offset,
+                    total_bytes: head.len,
                 });
             }
-            file.write_all(&bytes)?;
-            offset += bytes.len() as u64;
+            file.flush()?;
+            drop(file);
+
+            // Whole-file integrity check (§4.21). A mismatch is a hard
+            // failure and the bytes are deleted — no broken install is
+            // left on disk.
             progress(InstallProgress {
-                phase: InstallPhase::Downloading,
-                downloaded_bytes: offset,
+                phase: InstallPhase::Verifying,
+                downloaded_bytes: head.len,
                 total_bytes: head.len,
             });
-        }
-        file.flush()?;
-        drop(file);
+            let actual = ContentHash::of_reader(BufReader::new(File::open(&part_path)?))?.to_hex();
+            if actual != plan.card.content_hash {
+                let _ = fs::remove_file(&part_path);
+                return Err(ModelStoreError::IntegrityMismatch {
+                    id,
+                    expected: plan.card.content_hash.clone(),
+                    actual,
+                });
+            }
 
-        // Whole-file integrity check (§4.21). A mismatch is a hard failure
-        // and the bytes are deleted — no broken install is left on disk.
-        progress(InstallProgress {
-            phase: InstallPhase::Verifying,
-            downloaded_bytes: head.len,
-            total_bytes: head.len,
-        });
-        let actual = ContentHash::of_reader(BufReader::new(File::open(&part_path)?))?.to_hex();
-        if actual != plan.card.content_hash {
-            let _ = fs::remove_file(&part_path);
-            return Err(ModelStoreError::IntegrityMismatch {
-                id,
-                expected: plan.card.content_hash.clone(),
-                actual,
-            });
-        }
-
-        fs::rename(&part_path, &final_path)?;
-        let size_bytes = fs::metadata(&final_path)?.len();
+            fs::rename(&part_path, &final_path)?;
+            let size_bytes = fs::metadata(&final_path)?.len();
+            (weights_name, size_bytes, actual, final_path)
+        };
 
         progress(InstallProgress {
             phase: InstallPhase::Probing,
-            downloaded_bytes: head.len,
-            total_bytes: head.len,
+            downloaded_bytes: size_bytes,
+            total_bytes: size_bytes,
         });
         let probe =
             prober
-                .probe(&final_path, &plan.card)
+                .probe(&probe_target, &plan.card)
                 .await
                 .map_err(|e| ModelStoreError::Probe {
                     id: id.clone(),
@@ -341,9 +385,9 @@ impl ModelStore {
         }
 
         let manifest = Manifest {
-            weights_file: weights_name,
+            weights_file: weights_locator,
             size_bytes,
-            content_hash: actual,
+            content_hash,
             installed_at_ms: now_ms(),
             license_accepted_at_ms: plan.accepted_license_at_ms,
             probe: Some(probe),
@@ -361,6 +405,11 @@ impl ModelStore {
     /// recorded — the `doctor`-style check for silent corruption.
     pub fn verify_integrity(&self, id: &str) -> Result<()> {
         let manifest = self.manifest(id)?;
+        if manifest.card.engine == EngineKind::Mlx {
+            // Nothing on disk under this store for an MLX model to
+            // re-hash — see `MLX_LAZY_DOWNLOAD_SENTINEL`'s doc comment.
+            return Ok(());
+        }
         let weights = self.model_dir(id).join(&manifest.weights_file);
         let actual = ContentHash::of_reader(BufReader::new(File::open(&weights)?))?.to_hex();
         if actual != manifest.content_hash {

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use valyria_hardware::report::{CpuInfo, DiskInfo, HardwareReport};
 use valyria_hardware::{Fit, ModelRequirement};
 use valyria_model::SamplingParams;
-use valyria_model_registry::{ModelCard, ModelRole, Quantization, TransportPreference};
+use valyria_model_registry::{EngineKind, ModelCard, ModelRole, Quantization, TransportPreference};
 use valyria_model_store::{
     InMemoryFetcher, InstalledModelStore, ModelStore, ModelStoreError, NullProber, MIGRATIONS,
 };
@@ -42,6 +42,7 @@ fn card_with_hash(hash: String, size: u64) -> ModelCard {
             min_vram_bytes: None,
         },
         transport_preference: TransportPreference::Native,
+        engine: EngineKind::LlamaCpp,
         supports_native_tools: true,
         supports_grammar: true,
         source_url: URL.into(),

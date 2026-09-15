@@ -15,9 +15,9 @@ use valyria_events::{EventBus, EventKind, NewEvent};
 use valyria_index::IndexStore;
 use valyria_ledger::Ledger;
 use valyria_memory::{MemoryStore, RetrievalRequest};
-use valyria_model::{GenerateRequest, Message, ModelRuntime, SamplingParams};
+use valyria_model::{GenerateRequest, LocalModelServer, Message, ModelRuntime, SamplingParams};
 use valyria_model_registry::{
-    score_card_for_role, CardScore, Catalog, ModelCard, ModelRole, RoleBinding,
+    score_card_for_role, CardScore, Catalog, EngineKind, ModelCard, ModelRole, RoleBinding,
 };
 use valyria_model_store::{HttpFetcher, ModelStore, NullProber};
 use valyria_orchestrator::{
@@ -26,7 +26,8 @@ use valyria_orchestrator::{
 use valyria_permissions::PermissionEngine;
 use valyria_plan::{PlanRevision, PlanStore, RollbackError, RollbackReport, StoredArtifact};
 use valyria_runtime_fake::{FakeModelRuntime, Scenario};
-use valyria_runtime_llamacpp::{LlamaServerRuntime, LocalModelServer};
+use valyria_runtime_llamacpp::LlamaServerRuntime;
+use valyria_runtime_mlx::MlxServerRuntime;
 use valyria_sandbox::{detect_platform_launcher, ProcessLauncher, SandboxProfile};
 use valyria_store::Store;
 use valyria_task::{Budget, ControlSignal, Task, TaskManager};
@@ -1452,12 +1453,8 @@ impl Runtime {
                 Err(AppError::ModelServerStart {
                     id: id.to_string(),
                     role: role.as_str().to_string(),
-                    source: match e {
-                        AppError::LlamaCpp(inner) => inner,
-                        other => valyria_runtime_llamacpp::LlamaError::EngineUnavailable(
-                            other.to_string(),
-                        ),
-                    },
+                    retryable: e.retryable(),
+                    message: e.to_string(),
                 })
             }
         }
@@ -1593,6 +1590,107 @@ struct ServerProber {
     events: Arc<EventBus>,
 }
 
+fn unverified_probe_result(card: &ModelCard) -> valyria_model_store::ProbeResult {
+    valyria_model_store::ProbeResult {
+        loads: true,
+        working_transport: card.transport_preference,
+        tokens_per_sec: 0.0,
+        measured_ram_bytes: card.requirement.min_ram_bytes,
+    }
+}
+
+fn to_probe_err(id: &str, detail: String) -> valyria_model_store::ModelStoreError {
+    valyria_model_store::ModelStoreError::Probe {
+        id: id.to_string(),
+        detail,
+    }
+}
+
+/// The engine-agnostic half of a post-install probe, shared by every
+/// `LocalModelServer` (`LlamaServerRuntime`, `MlxServerRuntime`, ...):
+/// skip the chat round trip for a card with no chat-capable role (an
+/// embedder/reranker never answers `/v1/chat/completions` — asking would
+/// just hang, found live against `nomic-embed-text-v1.5`), otherwise send
+/// one bounded trivial prompt and measure it. Always shuts the server
+/// down before returning, success or failure.
+///
+/// `generate_timeout` is a caller-supplied bound rather than a shared
+/// constant because it means two very different things per engine.
+/// Confirmed live against a real, cold (never-before-fetched) `mlx_lm.
+/// server`: its `/health` answers 200 as soon as the HTTP listener is up
+/// — *not* once the model has actually finished downloading and
+/// loading — so for a fresh MLX install the real wait happens inside
+/// this generate call itself (the server queues the request until the
+/// model is ready), observed taking several minutes for a multi-GB
+/// model on a real network. For llama.cpp the weights are already local
+/// disk by the time this runs (`ModelStore` downloaded them first), so a
+/// short bound is the correct defense-in-depth there.
+async fn run_probe_generate(
+    rt: &dyn LocalModelServer,
+    card: &ModelCard,
+    generate_timeout: Duration,
+) -> valyria_model_store::Result<valyria_model_store::ProbeResult> {
+    let chat_capable = card
+        .role_suitability
+        .keys()
+        .any(|r| !matches!(r, ModelRole::Embedder | ModelRole::Reranker));
+    if !chat_capable {
+        rt.shutdown().await;
+        return Ok(unverified_probe_result(card));
+    }
+
+    let req = GenerateRequest::new(vec![Message::user("Reply with one short word.")])
+        .with_sampling(SamplingParams {
+            temperature: 0.0,
+            top_p: 1.0,
+            max_tokens: Some(8),
+            stop: Vec::new(),
+        });
+    let started = std::time::Instant::now();
+    let result =
+        tokio::time::timeout(generate_timeout, rt.generate(req, CancellationToken::new())).await;
+    // For a cold MLX install this `elapsed` includes the one-time
+    // download+load wait, not just generation — so `tokens_per_sec`
+    // below is a real but pessimistic lower bound for that case, not a
+    // steady-state throughput figure. Left as-is rather than adding a
+    // separate warm-up call: it is an honest measurement of what this
+    // particular call actually took, and every later boot of the same
+    // model is fast (see `MLX_PROBE_READY_TIMEOUT`'s doc comment).
+    let elapsed = started.elapsed();
+    rt.shutdown().await;
+
+    let completion = match result {
+        Ok(inner) => inner.map_err(|e| to_probe_err(&card.id, e.to_string()))?,
+        Err(_) => {
+            return Err(to_probe_err(
+                &card.id,
+                format!(
+                    "model did not answer a trivial prompt within {}s",
+                    generate_timeout.as_secs()
+                ),
+            ))
+        }
+    };
+    if completion.text.trim().is_empty() && completion.tool_calls.is_empty() {
+        return Err(to_probe_err(
+            &card.id,
+            "model started but produced no output for a trivial prompt".into(),
+        ));
+    }
+    let tokens_per_sec = if elapsed.as_secs_f32() > 0.0 {
+        completion.usage.completion_tokens as f32 / elapsed.as_secs_f32()
+    } else {
+        0.0
+    };
+
+    Ok(valyria_model_store::ProbeResult {
+        loads: true,
+        working_transport: card.transport_preference,
+        tokens_per_sec,
+        measured_ram_bytes: card.requirement.min_ram_bytes,
+    })
+}
+
 #[async_trait::async_trait]
 impl valyria_model_store::Prober for ServerProber {
     async fn probe(
@@ -1600,104 +1698,70 @@ impl valyria_model_store::Prober for ServerProber {
         weights: &std::path::Path,
         card: &ModelCard,
     ) -> valyria_model_store::Result<valyria_model_store::ProbeResult> {
-        let binary = match resolve_or_install_engine(&self.global_root, &self.events).await {
-            Ok(bin) => bin,
-            Err(_) => {
-                return Ok(valyria_model_store::ProbeResult {
-                    loads: true,
-                    working_transport: card.transport_preference,
-                    tokens_per_sec: 0.0,
-                    measured_ram_bytes: card.requirement.min_ram_bytes,
-                });
+        match card.engine {
+            EngineKind::LlamaCpp => {
+                let binary = match resolve_or_install_engine(&self.global_root, &self.events).await
+                {
+                    Ok(bin) => bin,
+                    Err(_) => return Ok(unverified_probe_result(card)),
+                };
+                let log_path = self
+                    .global_root
+                    .join("logs")
+                    .join(format!("llama-probe-{}.log", card.id));
+                let rt = LlamaServerRuntime::start_with_timeout(
+                    binary,
+                    weights.to_path_buf(),
+                    card,
+                    log_path,
+                    Duration::from_secs(180),
+                )
+                .await
+                .map_err(|e| to_probe_err(&card.id, e.to_string()))?;
+                run_probe_generate(&rt, card, Duration::from_secs(60)).await
             }
-        };
-
-        let log_path = self
-            .global_root
-            .join("logs")
-            .join(format!("llama-probe-{}.log", card.id));
-        let to_probe_err = |detail: String| valyria_model_store::ModelStoreError::Probe {
-            id: card.id.clone(),
-            detail,
-        };
-
-        let rt = LlamaServerRuntime::start_with_timeout(
-            binary,
-            weights.to_path_buf(),
-            card,
-            log_path,
-            Duration::from_secs(180),
-        )
-        .await
-        .map_err(|e| to_probe_err(e.to_string()))?;
-
-        // Embedder/reranker models have no chat-completion path at all —
-        // llama-server never answers a `/v1/chat/completions` request for
-        // one, so asking would just hang (found live: nomic-embed-text-v1.5
-        // sat past 200s). The server having loaded and answered `/health`
-        // (above) is already the meaningful integrity signal for those; a
-        // chat probe is only appropriate for a card that actually declares
-        // a chat-capable role.
-        let chat_capable = card
-            .role_suitability
-            .keys()
-            .any(|r| !matches!(r, ModelRole::Embedder | ModelRole::Reranker));
-        if !chat_capable {
-            rt.shutdown().await;
-            return Ok(valyria_model_store::ProbeResult {
-                loads: true,
-                working_transport: card.transport_preference,
-                tokens_per_sec: 0.0,
-                measured_ram_bytes: card.requirement.min_ram_bytes,
-            });
-        }
-
-        // Defense in depth for chat-capable models too: even a model that
-        // *should* answer must never be able to hang the install forever —
-        // bound the single probe generation.
-        const PROBE_GENERATE_TIMEOUT: Duration = Duration::from_secs(60);
-        let req = GenerateRequest::new(vec![Message::user("Reply with one short word.")])
-            .with_sampling(SamplingParams {
-                temperature: 0.0,
-                top_p: 1.0,
-                max_tokens: Some(8),
-                stop: Vec::new(),
-            });
-        let started = std::time::Instant::now();
-        let result = tokio::time::timeout(
-            PROBE_GENERATE_TIMEOUT,
-            rt.generate(req, CancellationToken::new()),
-        )
-        .await;
-        let elapsed = started.elapsed();
-        rt.shutdown().await;
-
-        let completion = match result {
-            Ok(inner) => inner.map_err(|e| to_probe_err(e.to_string()))?,
-            Err(_) => {
-                return Err(to_probe_err(format!(
-                    "model did not answer a trivial prompt within {}s",
-                    PROBE_GENERATE_TIMEOUT.as_secs()
-                )))
+            EngineKind::Mlx => {
+                let python =
+                    match resolve_or_install_mlx_engine(&self.global_root, &self.events).await {
+                        Ok(p) => p,
+                        Err(_) => return Ok(unverified_probe_result(card)),
+                    };
+                let log_path = self
+                    .global_root
+                    .join("logs")
+                    .join(format!("mlx-probe-{}.log", card.id));
+                // Unlike the llama.cpp branch above, this is the *first*
+                // time this model's weights are fetched at all. Confirmed
+                // live against a real, cold `mlx_lm.server`: its `/health`
+                // answers 200 as soon as the HTTP listener is up, well
+                // *before* the multi-GB Hugging Face download it still
+                // has to do finishes — so `await_ready` below returns
+                // quickly regardless, and the real wait happens inside
+                // the *generate* call afterward, which the server queues
+                // until the model actually finishes downloading and
+                // loading (observed: several minutes for a ~4.3 GB model
+                // on a real network, real `/v1/chat/completions` request
+                // held open the whole time rather than erroring). Both
+                // timeouts below are generously sized for that reason —
+                // `await_ready`'s mainly as defense in depth against a
+                // genuinely stuck process. Every later boot of the same
+                // model (`model_activate`, restarts) hits `mlx_lm`/
+                // `huggingface_hub`'s own on-disk cache and is fast; this
+                // generous budget is install-time-only.
+                const MLX_PROBE_READY_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+                const MLX_PROBE_GENERATE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+                let rt = MlxServerRuntime::start_with_timeout(
+                    python,
+                    weights.to_path_buf(),
+                    card,
+                    log_path,
+                    MLX_PROBE_READY_TIMEOUT,
+                )
+                .await
+                .map_err(|e| to_probe_err(&card.id, e.to_string()))?;
+                run_probe_generate(&rt, card, MLX_PROBE_GENERATE_TIMEOUT).await
             }
-        };
-        if completion.text.trim().is_empty() && completion.tool_calls.is_empty() {
-            return Err(to_probe_err(
-                "model started but produced no output for a trivial prompt".into(),
-            ));
         }
-        let tokens_per_sec = if elapsed.as_secs_f32() > 0.0 {
-            completion.usage.completion_tokens as f32 / elapsed.as_secs_f32()
-        } else {
-            0.0
-        };
-
-        Ok(valyria_model_store::ProbeResult {
-            loads: true,
-            working_transport: card.transport_preference,
-            tokens_per_sec,
-            measured_ram_bytes: card.requirement.min_ram_bytes,
-        })
     }
 }
 
@@ -1856,6 +1920,71 @@ async fn resolve_or_install_engine(
     }
 }
 
+/// The MLX sibling of [`resolve_or_install_engine`]: resolve (or, the
+/// first time, provision) the `mlx-lm` venv under `~/.valyria/engines/
+/// mlx/`, emitting the same `engine_install_progress`/`_completed`/
+/// `_failed` events `llama.cpp` does. Provisioning a Python venv is a
+/// handful of discrete blocking steps (`python -m venv`, two `pip`
+/// invocations, an import check), not a byte-tracked download, so unlike
+/// the llama.cpp path there is exactly one `engine_install_progress`
+/// event (phase `"provisioning"`, no meaningful byte counts) rather than
+/// a stream of them.
+async fn resolve_or_install_mlx_engine(
+    global_root: &std::path::Path,
+    events: &Arc<EventBus>,
+) -> Result<PathBuf> {
+    let store = valyria_engine_store::MlxVenvStore::new(global_root);
+    let version = valyria_engine_store::MLX_LM_VERSION;
+    if let Some(python) = store.resolve(version) {
+        return Ok(python);
+    }
+
+    let base_python = valyria_engine_store::find_system_python().ok_or_else(|| {
+        AppError::Mlx(valyria_runtime_mlx::MlxError::EngineUnavailable(
+            "no system python3 found on PATH to build the mlx venv from".into(),
+        ))
+    })?;
+
+    let _ = events
+        .append(NewEvent::new(
+            EventKind::EngineInstallProgress,
+            serde_json::json!({
+                "component": "mlx-lm",
+                "version": version,
+                "phase": "provisioning",
+                "downloaded_bytes": 0,
+                "total_bytes": 0,
+            }),
+        ))
+        .await;
+
+    match store.provision(&base_python, version).await {
+        Ok(python) => {
+            let _ = events
+                .append(NewEvent::new(
+                    EventKind::EngineInstallCompleted,
+                    serde_json::json!({ "component": "mlx-lm", "version": version }),
+                ))
+                .await;
+            Ok(python)
+        }
+        Err(e) => {
+            let _ = events
+                .append(NewEvent::new(
+                    EventKind::EngineInstallFailed,
+                    serde_json::json!({
+                        "component": "mlx-lm",
+                        "version": version,
+                        "code": e.code(),
+                        "message": e.to_string(),
+                    }),
+                ))
+                .await;
+            Err(AppError::EngineStore(e))
+        }
+    }
+}
+
 /// `Runtime::open`'s M2 bootstrap: build (or catch up) the file/symbol
 /// index and its import/call graph, then wrap it as a
 /// `LiveRetriever::Search` the driver can query every turn. Mirrors
@@ -1925,16 +2054,35 @@ async fn boot_model_server(
         .get(model_id)
         .ok_or_else(|| AppError::Repo(format!("no catalog model `{model_id}`")))?
         .clone();
-    let weights = model_store.weights_path(model_id)?;
-    let binary = resolve_or_install_engine(global_root, events).await?;
-    let log_path = global_root
-        .join("logs")
-        .join(format!("llama-{model_id}.log"));
 
-    let rt = LlamaServerRuntime::start(binary, weights, &card, log_path)
-        .await
-        .map_err(AppError::LlamaCpp)?;
-    Ok(Arc::new(rt))
+    match card.engine {
+        EngineKind::LlamaCpp => {
+            let weights = model_store.weights_path(model_id)?;
+            let binary = resolve_or_install_engine(global_root, events).await?;
+            let log_path = global_root
+                .join("logs")
+                .join(format!("llama-{model_id}.log"));
+            let rt = LlamaServerRuntime::start(binary, weights, &card, log_path)
+                .await
+                .map_err(AppError::LlamaCpp)?;
+            Ok(Arc::new(rt) as Arc<dyn LocalModelServer>)
+        }
+        EngineKind::Mlx => {
+            // `weights_file` here is the upstream HF repo id, not a path
+            // under this model's on-disk directory — see `EngineKind`'s
+            // and `MLX_LAZY_DOWNLOAD_SENTINEL`'s doc comments. Read
+            // straight from the manifest rather than through
+            // `ModelStore::weights_path`, which would (wrongly) resolve
+            // it against the model's local directory.
+            let repo_id = PathBuf::from(model_store.manifest(model_id)?.weights_file);
+            let python = resolve_or_install_mlx_engine(global_root, events).await?;
+            let log_path = global_root.join("logs").join(format!("mlx-{model_id}.log"));
+            let rt = MlxServerRuntime::start(python, repo_id, &card, log_path)
+                .await
+                .map_err(AppError::Mlx)?;
+            Ok(Arc::new(rt) as Arc<dyn LocalModelServer>)
+        }
+    }
 }
 
 /// The background half of booting a model at `Runtime::open` time:

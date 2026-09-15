@@ -19,8 +19,12 @@ pub mod runtime;
 pub mod server;
 
 pub use error::{LlamaError, Result};
-pub use runtime::{LlamaServerRuntime, LocalModelServer};
+pub use runtime::LlamaServerRuntime;
 pub use server::{LlamaServer, LlamaServerConfig, DEFAULT_READY_TIMEOUT};
+/// Re-exported for callers that used to import this trait from here —
+/// its canonical home is now `valyria_model::LocalModelServer`, shared
+/// with every other local-engine adapter (see that crate's doc comment).
+pub use valyria_model::LocalModelServer;
 
 /// Kept for backwards compatibility with the scaffold; the crate is now
 /// implemented.

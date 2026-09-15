@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use futures::stream::BoxStream;
 use valyria_model::{
-    Capabilities, Chunk, Completion, GenerateRequest, Health, ModelError, ModelRuntime,
+    Capabilities, Chunk, Completion, GenerateRequest, Health, LocalModelServer, ModelError,
+    ModelRuntime,
 };
 use valyria_model_registry::ModelCard;
 use valyria_runtime_openai_compat::{HttpTransport, OpenAiCompatRuntime, ReqwestTransport};
@@ -18,22 +19,6 @@ use valyria_util::CancellationToken;
 
 use crate::error::Result;
 use crate::server::{LlamaServer, LlamaServerConfig, DEFAULT_READY_TIMEOUT};
-
-/// A locally-spawned model server: it can serve `ModelRuntime` calls and
-/// it can be told to stop. `ModelRuntimeRegistry` (in `valyria-app`) is
-/// the only thing meant to call `shutdown` — the orchestrator only ever
-/// sees the `ModelRuntime` half.
-#[async_trait::async_trait]
-pub trait LocalModelServer: ModelRuntime {
-    /// Graceful stop: `SIGTERM`, drain, hard-kill after a bounded
-    /// timeout. Idempotent.
-    async fn shutdown(&self);
-    fn model_id(&self) -> &str;
-    /// The loopback port it's serving on — carried on `model_server_ready`
-    /// so the app can show it (and, one day, dial it directly for a
-    /// health chip).
-    fn port(&self) -> u16;
-}
 
 pub struct LlamaServerRuntime {
     server: LlamaServer,

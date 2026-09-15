@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use valyria_hardware::ModelRequirement;
 use valyria_model::{GenerateRequest, Message, ModelRuntime, SamplingParams};
-use valyria_model_registry::{ModelCard, Quantization, TransportPreference};
+use valyria_model_registry::{EngineKind, ModelCard, Quantization, TransportPreference};
 use valyria_runtime_llamacpp::LlamaServerRuntime;
 use valyria_util::CancellationToken;
 
@@ -43,6 +43,7 @@ fn test_card(weights: &PathBuf) -> ModelCard {
             min_vram_bytes: None,
         },
         transport_preference: TransportPreference::Native,
+        engine: EngineKind::LlamaCpp,
         supports_native_tools: true,
         supports_grammar: false,
         source_url: "test://local".into(),

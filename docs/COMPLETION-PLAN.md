@@ -1007,18 +1007,102 @@ recorded here since the plan text above still described it as open work)**
   present on `PATH` — `find_system_python`'s newest-first search order
   is therefore load-bearing, not cosmetic, and is documented as such.
 
-  Not yet done, and explicitly out of scope for this chunk: wiring
-  `valyria-app::Runtime` to actually *choose* this adapter for a given
-  catalog model. `ModelCard` has no "which local engine" field yet (the
-  existing `transport_preference` is about tool-call transport, not
-  engine choice), and `boot_model_server`/`ServerProber`/`AppError::
-  ModelServerStart` are all still hard-typed to `LlamaServerRuntime`/
-  `LlamaError` specifically rather than a shared local-engine
-  abstraction. Closing that gap is a distinct, real design task (an
-  engine-kind field on `ModelCard`, a matching branch in the boot path,
-  and either a shared error type or a second `AppError` variant) — sized
-  similarly to the ModelPool-wiring chunk above, not a small addition to
-  this one.
+- `valyria-app::Runtime` wired to actually *choose* the MLX adapter for a
+  catalog model, closing the gap the entry above originally left open.
+  `ModelCard` gained an `engine: EngineKind` field (`LlamaCpp` default via
+  `#[serde(default)]`, so every pre-existing catalog entry and test
+  fixture needed no migration); `LocalModelServer` (previously duplicated
+  verbatim between the llama.cpp and MLX crates — two nominally distinct
+  traits with an identical shape, not interchangeable in Rust despite
+  that) now lives once in `valyria-model` and both adapters implement the
+  shared trait, so `boot_model_server`/`ServerProber`/
+  `ModelRuntimeRegistry` all hold a single `Arc<dyn LocalModelServer>`
+  regardless of which engine is actually running. `AppError::
+  ModelServerStart` no longer hard-types its `source` to `LlamaError`
+  specifically — it carries a formatted message and a precomputed
+  `retryable` bool instead, so one variant covers every engine.
+
+  `ModelStore::install_with_progress` gained an `EngineKind::Mlx` branch:
+  since an MLX model is a directory of files resolved and cached by
+  `mlx_lm.server` itself from the Hugging Face Hub on first boot (not a
+  single downloadable object), it skips this store's byte-range
+  fetch+blake3 pipeline entirely for such a card and records the repo id
+  (`card.source_url`) as the manifest's `weights_file` verbatim — a
+  locator, not an on-disk filename, documented as such everywhere it's
+  read. `verify_integrity` is a no-op for these (nothing on disk *here*
+  to re-hash; HF's own transfer is the integrity boundary, exactly like
+  `MLX_LAZY_DOWNLOAD_SENTINEL`'s doc comment says).
+
+  A real catalog entry was added and independently checked against the
+  live repo, not invented: `qwen2.5-coder-7b-instruct-mlx-4bit` →
+  `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit` (confirmed via the HF
+  API to exist, be Apache-2.0, and have the expected MLX file layout;
+  `file_size_bytes` is the real HEAD content-length of its main
+  `.safetensors` file, documented as approximate since the actual
+  transfer isn't independently re-verified by this store). A new
+  `crates/valyria-app/tests/local_mlx_e2e.rs`, `#[ignore]`d exactly like
+  `local_model_e2e.rs`, drives the real public `Runtime::model_install` →
+  `model_activate` → task → `model_remove` sequence against this entry —
+  unlike the llama.cpp test, nothing is hand-seeded, since there is no
+  file to seed; it exercises the exact path a real user hits.
+
+  Proven in this chunk: the whole workspace (`cargo test --workspace`,
+  125 test binaries) stays green, `cargo clippy --workspace --all-targets
+  -- -D warnings` and `cargo fmt --all -- --check` are both clean, and
+  `xtask release-gates` (layering, protocol-schema, bench, acceptance-doc)
+  passes. `local_mlx_e2e.rs` itself was run for real — genuinely, not
+  simulated — end to end: `model_install` (a real cold `mlx-lm` venv
+  provision plus a real ~4.3 GB Hugging Face download and load), `model_
+  activate`, a real task reaching `Completed` through the real MLX server,
+  `model_remove`, and a post-removal task correctly failing fast against
+  `NoModelRuntime`. That run — not a smaller stand-in — is what surfaced
+  two further real bugs, both fixed here rather than merely noted:
+
+  1. **Install-time probe timeouts were far too short for a cold MLX
+     model.** `ServerProber`'s original `Duration::from_secs(180)` (fine
+     for llama.cpp, whose weights are already local disk by probe time)
+     left an MLX probe with no way to survive a multi-GB first-time
+     download. Confirmed live that the real failure mode is subtler than
+     "readiness times out": `mlx_lm.server`'s `/health` answers 200 as
+     soon as the HTTP listener is up, *before* the model has actually
+     been fetched or loaded — so `await_ready` returns fast regardless,
+     and the real wait (observed: several minutes for this catalog
+     entry) happens inside the first `/v1/chat/completions` call itself,
+     which the server queues until loading finishes. Fixed with two
+     install-time-only constants in `ServerProber`'s Mlx branch —
+     `MLX_PROBE_READY_TIMEOUT` and `MLX_PROBE_GENERATE_TIMEOUT`, both 30
+     minutes — and `run_probe_generate` now takes its generate-timeout as
+     a parameter (60s for llama.cpp, unchanged) instead of a single
+     shared constant, since the two engines' actual worst cases are
+     nothing alike.
+  2. **A real, previously-invisible protocol mismatch**:
+     `MlxServerRuntime` was sending valyria's own catalog id (e.g.
+     `"qwen2.5-coder-7b-instruct-mlx-4bit"`) as the wire `"model"` field
+     on every request. `llama-server` ignores that field entirely, so
+     this never mattered for the llama.cpp adapter and the mismatch was
+     invisible until tested against the real thing. `mlx_lm.server`
+     does not ignore it: it reads the request body's own `"model"` field
+     and, on any value other than the one it was started with, tries to
+     *load a different model by that name* — treating valyria's catalog
+     id as if it were a fresh Hugging Face repo id, which 404s. Fixed by
+     sending the same string the process was actually started with (the
+     repo id / model directory) as the wire model name, while
+     `LocalModelServer::model_id()` continues to report the catalog id
+     for everything else (events, `model_remove`, …) — the two identifiers
+     now serve their own purposes rather than being conflated.
+
+  A pre-existing, unrelated test fragility was also found (not fixed
+  here — out of scope for this chunk, spun off separately):
+  `crates/valyria-app/tests/runtime.rs`'s `an_unactivated_role_gets_a_
+  best_effort_auto_derived_model` calls the real, unmocked
+  `valyria_hardware::probe()` and depends on ambient available RAM
+  comfortably exceeding its fixture model's declared 2.5 GB requirement.
+  On this real, loaded development machine, available RAM was directly
+  observed dipping to ~1.7–2.6 GB, right at that threshold, making
+  `RoleBinding::derive` correctly (and safely) refuse to auto-bind
+  anything — the auto-derivation logic itself behaved exactly right; the
+  test's dependence on ambient real memory rather than a fixed/mocked
+  hardware report is what's fragile.
 
 **Deliberately deferred, with reasons**
 
@@ -1053,13 +1137,14 @@ recorded here since the plan text above still described it as open work)**
 - ✅ Role bindings auto-derive for every unactivated role from installed
   models, scored against real measured hardware — proven end to end, not
   mocked.
-- Deferred: the seeded-bug suite completing on three real adapters
-  (llama.cpp already does via the existing `local_model_e2e.rs`
-  end-to-end test; the MLX adapter itself now exists and was proven for
-  real at the crate level, but `valyria-app::Runtime` has no way yet to
-  boot a model *through* it — see the MLX entry above — and an
-  openai-compat endpoint doesn't exist yet either) — needs that app
-  wiring and endpoint support above first.
+- ✅ MLX joins llama.cpp as a real, `valyria-app`-wired, end-to-end-proven
+  local adapter — `local_mlx_e2e.rs` (real `model_install` → `model_
+  activate` → task → `model_remove`) passes for real, not mocked; see the
+  MLX entry above for what that run found and fixed.
+- Deferred: the seeded-bug suite completing on *three* real adapters —
+  llama.cpp and MLX both do now; an openai-compat endpoint adapter
+  doesn't exist yet (`model_endpoint_add/remove/list`, deferred above) to
+  be the third.
 
 ---
 

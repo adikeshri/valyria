@@ -40,16 +40,21 @@ pub enum AppError {
     EngineStore(#[from] valyria_engine_store::EngineStoreError),
     #[error("llama.cpp runtime error: {0}")]
     LlamaCpp(#[from] valyria_runtime_llamacpp::LlamaError),
+    #[error("mlx runtime error: {0}")]
+    Mlx(#[from] valyria_runtime_mlx::MlxError),
     /// A model server failed to start on an explicit `model_activate` (as
     /// opposed to the background boot at `Runtime::open`, which only
     /// emits `model_server_failed` and does not surface a call error).
-    /// Kept distinct from a bare `#[from] LlamaError` so the message names
-    /// which model/role was being activated.
-    #[error("could not start a server for model {id:?} ({role}): {source}")]
+    /// Carries a formatted message and a precomputed `retryable` rather
+    /// than a concrete engine error type (`LlamaError`, `MlxError`, ...)
+    /// so this one variant works for every local engine, not just
+    /// whichever one existed when it was written.
+    #[error("could not start a server for model {id:?} ({role}): {message}")]
     ModelServerStart {
         id: String,
         role: String,
-        source: valyria_runtime_llamacpp::LlamaError,
+        message: String,
+        retryable: bool,
     },
     #[error("invalid task id `{0}`")]
     InvalidTaskId(String),
@@ -101,6 +106,7 @@ impl ErrorCode for AppError {
             AppError::ModelStore(e) => e.code(),
             AppError::EngineStore(e) => e.code(),
             AppError::LlamaCpp(e) => e.code(),
+            AppError::Mlx(e) => e.code(),
             AppError::ModelServerStart { .. } => "model.server_start_failed",
             AppError::InvalidTaskId(_) => "app.invalid_task_id",
             AppError::UnknownPurgeScope(_) => "app.unknown_purge_scope",
@@ -134,7 +140,8 @@ impl ErrorCode for AppError {
             AppError::ModelStore(e) => e.retryable(),
             AppError::EngineStore(e) => e.retryable(),
             AppError::LlamaCpp(e) => e.retryable(),
-            AppError::ModelServerStart { source, .. } => source.retryable(),
+            AppError::Mlx(e) => e.retryable(),
+            AppError::ModelServerStart { retryable, .. } => *retryable,
             AppError::InvalidTaskId(_) => false,
             AppError::UnknownPurgeScope(_) => false,
             AppError::InvalidCheckpointId(_) => false,

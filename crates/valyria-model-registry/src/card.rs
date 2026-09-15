@@ -59,6 +59,27 @@ pub enum TransportPreference {
     FencedText,
 }
 
+/// Which local runtime adapter serves this model — distinct from
+/// [`TransportPreference`], which is about tool-call *shape*, not process
+/// supervision. Governs both how `valyria-app` boots a server for this
+/// card (`valyria-runtime-llamacpp` vs `valyria-runtime-mlx`) and how
+/// `source_url` is interpreted: a direct downloadable file URL for
+/// [`Self::LlamaCpp`] (fetched and blake3-verified by `valyria-model-
+/// store` before anything runs), a Hugging Face repo id for [`Self::Mlx`]
+/// (resolved and cached by `mlx_lm.server` itself on first boot — MLX
+/// models are a directory of files, not a single downloadable one, so
+/// `valyria-model-store`'s single-file download pipeline does not apply).
+/// `#[serde(default)]` on the card field keeps every catalog entry from
+/// before this variant existed a valid `LlamaCpp` card without a JSON
+/// migration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EngineKind {
+    #[default]
+    LlamaCpp,
+    Mlx,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelCard {
     /// Stable catalog id, also the on-disk directory name in the model
@@ -89,9 +110,16 @@ pub struct ModelCard {
     /// `valyria_hardware::fits`.
     pub requirement: ModelRequirement,
     pub transport_preference: TransportPreference,
+    /// Which local runtime adapter serves this model. Defaults to
+    /// `LlamaCpp` for any catalog entry (or test fixture) written before
+    /// this field existed.
+    #[serde(default)]
+    pub engine: EngineKind,
     pub supports_native_tools: bool,
     pub supports_grammar: bool,
-    /// Where `valyria-model-store` downloads the weights from.
+    /// Where `valyria-model-store` downloads the weights from
+    /// (`engine: LlamaCpp`), or the Hugging Face repo id `mlx_lm.server`
+    /// resolves and caches itself on first boot (`engine: Mlx`).
     pub source_url: String,
     /// blake3 hex of the complete weights file — the whole-file integrity
     /// check after download (§4.21 "never partial-on-success").

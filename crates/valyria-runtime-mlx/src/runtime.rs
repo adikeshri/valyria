@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use futures::stream::BoxStream;
 use valyria_model::{
-    Capabilities, Chunk, Completion, GenerateRequest, Health, ModelError, ModelRuntime,
+    Capabilities, Chunk, Completion, GenerateRequest, Health, LocalModelServer, ModelError,
+    ModelRuntime,
 };
 use valyria_model_registry::ModelCard;
 use valyria_runtime_openai_compat::{HttpTransport, OpenAiCompatRuntime, ReqwestTransport};
@@ -18,17 +19,6 @@ use valyria_util::CancellationToken;
 
 use crate::error::Result;
 use crate::server::{MlxServer, MlxServerConfig, DEFAULT_READY_TIMEOUT};
-
-/// A locally-spawned model server: it can serve `ModelRuntime` calls and
-/// it can be told to stop. `LlamaServerRuntime` implements the same
-/// trait; a caller holding a `Box<dyn LocalModelServer>` doesn't need to
-/// know which engine is actually running underneath.
-#[async_trait::async_trait]
-pub trait LocalModelServer: ModelRuntime {
-    async fn shutdown(&self);
-    fn model_id(&self) -> &str;
-    fn port(&self) -> u16;
-}
 
 pub struct MlxServerRuntime {
     server: MlxServer,
@@ -57,6 +47,20 @@ impl MlxServerRuntime {
         log_path: PathBuf,
         ready_timeout: Duration,
     ) -> Result<Self> {
+        // `mlx_lm.server` supports per-request model switching: it reads
+        // the request body's own `"model"` field (defaulting to the CLI
+        // `--model` only when that field is absent) and, on any mismatch,
+        // tries to *load a different model by that name* — treating it as
+        // a fresh Hugging Face repo id, not a display label. Confirmed
+        // live: sending `card.id` (valyria's catalog id, e.g. `"qwen2.5-
+        // coder-7b-instruct-mlx-4bit"`) instead of the real repo id here
+        // made a real, already-booted server 404 trying to "load" that
+        // catalog id as a repo. So unlike `LlamaServerRuntime` (where
+        // `llama-server` ignores the field entirely and this distinction
+        // never mattered), the wire `"model"` name here *must* be the
+        // same string the process was actually started with —
+        // `model_dir` — not the catalog id.
+        let wire_model_name = model_dir.to_string_lossy().into_owned();
         let config = MlxServerConfig {
             python,
             model_dir,
@@ -76,7 +80,7 @@ impl MlxServerRuntime {
             .await?;
 
         let capabilities = caps_from_card(card);
-        let inner = OpenAiCompatRuntime::new(transport, card.id.clone(), capabilities);
+        let inner = OpenAiCompatRuntime::new(transport, wire_model_name, capabilities);
         Ok(Self {
             server,
             inner,
