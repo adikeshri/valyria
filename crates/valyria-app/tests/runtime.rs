@@ -10,10 +10,39 @@ use std::time::Duration;
 use futures::StreamExt;
 use valyria_app::{AppError, EmbeddedClient, ModelEndpointOptions, Runtime, RuntimeConfig};
 use valyria_events::{EventKind, NewEvent};
+use valyria_hardware::report::{CpuInfo, DiskInfo, HardwareReport};
 use valyria_model_registry::{generate_keypair, sign, Catalog, ModelRole};
 use valyria_model_store::{InMemoryFetcher, Manifest, ModelStore};
 use valyria_protocol::Client as _;
 use valyria_types::AgentState;
+
+/// A hardware report with plenty of available RAM — used to make
+/// auto-derive tests deterministic instead of depending on however much
+/// RAM happens to be free on whatever machine runs the test right now
+/// (the real `valyria_hardware::probe()` value shifts under ambient load
+/// from unrelated processes).
+fn plenty_of_ram() -> HardwareReport {
+    HardwareReport {
+        os: "test".into(),
+        os_version: None,
+        arch: "test".into(),
+        cpu: CpuInfo {
+            brand: "test".into(),
+            physical_cores: 8,
+            logical_cores: 16,
+            arch: "test".into(),
+        },
+        ram_total_bytes: 32_000_000_000,
+        ram_available_bytes: 32_000_000_000,
+        gpus: vec![],
+        unified_memory: true,
+        accelerator_present: None,
+        disk: DiskInfo {
+            total_bytes: 0,
+            available_bytes: 0,
+        },
+    }
+}
 
 /// A real catalog id suitable for `PrimaryCoder` — same one
 /// `local_model_e2e.rs` uses, since it's already confirmed to exist in
@@ -77,7 +106,8 @@ async fn an_unactivated_role_gets_a_best_effort_auto_derived_model() {
 
     let config = RuntimeConfig::new(ws.path())
         .with_data_dir(data_dir)
-        .with_local_models();
+        .with_local_models()
+        .with_hardware_override(plenty_of_ram());
 
     let events_before = {
         // Open just long enough to grab the event bus before the

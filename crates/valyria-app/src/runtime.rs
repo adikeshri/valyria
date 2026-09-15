@@ -197,6 +197,15 @@ pub struct RuntimeConfig {
     /// keypair it actually holds the private half of, since the
     /// compiled-in key's private half deliberately exists nowhere.
     pub catalog_trusted_key_hex: Option<String>,
+    /// `None` measures this machine's real hardware via
+    /// `valyria_hardware::probe()` — the only sensible choice in
+    /// production. Exists as a config knob purely so a test can exercise
+    /// the real auto-derive / pool-admission path deterministically: the
+    /// live probe reports *available* (not total) RAM, which shifts
+    /// under ambient load from unrelated processes on the machine running
+    /// the test, so a test asserting a specific model gets auto-derived
+    /// must not depend on however much RAM happens to be free right now.
+    pub hardware_override: Option<valyria_hardware::HardwareReport>,
 }
 
 impl RuntimeConfig {
@@ -211,6 +220,7 @@ impl RuntimeConfig {
             planning_mode: PlanningMode::default(),
             global_dir: GlobalStore::default_root(),
             catalog_trusted_key_hex: None,
+            hardware_override: None,
         }
     }
 
@@ -219,6 +229,15 @@ impl RuntimeConfig {
     /// build's compiled-in one.
     pub fn with_catalog_trusted_key_hex(mut self, hex: impl Into<String>) -> Self {
         self.catalog_trusted_key_hex = Some(hex.into());
+        self
+    }
+
+    /// Test-only in practice (see the field's own doc comment) — pin the
+    /// hardware report `open()` sizes the model pool and auto-derives
+    /// role bindings against, instead of measuring this machine's real,
+    /// ambient-load-dependent available RAM.
+    pub fn with_hardware_override(mut self, hw: valyria_hardware::HardwareReport) -> Self {
+        self.hardware_override = Some(hw);
         self
     }
 
@@ -400,7 +419,10 @@ impl Runtime {
             // the OS and this process's own working set rather than
             // claiming every last byte as loadable — 80% is a documented,
             // simple heuristic, not a hardware-verified ceiling.
-            let hw = valyria_hardware::probe();
+            let hw = config
+                .hardware_override
+                .clone()
+                .unwrap_or_else(valyria_hardware::probe);
             let budget_bytes = (hw.ram_available_bytes as f64 * 0.8) as u64;
             let model_pool = Arc::new(tokio::sync::Mutex::new(ModelPool::new(budget_bytes)));
             pool = Some(model_pool.clone());
