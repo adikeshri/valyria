@@ -26,6 +26,16 @@ pub fn build_chat_request(model: &str, req: &GenerateRequest, stream: bool) -> V
         "stream": stream,
         "temperature": req.sampling.temperature,
         "top_p": req.sampling.top_p,
+        // llama.cpp's `llama-server` extension (harmless elsewhere — vLLM,
+        // Ollama and LM Studio ignore unrecognized fields the same way
+        // every OpenAI-compatible server does): reuse the KV cache for
+        // whatever prefix of `messages` matches the previous request byte
+        // for byte. `AgentDriver::build_conversation` deliberately keeps
+        // that prefix stable — the system/instructions/objective messages
+        // are rebuilt identically every turn and the tool-call history is
+        // only ever appended to, never rewritten — so this is a real,
+        // usually large, latency win on a local model, not a no-op.
+        "cache_prompt": true,
     });
 
     if let Some(max) = req.sampling.max_tokens {
@@ -255,6 +265,73 @@ mod tests {
         assert_eq!(body["max_tokens"], 256);
         assert_eq!(body["stop"][0], "END");
         assert_eq!(body["stream"], false);
+        assert_eq!(body["cache_prompt"], true);
+    }
+
+    /// M1 (KV-cache prefix stability): a request whose `messages` grow only
+    /// by *appending* — never rewriting an earlier message — must serialize
+    /// with that earlier portion byte-identical across calls, or
+    /// `cache_prompt` has nothing real to reuse. This is the wire-layer
+    /// half of the property `AgentDriver::build_conversation`'s own doc
+    /// comment claims (stable system/instructions/objective prefix, tool
+    /// history only ever appended).
+    #[test]
+    fn appending_a_message_leaves_the_earlier_json_prefix_byte_identical() {
+        let base_messages = vec![
+            Message::system("policy"),
+            Message::user("the objective"),
+            Message::assistant("Calling `read_file` with {}"),
+            Message::tool_result("call_1", "file contents"),
+        ];
+        let turn_n = GenerateRequest {
+            messages: base_messages.clone(),
+            tools: vec![],
+            sampling: SamplingParams::default(),
+            turn_hint: Some(1),
+        };
+        let mut turn_n_plus_1_messages = base_messages;
+        turn_n_plus_1_messages.push(Message::assistant("Calling `write_file` with {}"));
+        turn_n_plus_1_messages.push(Message::tool_result("call_2", "ok"));
+        let turn_n_plus_1 = GenerateRequest {
+            messages: turn_n_plus_1_messages,
+            tools: vec![],
+            sampling: SamplingParams::default(),
+            turn_hint: Some(2),
+        };
+
+        let body_n = build_chat_request("m", &turn_n, false);
+        let body_n_plus_1 = build_chat_request("m", &turn_n_plus_1, false);
+
+        // Every message present in turn N appears verbatim, at the same
+        // index, in turn N+1 — the actual property `cache_prompt` needs.
+        let msgs_n = body_n["messages"].as_array().unwrap();
+        let msgs_n_plus_1 = body_n_plus_1["messages"].as_array().unwrap();
+        assert!(msgs_n_plus_1.len() > msgs_n.len());
+        for (i, m) in msgs_n.iter().enumerate() {
+            assert_eq!(
+                &msgs_n_plus_1[i], m,
+                "message {i} changed between turns — the KV-cache prefix would be invalidated"
+            );
+        }
+
+        // And the literal serialized prefix (not just the parsed message
+        // list) matches, since that's what actually determines whether the
+        // server-side cache hits: `serde_json::json!` preserves key
+        // insertion order, so a stable message-list serialization implies
+        // a stable byte prefix in the request body's own `"messages":[...]`
+        // array text, independent of the top-level object's other fields
+        // (which do vary — `turn_hint` isn't sent, but `stream`/sampling
+        // are the same here regardless).
+        let prefix_n = serde_json::to_string(msgs_n).unwrap();
+        let full_n_plus_1 = serde_json::to_string(msgs_n_plus_1).unwrap();
+        // The N+1 serialization must start with everything the N
+        // serialization had, minus its closing `]`, i.e. be a true
+        // textual extension.
+        let prefix_n_no_close = prefix_n.strip_suffix(']').unwrap();
+        assert!(
+            full_n_plus_1.starts_with(prefix_n_no_close),
+            "serialized message prefix diverged:\n  n:   {prefix_n}\n  n+1: {full_n_plus_1}"
+        );
     }
 
     #[test]

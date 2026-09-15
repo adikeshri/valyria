@@ -12,7 +12,7 @@
 //!   field (backward compatible: old clients ignore it);
 //! - **major** — a removed/renamed variant or field, or a changed type
 //!   (breaking: old clients misparse).
-pub const PROTOCOL_VERSION: &str = "1.12.0";
+pub const PROTOCOL_VERSION: &str = "1.13.0";
 
 /// Capability tokens a `HelloResponse` advertises (§4.27). A client
 /// negotiates against these, not the version string — a runtime built
@@ -89,6 +89,12 @@ pub mod capability {
     /// fake. `model_server_{starting,ready,failed,stopped}` and
     /// `engine_install_*` events are emitted (Phase 9 follow-up).
     pub const MODEL_INFERENCE: &str = "model_inference";
+    /// The role pipeline (Researcher/Planner/Implementer/Tester/Reviewer)
+    /// and the parallel wave executor are served: `task_children`,
+    /// `task_artifacts`, `plan_revisions`, `TaskSummary.parent_task_id`,
+    /// and the `subtask_started` / `subtask_completed` / `artifact_
+    /// published` events (§4.25, M5).
+    pub const MULTI_AGENT: &str = "multi_agent";
 
     /// The full set an embedded runtime supports.
     pub const ALL: &[&str] = &[
@@ -111,5 +117,6 @@ pub mod capability {
         STREAM_FILTER,
         APPROVAL_SCOPE,
         MODEL_INFERENCE,
+        MULTI_AGENT,
     ];
 }

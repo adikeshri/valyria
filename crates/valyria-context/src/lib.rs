@@ -54,7 +54,7 @@ pub use error::{ContextError, Result};
 pub use inject::{InjectionKind, InjectionSignal};
 pub use item::{ContextBody, ContextItem};
 pub use query::{AssembledContext, ContextQuery};
-pub use retrieve::{RetrievalQuery, Retriever, StaticRetriever};
+pub use retrieve::{LiveRetriever, RetrievalQuery, Retriever, StaticRetriever};
 pub use snapshot::{AssembledItem, ContextSnapshot, DEFAULT_RUNTIME_POLICY, STANDING_DATA_FRAME};
 
 #[cfg(feature = "intelligence")]

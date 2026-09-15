@@ -18,9 +18,9 @@ use valyria_memory::{MemoryStore, RetrievalRequest};
 use valyria_model::{GenerateRequest, Message, ModelRuntime, SamplingParams};
 use valyria_model_registry::{score_card_for_role, CardScore, Catalog, ModelCard, ModelRole};
 use valyria_model_store::{HttpFetcher, ModelStore, NullProber};
-use valyria_orchestrator::{NoModelRuntime, Orchestrator, Role};
+use valyria_orchestrator::{NoModelRuntime, Role, RoleRouter};
 use valyria_permissions::PermissionEngine;
-use valyria_plan::{PlanRevision, PlanStore, RollbackError, RollbackReport};
+use valyria_plan::{PlanRevision, PlanStore, RollbackError, RollbackReport, StoredArtifact};
 use valyria_runtime_fake::{FakeModelRuntime, Scenario};
 use valyria_runtime_llamacpp::{LlamaServerRuntime, LocalModelServer};
 use valyria_sandbox::{detect_platform_launcher, ProcessLauncher, SandboxProfile};
@@ -227,10 +227,14 @@ pub struct Runtime {
     /// runs; `model_install_cancel` fires the token and the task's next
     /// checkpoint stops it.
     installs: Arc<Mutex<HashMap<String, CancellationToken>>>,
-    /// The same `Arc<Orchestrator>` the driver holds — `model_activate` /
+    /// The same `Arc<RoleRouter>` the driver holds — `model_activate` /
     /// `model_remove` rebind through this handle, which is why it must be
-    /// the *same* `Arc`, not a fresh `Orchestrator`.
-    orchestrator: Arc<Orchestrator>,
+    /// the *same* `Arc`, not a fresh `RoleRouter`. Every role is currently
+    /// bound as a length-1 chain (`bind_single`): real fallback chains
+    /// across multiple installed models for one role are
+    /// `docs/COMPLETION-PLAN.md` M6 (catalog-backed multi-model role
+    /// selection), not wired up here yet.
+    orchestrator: Arc<RoleRouter>,
     /// The live `llama-server` handles this `Runtime` has started. Empty
     /// (and untouched) when `model_backend` is `Fake`.
     model_runtimes: Arc<ModelRuntimeRegistry>,
@@ -287,10 +291,11 @@ impl Runtime {
         let engine_handle = engine.clone();
 
         let use_fake_model = config.model_backend.is_fake();
-        let orchestrator = Arc::new(Orchestrator::new());
+        let orchestrator = Arc::new(RoleRouter::new());
         if let ModelBackend::Fake(scenario) = &config.model_backend {
-            orchestrator.bind(
+            orchestrator.bind_single(
                 Role::PrimaryCoder,
+                "fake",
                 Arc::new(FakeModelRuntime::from_scenario(scenario.clone())),
             );
         }
@@ -326,7 +331,11 @@ impl Runtime {
                 if role == Role::PrimaryCoder {
                     primary_bound = true;
                 }
-                orchestrator.bind(role, Arc::new(NoModelRuntime::starting(&model_id)));
+                orchestrator.bind_single(
+                    role,
+                    model_id.clone(),
+                    Arc::new(NoModelRuntime::starting(&model_id)),
+                );
                 spawn_model_boot(
                     role,
                     model_id,
@@ -338,7 +347,11 @@ impl Runtime {
                 );
             }
             if !primary_bound {
-                orchestrator.bind(Role::PrimaryCoder, Arc::new(NoModelRuntime::none_bound()));
+                orchestrator.bind_single(
+                    Role::PrimaryCoder,
+                    "none",
+                    Arc::new(NoModelRuntime::none_bound()),
+                );
             }
         }
 
@@ -351,6 +364,31 @@ impl Runtime {
             events.clone(),
             clock.clone(),
         ));
+
+        // M2: a real local-model install has real content worth retrieving
+        // for, so `open` bootstraps the index synchronously and wires a
+        // `LiveRetriever::Search` into the driver — the Fake backend keeps
+        // `LiveRetriever::empty()` (every pre-M2 fake-model scenario's
+        // exact behaviour, and every timing-sensitive CLI kill/resume test
+        // stays unaffected by index-bootstrap latency it never needed).
+        // Synchronous and blocking here rather than the staged, non-
+        // blocking background bootstrap the design calls for
+        // (docs/COMPLETION-PLAN.md's own M2 write-up) — a scoped-down
+        // first cut; failure degrades to no retrieval rather than failing
+        // `open` outright, matching how a missing LSP server or sandbox
+        // mechanism degrades elsewhere rather than erroring.
+        let retriever = if use_fake_model {
+            valyria_context::LiveRetriever::empty()
+        } else {
+            match bootstrap_index_for_retrieval(config.workspace_path.clone(), &index, &store).await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, "index bootstrap for retrieval failed; continuing with no repository retrieval");
+                    valyria_context::LiveRetriever::empty()
+                }
+            }
+        };
 
         let driver = Arc::new(
             AgentDriver::new(
@@ -368,7 +406,10 @@ impl Runtime {
                 launcher,
                 sandbox_profile,
             )
-            .with_planning_mode(config.planning_mode),
+            .with_planning_mode(config.planning_mode)
+            .with_retriever(retriever)
+            .with_store(store.clone())
+            .with_memory(memory.clone()),
         );
 
         Ok(Self {
@@ -517,6 +558,22 @@ impl Runtime {
         Ok(())
     }
 
+    /// Answer a task parked in `WAITING_FOR_USER` (M4) and, if that leaves
+    /// it live, spawn a fresh driver to keep it running — mirrors
+    /// `resolve_permission_scoped` exactly: `AgentDriver::respond_to_user`
+    /// only performs the one resolution step.
+    pub async fn respond_to_user(&self, task_id: TaskId, answer: String) -> Result<()> {
+        self.driver.respond_to_user(task_id, answer).await?;
+        let task = self.tasks.get(task_id).await?;
+        if !task.state.is_terminal()
+            && task.state != AgentState::WaitingForPermission
+            && task.state != AgentState::WaitingForUser
+        {
+            self.spawn_driver(task_id);
+        }
+        Ok(())
+    }
+
     pub async fn task_status(&self, task_id: TaskId) -> Result<Task> {
         Ok(self.tasks.get(task_id).await?)
     }
@@ -576,6 +633,27 @@ impl Runtime {
 
     pub async fn list_tasks(&self) -> Result<Vec<Task>> {
         Ok(self.tasks.list(self.workspace_id).await?)
+    }
+
+    /// M5, protocol 1.13.0: every direct child of a task, oldest first.
+    pub async fn task_children(&self, task_id: TaskId) -> Result<Vec<Task>> {
+        Ok(self.tasks.children_of(task_id).await?)
+    }
+
+    /// Every role-pipeline artifact produced against a task, oldest first.
+    pub async fn task_artifacts(&self, task_id: TaskId) -> Result<Vec<StoredArtifact>> {
+        self.plan_store
+            .artifacts_for_task(task_id)
+            .await
+            .map_err(|e| AppError::Plan(e.to_string()))
+    }
+
+    /// Every plan revision for a task, oldest first.
+    pub async fn plan_revisions(&self, task_id: TaskId) -> Result<Vec<PlanRevision>> {
+        self.plan_store
+            .all_revisions(task_id)
+            .await
+            .map_err(|e| AppError::Plan(e.to_string()))
     }
 
     /// The completion report (§15, D4) — assembled *only* from persisted
@@ -1156,7 +1234,7 @@ impl Runtime {
         if !self.use_fake_model {
             for role in self.model_runtimes.roles_for_model(id).await {
                 self.orchestrator
-                    .rebind(role, Arc::new(NoModelRuntime::none_bound()));
+                    .bind_single(role, "none", Arc::new(NoModelRuntime::none_bound()));
                 if let Some(old) = self.model_runtimes.take(role).await {
                     old.shutdown().await; // awaited: files are about to go away
                 }
@@ -1217,8 +1295,11 @@ impl Runtime {
         match boot_model_server(self.global.root(), id, &model_store, &self.events).await {
             Ok(handle) => {
                 let port = handle.port();
-                self.orchestrator
-                    .rebind(role, handle.clone() as Arc<dyn ModelRuntime>);
+                self.orchestrator.bind_single(
+                    role,
+                    id.to_string(),
+                    handle.clone() as Arc<dyn ModelRuntime>,
+                );
                 if let Some(old) = self.model_runtimes.swap(role, id.to_string(), handle).await {
                     tokio::spawn(async move { old.shutdown().await });
                 }
@@ -1232,8 +1313,11 @@ impl Runtime {
                 Ok(())
             }
             Err(e) => {
-                self.orchestrator
-                    .rebind(role, Arc::new(NoModelRuntime::failed(id, &e.to_string())));
+                self.orchestrator.bind_single(
+                    role,
+                    id.to_string(),
+                    Arc::new(NoModelRuntime::failed(id, &e.to_string())),
+                );
                 let _ = self
                     .events
                     .append(NewEvent::new(
@@ -1576,6 +1660,60 @@ async fn resolve_or_install_engine(
     }
 }
 
+/// `Runtime::open`'s M2 bootstrap: build (or catch up) the file/symbol
+/// index and its import/call graph, then wrap it as a
+/// `LiveRetriever::Search` the driver can query every turn. Mirrors
+/// `Runtime::reindex` exactly (same pipeline, same steps) — kept as its
+/// own free function because `reindex` needs `&self` for its `Result`
+/// error path and event-free contract, while this one runs *during*
+/// `open`, before `Self` exists, and its errors are caught and degraded
+/// rather than propagated (see the call site's comment).
+async fn bootstrap_index_for_retrieval(
+    workspace_path: PathBuf,
+    index: &IndexStore,
+    store: &Arc<Store>,
+) -> Result<valyria_context::LiveRetriever> {
+    let registry = valyria_lang::LanguageRegistry::with_builtin_languages()
+        .map_err(|e| AppError::Repo(format!("language registry: {e}")))?;
+    let pipeline =
+        valyria_index::IndexPipeline::new(workspace_path.clone(), registry.clone(), index.clone());
+    let delta = pipeline.bootstrap_unstaged(&|_| {}).await?;
+    valyria_graph::GraphStore::new(store.clone())
+        .build_for(index, delta.generation)
+        .await
+        .map_err(|e| AppError::Repo(format!("graph build: {e}")))?;
+
+    let embedder: Arc<dyn valyria_embed::Embedder> =
+        Arc::new(valyria_embed::HashingEmbedder::default());
+    let embed = valyria_embed::EmbedStore::new(store.clone());
+    let embed_pipeline = valyria_embed::EmbedPipeline::new(
+        workspace_path.clone(),
+        registry.clone(),
+        embedder.clone(),
+        embed.clone(),
+    );
+    // Embeddings are the slowest stage and the least essential — lexical
+    // and symbol search (and therefore retrieval) already work without
+    // them (§9.4.15's staged-availability design). A failure here
+    // degrades to search without semantic ranking rather than losing
+    // retrieval entirely.
+    if let Err(e) = embed_pipeline.bootstrap(index, delta.generation).await {
+        tracing::warn!(error = %e, "embedding bootstrap failed; retrieval continues without semantic ranking");
+    }
+
+    let engine = valyria_search::SearchEngine::new(
+        workspace_path,
+        index.clone(),
+        valyria_graph::GraphStore::new(store.clone()),
+        embed,
+        embedder,
+        registry,
+    );
+    Ok(valyria_context::LiveRetriever::Search(
+        valyria_context::SearchRetriever::new(engine, index.clone()),
+    ))
+}
+
 /// Resolve the engine (installing it if needed) and boot a `llama-server`
 /// for `model_id`, waiting until it answers `/health`. Touches neither the
 /// orchestrator nor the registry — the caller (the background boot loop,
@@ -1614,7 +1752,7 @@ fn spawn_model_boot(
     model_id: String,
     global_root: PathBuf,
     model_store: ModelStore,
-    orchestrator: Arc<Orchestrator>,
+    orchestrator: Arc<RoleRouter>,
     model_runtimes: Arc<ModelRuntimeRegistry>,
     events: Arc<EventBus>,
 ) {
@@ -1629,7 +1767,11 @@ fn spawn_model_boot(
         match boot_model_server(&global_root, &model_id, &model_store, &events).await {
             Ok(handle) => {
                 let port = handle.port();
-                orchestrator.rebind(role, handle.clone() as Arc<dyn ModelRuntime>);
+                orchestrator.bind_single(
+                    role,
+                    model_id.clone(),
+                    handle.clone() as Arc<dyn ModelRuntime>,
+                );
                 if let Some(old) = model_runtimes.swap(role, model_id.clone(), handle).await {
                     // Drain in place rather than block this task: an
                     // in-flight generate against the old server still
@@ -1644,8 +1786,9 @@ fn spawn_model_boot(
                     .await;
             }
             Err(e) => {
-                orchestrator.rebind(
+                orchestrator.bind_single(
                     role,
+                    model_id.clone(),
                     Arc::new(NoModelRuntime::failed(&model_id, &e.to_string())),
                 );
                 let _ = events

@@ -1,0 +1,18 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SubtaskStartedPayload",
+  "description": "`subtask_started` — projected onto the *parent's* event stream when `TaskManager::create_child` mints a child task (M5).",
+  "type": "object",
+  "required": [
+    "child_task_id",
+    "objective"
+  ],
+  "properties": {
+    "child_task_id": {
+      "type": "string"
+    },
+    "objective": {
+      "type": "string"
+    }
+  }
+}

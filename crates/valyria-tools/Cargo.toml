@@ -22,6 +22,12 @@ valyria-ledger = { workspace = true }
 valyria-permissions = { workspace = true }
 valyria-hardware = { workspace = true }
 valyria-sandbox = { workspace = true }
+valyria-store = { workspace = true }
+valyria-index = { workspace = true }
+valyria-graph = { workspace = true }
+valyria-embed = { workspace = true }
+valyria-lang = { workspace = true }
+valyria-search = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

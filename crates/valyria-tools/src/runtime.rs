@@ -142,6 +142,7 @@ impl ToolRuntime {
     ) -> InvocationResult {
         let start_time = self.clock.now();
         let outcome = tool.execute(ctx, &auth, input.clone()).await;
+        let outcome = redact_outcome(outcome);
         let end_time = self.clock.now();
 
         let (success, exit_status, stdout, stderr, error) = match &outcome {
@@ -183,5 +184,53 @@ impl ToolRuntime {
         };
 
         InvocationResult::Executed { outcome, record }
+    }
+}
+
+/// Secret redaction on the way out of every tool call (§4.29, M3) —
+/// applied here, once, at the single choke point every `Tool::execute`
+/// result passes through before it becomes either the model's
+/// `Message::tool_result` (via `ToolOutcome`'s `rendered`) or a persisted
+/// `ToolInvocationRecord` (`stdout`/`stderr`), so it covers both context
+/// and logs the way the requirement is written, not just one of them.
+/// `valyria_util::redact`'s known-shape patterns already existed but were
+/// never called from anywhere in the workspace — this is that wiring.
+///
+/// Deliberately scoped to *output* — a tool's `input` (the model's own
+/// call arguments) is not touched. Blanket-mutating input after the fact
+/// would desync a journaled call from what actually executed, and the
+/// realistic leak this guards against is the agent *reading* a secret
+/// (a file, a command's output), not typing one into an argument.
+fn redact_outcome(outcome: ToolOutcome) -> ToolOutcome {
+    match outcome {
+        ToolOutcome::Success {
+            mut structured,
+            rendered,
+        } => {
+            let (rendered, _) = valyria_util::redact(&rendered);
+            for field in ["stdout", "stderr", "content"] {
+                if let Some(s) = structured.get(field).and_then(|v| v.as_str()) {
+                    let (redacted, _) = valyria_util::redact(s);
+                    structured[field] = Value::String(redacted);
+                }
+            }
+            ToolOutcome::Success {
+                structured,
+                rendered,
+            }
+        }
+        ToolOutcome::Failure {
+            code,
+            message,
+            rendered,
+        } => {
+            let (message, _) = valyria_util::redact(&message);
+            let (rendered, _) = valyria_util::redact(&rendered);
+            ToolOutcome::Failure {
+                code,
+                message,
+                rendered,
+            }
+        }
     }
 }

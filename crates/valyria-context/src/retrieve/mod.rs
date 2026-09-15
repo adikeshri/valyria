@@ -12,9 +12,10 @@
 //!   from the index so the compressor can degrade a file
 //!   symbol-by-symbol. Behind the `intelligence` feature (on by default).
 //!
-//! Wiring `SearchRetriever` into the live agent loop — running the index
-//! bootstrap during a task, choosing the generation to pin — is a
-//! deliberate follow-up, not part of this phase.
+//! [`LiveRetriever`] is the concrete enum `AgentDriver` actually holds
+//! (`docs/COMPLETION-PLAN.md` M2): `Static` until an index bootstrap has
+//! run for the workspace, `Search` once one has. `valyria-app::Runtime`
+//! decides which by whether `index_status` reports a generation yet.
 
 use async_trait::async_trait;
 use valyria_types::Generation;
@@ -99,6 +100,47 @@ impl StaticRetriever {
 impl Retriever for StaticRetriever {
     async fn retrieve(&self, _query: &RetrievalQuery) -> Result<Vec<RetrievalCandidate>> {
         Ok(self.candidates.clone())
+    }
+}
+
+/// The retriever the live agent loop actually drives with (M1's
+/// `RoleRouter` for the model-binding side; this is the retrieval-binding
+/// side, `docs/COMPLETION-PLAN.md` M2). `ContextEngine<R>` is generic over
+/// a concrete `R: Retriever`, so a runtime that sometimes has a real index
+/// and sometimes doesn't (no bootstrap yet, or the `intelligence` feature
+/// disabled) needs one concrete type to hand it either way — a trait
+/// object would need `Retriever` implemented for `Arc<dyn Retriever>`,
+/// which doesn't exist, so this small enum is the simpler seam. Cheap to
+/// clone: `StaticRetriever` is a `Vec` clone, and `SearchRetriever` holds
+/// only handles (a `SearchEngine` over `Arc<Store>`-backed stores) — never
+/// a materialized index in memory.
+#[derive(Debug, Clone)]
+pub enum LiveRetriever {
+    Static(StaticRetriever),
+    #[cfg(feature = "intelligence")]
+    Search(SearchRetriever),
+}
+
+impl Default for LiveRetriever {
+    fn default() -> Self {
+        Self::Static(StaticRetriever::empty())
+    }
+}
+
+impl LiveRetriever {
+    pub fn empty() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait]
+impl Retriever for LiveRetriever {
+    async fn retrieve(&self, query: &RetrievalQuery) -> Result<Vec<RetrievalCandidate>> {
+        match self {
+            LiveRetriever::Static(r) => r.retrieve(query).await,
+            #[cfg(feature = "intelligence")]
+            LiveRetriever::Search(r) => r.retrieve(query).await,
+        }
     }
 }
 

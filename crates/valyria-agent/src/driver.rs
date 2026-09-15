@@ -30,12 +30,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use valyria_context::{
-    AssembledContext, ContextAssembler, ContextEngine, ContextQuery, EngineInput, StaticRetriever,
+    AssembledContext, AssembledPrompt, ContextAssembler, ContextEngine, ContextQuery, EngineInput,
+    LiveRetriever,
 };
 use valyria_instructions::Discovery;
 use valyria_ledger::Ledger;
 use valyria_model::{GenerateRequest, Message, ToolSpec};
-use valyria_orchestrator::{Orchestrator, Role};
+use valyria_orchestrator::{Role, RoleRouter};
 use valyria_permissions::{GrantScope, PermissionEngine};
 use valyria_plan::PlanStore;
 use valyria_sandbox::{ProcessLauncher, SandboxProfile};
@@ -65,7 +66,7 @@ const MAX_REPAIR_ATTEMPTS: u32 = 4;
 /// Bounded reformat-retries `generate_action` gets before giving up on a
 /// model that won't produce a parseable action — matches the value every
 /// existing `generate_action` test in `valyria-orchestrator` already uses.
-const MAX_REFORMAT_RETRIES: u32 = 2;
+pub(crate) const MAX_REFORMAT_RETRIES: u32 = 2;
 
 /// Cap on plan-repair rounds before `Planning` fails to the user (§4.25:
 /// "bounded repair attempts").
@@ -108,9 +109,21 @@ pub enum PlanningMode {
 
 /// Process-local verify/diagnose/repair bookkeeping for one task. Cloned
 /// out, mutated, and written back by each state handler (only one driver
-/// loop runs per task at a time). Not persisted: a cross-process resume
-/// rebuilds the plan from scratch and the completion report from the
-/// durable `verification_run` rows.
+/// loop runs per task at a time), and cached in `verify_states` for the
+/// rest of this process's lifetime once populated.
+///
+/// `plan`/`executed`/`last_run`/`pending_diagnosis` are *not* persisted: a
+/// cross-process resume rebuilds the escalation plan from scratch (the
+/// next `Verifying` entry runs `valyria_verify::scan` again) and the
+/// completion report from the durable `verification_run` rows — exactly
+/// as before M5.
+///
+/// `detector` and `repair`, however, **are** reconstructed on first
+/// access in a fresh process (M5, C8) — see [`reconstruct_verify_state`].
+/// Losing loop-detector history or the repair attempt budget across a
+/// crash would mean the exact failure mode these two exist to catch
+/// (infinite retries) becomes reachable again just by restarting the
+/// process mid-repair.
 #[derive(Clone, Default)]
 struct VerifyState {
     detector: LoopDetector,
@@ -131,13 +144,29 @@ struct VerifyState {
 pub struct AgentDriver {
     pub(crate) tasks: Arc<TaskManager>,
     pub(crate) tools: Arc<ToolRuntime>,
-    pub(crate) orchestrator: Arc<Orchestrator>,
+    pub(crate) orchestrator: Arc<RoleRouter>,
     pub(crate) context: Arc<ContextAssembler>,
     pub(crate) ledger: Arc<Ledger>,
     pub(crate) permissions: Arc<PermissionEngine>,
     pub(crate) verification_log: Arc<VerificationLog>,
     pub(crate) plan_store: Arc<PlanStore>,
     pub(crate) planning_mode: PlanningMode,
+    /// Real repository retrieval for every implementing/repairing turn's
+    /// context (M2). Defaults to `LiveRetriever::Static(empty)` — every
+    /// pre-M2 scenario's exact behaviour; set via `with_retriever`.
+    pub(crate) retriever: LiveRetriever,
+    /// The workspace database, handed to every `ToolCtx` this driver
+    /// builds (M2) so `search` / `symbol_search` can open the index/graph
+    /// tables. `None` — every pre-M2 scenario's exact behaviour (those
+    /// tools report plainly that no index is available) — unless
+    /// `with_store` was called.
+    pub(crate) store: Option<Arc<valyria_store::Store>>,
+    /// Repository memory (M3): written to after a task's mandatory broad
+    /// verification run actually passes — commands observed to work,
+    /// repeatedly-failing commands as pitfalls (`valyria_memory::extract`).
+    /// `None` — nothing is extracted, every pre-M3 scenario's exact
+    /// behaviour — unless `with_memory` was called.
+    pub(crate) memory: Option<Arc<valyria_memory::MemoryStore>>,
     pub(crate) workspace_root: WorkspaceRoot,
     pub(crate) hash_cache: Arc<HashCache>,
     pub(crate) clock: Arc<dyn Clock>,
@@ -147,7 +176,7 @@ pub struct AgentDriver {
     /// Every tool the model may call this turn — computed once from the
     /// registry `tools` was built with; the registry is static after
     /// construction so there's nothing to keep in sync.
-    tool_specs: Vec<ToolSpec>,
+    pub(crate) tool_specs: Vec<ToolSpec>,
 }
 
 impl AgentDriver {
@@ -155,7 +184,7 @@ impl AgentDriver {
     pub fn new(
         tasks: Arc<TaskManager>,
         tools: Arc<ToolRuntime>,
-        orchestrator: Arc<Orchestrator>,
+        orchestrator: Arc<RoleRouter>,
         context: Arc<ContextAssembler>,
         ledger: Arc<Ledger>,
         permissions: Arc<PermissionEngine>,
@@ -178,6 +207,9 @@ impl AgentDriver {
             verification_log,
             plan_store,
             planning_mode: PlanningMode::Passthrough,
+            retriever: LiveRetriever::empty(),
+            store: None,
+            memory: None,
             workspace_root,
             hash_cache,
             clock,
@@ -195,11 +227,64 @@ impl AgentDriver {
         self
     }
 
+    /// Wire real repository retrieval into every implementing/repairing
+    /// turn's context (§4.24/M2). `LiveRetriever::Static(empty)` — every
+    /// pre-M2 scenario's exact behaviour — is the default; call this with
+    /// `LiveRetriever::Search(..)` once an index generation exists for the
+    /// workspace.
+    pub fn with_retriever(mut self, retriever: LiveRetriever) -> Self {
+        self.retriever = retriever;
+        self
+    }
+
+    /// Give every tool call this driver issues access to the workspace
+    /// database (M2), so `search` / `symbol_search` can open the index.
+    pub fn with_store(mut self, store: Arc<valyria_store::Store>) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    /// Extract and persist repository memory after a task's mandatory
+    /// broad verification run passes (M3).
+    pub fn with_memory(mut self, memory: Arc<valyria_memory::MemoryStore>) -> Self {
+        self.memory = Some(memory);
+        self
+    }
+
     /// Runs `task_id` until it reaches a terminal state, is paused, or asks
     /// to wait on the user/a permission decision. Pause/cancel are checked
     /// only between steps (never mid-effect) so a pause always lands
     /// cleanly on a step boundary.
     pub async fn run(&self, task_id: TaskId, cancel: CancellationToken) -> Result<()> {
+        self.run_with_role(task_id, cancel, None).await
+    }
+
+    /// M5: identical to [`AgentDriver::run`], except every `Planning`/
+    /// plan-driven `Implementing` model call uses `role_override` (when
+    /// `Some`) instead of the ordinary FastCoder/PrimaryCoder escalation
+    /// `model_role` picks. `run` is a thin `None`-forwarding wrapper around
+    /// this, so every pre-M5 call site's behavior is unchanged bit-for-bit.
+    ///
+    /// `model_role`'s "prefer `FastCoder` whenever it's bound" check is
+    /// *global* — it has no way to know a `FastCoder` binding exists for a
+    /// completely unrelated reason (the M1 repair-escalation ladder is its
+    /// only original purpose). The role pipeline
+    /// ([`crate::role_pipeline`]) and the parallel wave executor
+    /// (`crate::plan_exec::run_parallel_step_child`) both bind roles other
+    /// than `PrimaryCoder` for their own child tasks; without a way to pin
+    /// a specific task's `Planning`/`Implementing` calls to a role, *any*
+    /// of those bindings existing anywhere in the process would silently
+    /// redirect an unrelated ordinary task's calls too. `pub`, not
+    /// `pub(crate)`, so a caller assembling a driver with several such
+    /// bindings (a parallel-wave-capable setup, say) can pin an ordinary
+    /// top-level task's own role explicitly rather than leaving it to
+    /// `model_role`'s ambient, whole-process-wide guess.
+    pub async fn run_with_role(
+        &self,
+        task_id: TaskId,
+        cancel: CancellationToken,
+        role_override: Option<Role>,
+    ) -> Result<()> {
         loop {
             if cancel.is_cancelled() {
                 self.tasks
@@ -256,14 +341,20 @@ impl AgentDriver {
                             .await?;
                     }
                     PlanningMode::ModelAuthored => {
-                        if self.step_planning(task_id, &cancel).await? == Flow::Return {
+                        if self.step_planning(task_id, &cancel, role_override).await?
+                            == Flow::Return
+                        {
                             return Ok(());
                         }
                     }
                 },
                 AgentState::Implementing => {
                     if self.task_has_plan(task_id).await? {
-                        if self.step_implementing_plan(task_id, &cancel).await? == Flow::Return {
+                        if self
+                            .step_implementing_plan(task_id, &cancel, role_override)
+                            .await?
+                            == Flow::Return
+                        {
                             return Ok(());
                         }
                     } else {
@@ -298,21 +389,25 @@ impl AgentDriver {
     }
 
     /// The system + task-intent messages every implementing/repairing turn
-    /// opens with: the runtime policy and any repo instructions
-    /// (`VALYRIA.md`/`AGENTS.md`/`CLAUDE.md`), then the objective. Rebuilt
-    /// fresh every call rather than cached — `Discovery::discover` reads a
-    /// handful of size-capped files, negligible next to a model call, and
-    /// it means an instruction file edited mid-task takes effect on the
-    /// very next turn. `StaticRetriever::empty()`: real semantic codebase
-    /// retrieval is `SearchRetriever`'s job, an explicit follow-up (this
-    /// call site is the one-line swap when that lands).
+    /// opens with: the runtime policy, any repo instructions
+    /// (`VALYRIA.md`/`AGENTS.md`/`CLAUDE.md`), retrieved repository context
+    /// (M2 — real when `self.retriever` is `LiveRetriever::Search`, empty
+    /// otherwise), then the objective. Rebuilt fresh every call rather than
+    /// cached — `Discovery::discover` reads a handful of size-capped files
+    /// and a retrieval is one ranked-search call, both negligible next to
+    /// a model call, and it means an instruction file edited (or the index
+    /// advancing a generation) mid-task takes effect on the very next
+    /// turn.
     async fn system_and_task_messages(&self, task_id: TaskId) -> Result<Vec<Message>> {
         let objective = self.tasks.get(task_id).await?.objective;
         let instructions = Discovery::new(self.workspace_root.as_path()).discover()?;
-        let engine = ContextEngine::new(StaticRetriever::empty());
+        let engine = ContextEngine::new(self.retriever.clone());
         let input = EngineInput::new(objective, DEFAULT_CONTEXT_BUDGET_TOKENS)
             .with_instructions(instructions);
-        Ok(engine.build(input).await?.messages)
+        let assembled = engine.build(input).await?;
+        self.journal_prompt_context_retrieved(task_id, &assembled, DEFAULT_CONTEXT_BUDGET_TOKENS)
+            .await?;
+        Ok(assembled.messages)
     }
 
     /// Reconstruct this task's tool-call history as alternating
@@ -332,13 +427,26 @@ impl AgentDriver {
     /// serialize one for outgoing messages today, and extending it is out
     /// of scope here. Worth revisiting once this is exercised against a
     /// real model rather than the fake runtime.
-    async fn build_conversation(&self, task_id: TaskId) -> Result<Vec<Message>> {
+    ///
+    /// M4 extends the replay to a model-asked question and the user's
+    /// answer (`ActionRequest::Ask` / `TaskManager::respond_to_user`):
+    /// there is no effect id to correlate a question against its answer
+    /// (the model asked; nothing issued a request), so those two turns
+    /// are paired by adjacency instead — the most recent unanswered
+    /// `MODEL_COMPLETION{finish_reason: "Ask"}` is the question a
+    /// following `USER_RESPONSE` entry answers. Both turn kinds are then
+    /// merged into one journal-order sequence by the seq of whichever
+    /// entry completed the turn (a tool's `TOOL_RESULT`/`TOOL_DENIED`, or
+    /// the response's own `USER_RESPONSE`), since that's the only ordering
+    /// that's meaningful when the two kinds interleave across a task with
+    /// more than one question in it.
+    pub(crate) async fn build_conversation(&self, task_id: TaskId) -> Result<Vec<Message>> {
         let mut messages = self.system_and_task_messages(task_id).await?;
 
         let entries = self.tasks.journal_since(task_id, JournalSeq::ZERO).await?;
         let mut issued: HashMap<EffectId, (String, serde_json::Value)> = HashMap::new();
-        let mut resolved: HashMap<EffectId, (bool, String)> = HashMap::new(); // (denied, text)
-        let mut order: Vec<EffectId> = Vec::new();
+        let mut pending_question: Option<String> = None;
+        let mut turns: Vec<(JournalSeq, Vec<Message>)> = Vec::new();
 
         for entry in &entries {
             match &entry.kind {
@@ -348,9 +456,6 @@ impl AgentDriver {
                     payload,
                     ..
                 } if effect_kind == kinds::TOOL => {
-                    if !issued.contains_key(effect_id) {
-                        order.push(*effect_id);
-                    }
                     let tool = payload
                         .get("tool")
                         .and_then(|v| v.as_str())
@@ -367,12 +472,20 @@ impl AgentDriver {
                     payload,
                     ..
                 } if outcome_kind == kinds::TOOL_RESULT => {
-                    let rendered = payload
-                        .get("rendered")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string();
-                    resolved.insert(*effect_id, (false, rendered));
+                    if let Some((tool, input)) = issued.get(effect_id) {
+                        let rendered = payload
+                            .get("rendered")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        turns.push((
+                            entry.seq,
+                            vec![
+                                Message::assistant(format!("Calling `{tool}` with {input}")),
+                                Message::tool_result(effect_id.to_string(), rendered),
+                            ],
+                        ));
+                    }
                 }
                 JournalEntryKind::EffectCompleted {
                     effect_id,
@@ -380,31 +493,60 @@ impl AgentDriver {
                     payload,
                     ..
                 } if outcome_kind == kinds::TOOL_DENIED => {
-                    let reason = payload
-                        .get("reason")
+                    if let Some((tool, input)) = issued.get(effect_id) {
+                        let reason = payload
+                            .get("reason")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        turns.push((
+                            entry.seq,
+                            vec![
+                                Message::assistant(format!("Calling `{tool}` with {input}")),
+                                Message::tool_result(
+                                    effect_id.to_string(),
+                                    format!("Denied: {reason}"),
+                                ),
+                            ],
+                        ));
+                    }
+                }
+                JournalEntryKind::EffectCompleted {
+                    outcome_kind,
+                    payload,
+                    ..
+                } if outcome_kind == kinds::MODEL_COMPLETION => {
+                    if payload.get("finish_reason").and_then(|v| v.as_str()) == Some("Ask") {
+                        pending_question = payload
+                            .get("text")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string);
+                    }
+                }
+                JournalEntryKind::EffectCompleted {
+                    outcome_kind,
+                    payload,
+                    ..
+                } if outcome_kind == kinds::USER_RESPONSE => {
+                    let answer = payload
+                        .get("answer")
                         .and_then(|v| v.as_str())
                         .unwrap_or_default()
                         .to_string();
-                    resolved.insert(*effect_id, (true, reason));
+                    let mut pair = Vec::new();
+                    if let Some(question) = pending_question.take() {
+                        pair.push(Message::assistant(question));
+                    }
+                    pair.push(Message::user(answer));
+                    turns.push((entry.seq, pair));
                 }
                 _ => {}
             }
         }
 
-        for effect_id in order {
-            let Some((tool, input)) = issued.get(&effect_id) else {
-                continue;
-            };
-            let Some((denied, text)) = resolved.get(&effect_id) else {
-                continue;
-            };
-            messages.push(Message::assistant(format!("Calling `{tool}` with {input}")));
-            let body = if *denied {
-                format!("Denied: {text}")
-            } else {
-                text.clone()
-            };
-            messages.push(Message::tool_result(effect_id.to_string(), body));
+        turns.sort_by_key(|(seq, _)| *seq);
+        for (_, turn_messages) in turns {
+            messages.extend(turn_messages);
         }
 
         Ok(messages)
@@ -440,19 +582,16 @@ impl AgentDriver {
             )
             .await?;
 
+        let role = self.model_role(self.is_role_escalated(task_id));
         let messages = self.build_conversation(task_id).await?;
         let request = GenerateRequest::new(messages)
             .with_tools(self.tool_specs.clone())
             .with_turn_hint(turn_index);
-        let completion = self
+        let routed = self
             .orchestrator
-            .generate_action(
-                Role::PrimaryCoder,
-                request,
-                cancel.child(),
-                MAX_REFORMAT_RETRIES,
-            )
+            .generate_action(role, request, cancel.child(), MAX_REFORMAT_RETRIES)
             .await?;
+        let completion = routed.completion;
 
         self.tasks
             .append_journal(
@@ -464,6 +603,8 @@ impl AgentDriver {
                     payload: serde_json::json!({
                         "finish_reason": format!("{:?}", completion.finish_reason),
                         "text": completion.text,
+                        "role": role.as_str(),
+                        "model_id": routed.model_id,
                     }),
                 },
             )
@@ -495,8 +636,8 @@ impl AgentDriver {
     /// Run the next check in the escalation plan. Returns `Flow::Return`
     /// when the task reached a terminal state.
     async fn step_verifying(&self, task_id: TaskId, cancel: &CancellationToken) -> Result<Flow> {
-        let mut vs = self.take_verify_state(task_id);
-        let changed = self.task_changed_files(task_id);
+        let mut vs = self.take_verify_state(task_id).await?;
+        let changed = self.task_changed_files(task_id).await;
 
         // (Re)build the plan on first entry or after a repair widened it.
         if vs.plan.is_none() {
@@ -552,7 +693,13 @@ impl AgentDriver {
                 return Ok(Flow::Continue);
             }
             None => {
-                // Plan exhausted, everything passed, broad run satisfied.
+                // Plan exhausted, everything passed, broad run satisfied —
+                // the one Completed path that is an actual *verified*
+                // success, so it's the one that earns repository memory
+                // (M3): commands observed to work here, and any that took
+                // repeated failures to get right, feed the next task's
+                // Verifying discovery and repair strategy.
+                self.extract_and_write_memory(task_id).await;
                 self.put_verify_state(task_id, vs);
                 self.tasks
                     .transition(task_id, AgentState::Completed)
@@ -648,19 +795,35 @@ impl AgentDriver {
     }
 
     async fn step_diagnosing(&self, task_id: TaskId, _cancel: &CancellationToken) -> Result<()> {
-        let mut vs = self.take_verify_state(task_id);
-        let changed = self.task_changed_files(task_id);
+        let mut vs = self.take_verify_state(task_id).await?;
+        let changed = self.task_changed_files(task_id).await;
 
         let failures = vs
             .last_run
             .as_ref()
             .map(|r| r.failures.clone())
             .unwrap_or_default();
-        // No graph wiring in the live loop yet (Phase 6 follow-up); an
-        // empty neighbour set means suspects come from the failure
-        // locations ∩ the change ledger alone.
-        let diagnosis = diagnose(&failures, &changed, &[]);
+        // M2: graph neighbours of each changed file, so a failure whose
+        // location is a *caller* of something this task touched — not the
+        // touched file itself — still implicates the right suspect. Empty
+        // (exactly pre-M2 behaviour: suspects from failure locations ∩ the
+        // change ledger alone) when there's no store, no index generation
+        // yet, or the graph errors for any reason — this is an
+        // enrichment, never a hard dependency.
+        let neighbors = self.graph_neighbors_for(&changed).await;
+        let diagnosis = diagnose(&failures, &changed, &neighbors);
         let fingerprint = diagnosis.fingerprint();
+
+        // Loop / progress detection bookkeeping, computed *before* the
+        // DIAGNOSIS journal entry below (M5, C8) — its payload carries
+        // `file_state_hash`/`verification_frontier`/`failure_count`/
+        // `files_touched` precisely so `reconstruct_verify_state` can
+        // replay this exact `observe_*` call after a crash, rather than
+        // losing the loop detector's history on every cross-process resume.
+        for f in changed.iter().cloned() {
+            vs.files_touched.insert(f);
+        }
+        let file_state = self.changed_files_state_hash(&changed);
 
         self.tasks
             .append_journal(
@@ -679,16 +842,18 @@ impl AgentDriver {
                             .map(|s| s.path.display().to_string())
                             .collect::<Vec<_>>(),
                         "digest": diagnosis.context_digest(3, 3),
+                        "file_state_hash": file_state,
+                        "verification_frontier": vs.executed,
+                        "failure_count": failures.len(),
+                        "files_touched": vs.files_touched
+                            .iter()
+                            .map(|p| p.display().to_string())
+                            .collect::<Vec<_>>(),
                     }),
                 },
             )
             .await?;
 
-        // Loop / progress detection.
-        for f in changed.iter().cloned() {
-            vs.files_touched.insert(f);
-        }
-        let file_state = self.changed_files_state_hash(&changed);
         let step_sig = StepSignature::default()
             .with_error(&fingerprint)
             .with_file_state(file_state);
@@ -810,7 +975,7 @@ impl AgentDriver {
             return Ok(Flow::Continue);
         }
 
-        let mut vs = self.take_verify_state(task_id);
+        let mut vs = self.take_verify_state(task_id).await?;
         let digest = vs
             .pending_diagnosis
             .as_ref()
@@ -821,12 +986,13 @@ impl AgentDriver {
             .as_ref()
             .map(|d| d.fingerprint())
             .unwrap_or_default();
-        // Only `PrimaryCoder` is bound in Phase 7; `SwitchRole` still
-        // advances the escalation ladder in `RepairLedger::decide` (next
-        // stop: the user) even though the role binding is unchanged until
-        // a `FastCoder`/`PrimaryCoder` split lands with real models.
-        let role = Role::PrimaryCoder;
-        let _ = vs.repair_role_primary;
+        // `SwitchRole` (M1) escalates a repair turn to `PrimaryCoder` the
+        // same way the main loop does — `model_role` degrades to the
+        // unconditional `Role::PrimaryCoder` this used to hardcode whenever
+        // `FastCoder` isn't bound (every install today; multi-role catalog
+        // selection is COMPLETION-PLAN.md M6), so a single-model setup sees
+        // no behaviour change.
+        let role = self.model_role(vs.repair_role_primary);
 
         // Reason (repair-focused).
         let turn_index = self.tasks.count_model_calls(task_id).await?;
@@ -852,10 +1018,11 @@ impl AgentDriver {
         let request = GenerateRequest::new(messages)
             .with_tools(self.tool_specs.clone())
             .with_turn_hint(turn_index);
-        let completion = self
+        let routed = self
             .orchestrator
             .generate_action(role, request, cancel.child(), MAX_REFORMAT_RETRIES)
             .await?;
+        let completion = routed.completion;
 
         self.tasks
             .append_journal(
@@ -867,6 +1034,8 @@ impl AgentDriver {
                     payload: serde_json::json!({
                         "finish_reason": format!("{:?}", completion.finish_reason),
                         "text": completion.text,
+                        "role": role.as_str(),
+                        "model_id": routed.model_id,
                     }),
                 },
             )
@@ -889,12 +1058,15 @@ impl AgentDriver {
                 )
             }
             ActionRequest::Ask { .. } => {
-                vs.repair.record(RepairAttempt {
+                let attempt = RepairAttempt {
                     attempt: 0,
                     diagnosis_fingerprint: fingerprint,
                     edit_summary: "model asked a question".into(),
                     outcome: RepairOutcome::NoChange,
-                });
+                };
+                self.journal_repair_attempt(task_id, step_id, &attempt)
+                    .await?;
+                vs.repair.record(attempt);
                 self.put_verify_state(task_id, vs);
                 self.tasks
                     .transition(task_id, AgentState::WaitingForUser)
@@ -903,18 +1075,21 @@ impl AgentDriver {
             }
         };
 
-        vs.repair.record(RepairAttempt {
+        let attempt = RepairAttempt {
             attempt: 0,
             diagnosis_fingerprint: fingerprint,
             edit_summary,
             outcome,
-        });
+        };
+        self.journal_repair_attempt(task_id, step_id, &attempt)
+            .await?;
+        vs.repair.record(attempt);
         vs.plan = None; // re-verify from the start of the escalation
         vs.executed = 0;
         vs.last_passed = true;
+        let changed_now = self.task_changed_files(task_id).await;
         vs.detector.observe_step(
-            StepSignature::default()
-                .with_file_state(self.changed_files_state_hash(&self.task_changed_files(task_id))),
+            StepSignature::default().with_file_state(self.changed_files_state_hash(&changed_now)),
         );
 
         let state_now = self.tasks.get(task_id).await?.state;
@@ -1172,18 +1347,68 @@ impl AgentDriver {
         }
     }
 
+    /// Answer a task parked in `WAITING_FOR_USER` (M4) — the other half of
+    /// `ActionRequest::Ask`, which could get a task *into* that state but
+    /// had no way back out short of cancelling it. Journals the answer
+    /// (`USER_RESPONSE`, replayed by `build_conversation` as the user turn
+    /// following the question — `Trust::Instruction`, since this is the
+    /// user speaking, the same authority level a repo-owned instruction
+    /// file carries) and transitions back to `Implementing` so the next
+    /// model call sees both the question and the answer. Mirrors
+    /// `resolve_permission_scoped`'s shape: one resolution step, not a
+    /// loop — the caller (`valyria_app::Runtime::respond_to_user`) spawns
+    /// a fresh driver run afterward if that leaves the task live.
+    pub async fn respond_to_user(&self, task_id: TaskId, answer: String) -> Result<()> {
+        let task = self.tasks.get(task_id).await?;
+        if task.state != AgentState::WaitingForUser {
+            return Err(AgentError::NotWaitingForUser(task_id));
+        }
+        self.tasks
+            .append_journal(
+                task_id,
+                JournalEntryKind::EffectCompleted {
+                    effect_id: EffectId::new(),
+                    step_id: StepId::new(),
+                    outcome_kind: kinds::USER_RESPONSE.into(),
+                    payload: serde_json::json!({ "answer": answer }),
+                },
+            )
+            .await?;
+        self.tasks
+            .transition(task_id, AgentState::Implementing)
+            .await?;
+        Ok(())
+    }
+
     // --- helpers ---------------------------------------------------
 
-    pub(crate) fn task_changed_files(&self, task_id: TaskId) -> Vec<PathBuf> {
-        let mut files: Vec<PathBuf> = self
-            .ledger
-            .entries_for_task(task_id)
-            .into_iter()
-            .map(|e| e.path)
-            .collect();
-        files.sort();
-        files.dedup();
-        files
+    /// Every file `task_id` has touched — its own ledger entries plus,
+    /// recursively, every descendant's (M5: a parallel-wave step or a
+    /// role-pipeline Implementer runs as its own child task with its own
+    /// `task_id`, so its edits are recorded in the ledger under *that* id,
+    /// not the parent's; without this, a checkpoint taken after a
+    /// parallel wave — or the final Diagnosing pass's suspect-file
+    /// computation — would silently miss every file a child touched).
+    pub(crate) fn task_changed_files<'a>(
+        &'a self,
+        task_id: TaskId,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<PathBuf>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut files: Vec<PathBuf> = self
+                .ledger
+                .entries_for_task(task_id)
+                .into_iter()
+                .map(|e| e.path)
+                .collect();
+            if let Ok(children) = self.tasks.children_of(task_id).await {
+                for child in children {
+                    files.extend(self.task_changed_files(child.id).await);
+                }
+            }
+            files.sort();
+            files.dedup();
+            files
+        })
     }
 
     /// A hash over the current on-disk content of every file the task has
@@ -1203,20 +1428,247 @@ impl AgentDriver {
         ContentHash::of_bytes(&buf)
     }
 
-    fn take_verify_state(&self, task_id: TaskId) -> VerifyState {
+    /// M5, C8: the in-memory cache is process-local, so the *first* time a
+    /// fresh process touches a task's verify state — whether it's genuinely
+    /// new or this is a resume after a crash — this map has nothing for it.
+    /// Rather than assume "nothing in the map" means "nothing has happened
+    /// yet" (true before M5, false after a crash mid-repair), replay the
+    /// task's own journal to rebuild `detector`/`repair` exactly as they
+    /// would stand had the process never died. A task with no history at
+    /// all replays to the same empty detector/ledger this always produced,
+    /// so the change is invisible to every pre-M5 scenario.
+    async fn take_verify_state(&self, task_id: TaskId) -> Result<VerifyState> {
+        if let Some(vs) = self.verify_states.lock().unwrap().get(&task_id).cloned() {
+            return Ok(vs);
+        }
+        let entries = self.tasks.journal_since(task_id, JournalSeq::ZERO).await?;
+        let (detector, repair) = reconstruct_verify_state(&entries, MAX_REPAIR_ATTEMPTS);
+        let vs = VerifyState {
+            detector,
+            repair,
+            ..VerifyState::default()
+        };
         self.verify_states
             .lock()
             .unwrap()
-            .entry(task_id)
-            .or_insert_with(|| VerifyState {
-                repair: RepairLedger::new(MAX_REPAIR_ATTEMPTS),
-                ..VerifyState::default()
-            })
-            .clone()
+            .insert(task_id, vs.clone());
+        Ok(vs)
     }
 
     fn put_verify_state(&self, task_id: TaskId, state: VerifyState) {
         self.verify_states.lock().unwrap().insert(task_id, state);
+    }
+
+    /// Durably records one [`RepairAttempt`] before it's folded into the
+    /// (process-local) ledger, so [`reconstruct_verify_state`] can replay
+    /// it — and thus the ledger's attempt budget and escalation history —
+    /// after a crash (M5, C8).
+    async fn journal_repair_attempt(
+        &self,
+        task_id: TaskId,
+        step_id: StepId,
+        attempt: &RepairAttempt,
+    ) -> Result<()> {
+        self.tasks
+            .append_journal(
+                task_id,
+                JournalEntryKind::EffectCompleted {
+                    effect_id: EffectId::new(),
+                    step_id,
+                    outcome_kind: kinds::REPAIR_ATTEMPT.into(),
+                    payload: serde_json::json!({
+                        "diagnosis_fingerprint": attempt.diagnosis_fingerprint,
+                        "edit_summary": attempt.edit_summary,
+                        "outcome": repair_outcome_tag(attempt.outcome),
+                    }),
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Graph neighbours of `changed`'s files — every file whose graph
+    /// edges depend on one of them, within `GraphStore::impact_of`'s
+    /// standard depth — as `(changed_file, neighbor)` pairs, the shape
+    /// `valyria_verify::diagnose` matches a failure location against
+    /// (M2). Empty (not an error) when this driver has no `store`, no
+    /// index generation has been published yet, or the graph query fails
+    /// for any reason: this only ever enriches suspects beyond "failure
+    /// locations ∩ the change ledger", never gates diagnosis on the graph
+    /// existing.
+    async fn graph_neighbors_for(&self, changed: &[PathBuf]) -> Vec<(PathBuf, PathBuf)> {
+        let Some(store) = self.store.clone() else {
+            return Vec::new();
+        };
+        graph_neighbors(&store, changed).await
+    }
+
+    /// This task's verification runs, turned into repository memory (M3):
+    /// each run becomes one `Observation` (kind from its `Tier`, success
+    /// from its outcome), and `valyria_memory::extract`'s existing
+    /// heuristics do the rest — a command seen to pass is worth
+    /// remembering as "this works here"; one that took several failures
+    /// to get right becomes a pitfall. Best-effort: no `store`/`memory`
+    /// wired, no runs recorded, or a write error all just mean nothing is
+    /// extracted this time — never a reason to fail an otherwise-completed
+    /// task.
+    async fn extract_and_write_memory(&self, task_id: TaskId) {
+        let Some(memory) = self.memory.clone() else {
+            return;
+        };
+        let runs = match self.verification_log.list_for_task(task_id).await {
+            Ok(runs) => runs,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not list verification runs for memory extraction");
+                return;
+            }
+        };
+        if runs.is_empty() {
+            return;
+        }
+
+        // A command can appear multiple times across the task (a targeted
+        // run, then the mandatory full run); fold to its last-seen outcome
+        // and total failure count, matching what a human would actually
+        // conclude about it.
+        use std::collections::BTreeMap;
+        let mut folded: BTreeMap<String, valyria_memory::Observation> = BTreeMap::new();
+        for run in &runs {
+            // `tier` is `Tier`'s Debug format (`evidence.rs`:
+            // `run.tier.map(|t| format!("{t:?}"))`) — PascalCase variant
+            // names, not a serde rename.
+            let kind = match run.tier.as_deref() {
+                Some("Syntax") => valyria_memory::ObservationKind::BuildRun,
+                Some("TargetedTest") | Some("RelatedTests") | Some("Full") => {
+                    valyria_memory::ObservationKind::TestRun
+                }
+                Some("Style") => valyria_memory::ObservationKind::LintRun,
+                _ => valyria_memory::ObservationKind::CommandRun,
+            };
+            let entry = folded
+                .entry(run.command_display.clone())
+                .or_insert_with(|| {
+                    valyria_memory::Observation::new(kind, run.command_display.clone(), true)
+                        .with_provenance(task_id.to_string())
+                });
+            entry.success = run.passed();
+            if !run.passed() {
+                entry.failures += 1;
+            }
+        }
+
+        let now_ms = self.clock.now().as_millis() as i64;
+        let observations: Vec<valyria_memory::Observation> = folded.into_values().collect();
+        let entries = valyria_memory::extract(&observations, now_ms);
+        if entries.is_empty() {
+            return;
+        }
+        if let Err(e) = memory.write_all(entries).await {
+            tracing::warn!(error = %e, "failed to write extracted repository memory");
+        }
+    }
+
+    /// [`Self::journal_context_retrieved`]'s sibling for
+    /// [`system_and_task_messages`](Self::system_and_task_messages)'s
+    /// `ContextEngine`/`EngineInput` pipeline (M2), which assembles an
+    /// [`AssembledPrompt`] (a [`valyria_context::ContextSnapshot`] of
+    /// [`valyria_context::assemble::AssembledItem`]s) rather than the
+    /// Discovery step's [`AssembledContext`] of `ContextItem`s — distinct
+    /// types from two still-separate pipelines, so this can't share the
+    /// other method's body, but produces the identical `context_retrieved`
+    /// journal/event shape. Per-item token counts are estimated
+    /// (`rendered.chars().count() / 4`, the common rule-of-thumb ratio) —
+    /// `AssembledItem` doesn't carry a real count the way `ContextItem`
+    /// does, and this is a diagnostic field only, not budget enforcement
+    /// (`assembled.total_tokens`, used for `budget_used` below, *is* the
+    /// pipeline's real, budget-accurate figure).
+    async fn journal_prompt_context_retrieved(
+        &self,
+        task_id: TaskId,
+        assembled: &AssembledPrompt,
+        budget_total: usize,
+    ) -> Result<()> {
+        let items: Vec<serde_json::Value> = assembled
+            .snapshot
+            .items
+            .iter()
+            .map(|item| {
+                let path = match &item.provenance.source {
+                    ProvenanceSource::File { path } => path.clone(),
+                    ProvenanceSource::Instruction { path } => path.clone(),
+                    ProvenanceSource::ToolOutput { invocation } => format!("tool:{invocation}"),
+                    ProvenanceSource::Git { commit } => format!("git:{commit}"),
+                    ProvenanceSource::Memory { id } => format!("memory:{id}"),
+                    ProvenanceSource::ModelTurn => "<model turn>".to_string(),
+                };
+                let reason = if item.provenance.retrieval_path.is_empty() {
+                    "explicit".to_string()
+                } else {
+                    item.provenance.retrieval_path.join(" -> ")
+                };
+                serde_json::json!({
+                    "path": path,
+                    "reason": reason,
+                    "trust_level": trust_level_str(item.trust),
+                    "tokens": item.rendered.chars().count() / 4,
+                    "score": item.provenance.score,
+                })
+            })
+            .collect();
+
+        self.tasks
+            .append_journal(
+                task_id,
+                JournalEntryKind::EffectCompleted {
+                    effect_id: EffectId::new(),
+                    step_id: StepId::new(),
+                    outcome_kind: kinds::CONTEXT_RETRIEVED.into(),
+                    payload: serde_json::json!({
+                        "items": items,
+                        "budget_used": assembled.total_tokens,
+                        "budget_total": budget_total,
+                    }),
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Whether a `RepairDecision::SwitchRole` has escalated this task away
+    /// from `FastCoder` for the remainder of the run — a cheap peek at
+    /// `repair_role_primary` (bumped in `step_diagnosing`'s `SwitchRole`
+    /// arm) without the clone-out/clone-back `take_verify_state`/
+    /// `put_verify_state` pair every other reader of `VerifyState` uses,
+    /// since every non-repair caller (the main Implementing loop) only
+    /// ever needs this one field and never mutates it. Defaults to
+    /// unescalated for a task with no verify state yet — i.e. every task's
+    /// first turn.
+    pub(crate) fn is_role_escalated(&self, task_id: TaskId) -> bool {
+        self.verify_states
+            .lock()
+            .unwrap()
+            .get(&task_id)
+            .map(|s| s.repair_role_primary)
+            .unwrap_or(false)
+    }
+
+    /// Which role the next Reason step should call. `FastCoder` is the
+    /// default entry point — both for a task's very first Implementing turn
+    /// and every one after, main loop or repair — unless this task has been
+    /// escalated to `PrimaryCoder` for the rest of its run (§4.22's
+    /// FastCoder→PrimaryCoder escalation, driven by a `SwitchRole` repair
+    /// decision), or `FastCoder` simply isn't bound to anything. That second
+    /// case is the common one today: `valyria-app`'s real-inference wiring
+    /// only ever binds `PrimaryCoder` (multi-role catalog selection is
+    /// COMPLETION-PLAN.md M6), so this degrades to the unconditional
+    /// `Role::PrimaryCoder` every call site used before M1 with no observed
+    /// behaviour change for a single-model install.
+    pub(crate) fn model_role(&self, escalated: bool) -> Role {
+        if escalated || !self.orchestrator.is_bound(Role::FastCoder) {
+            Role::PrimaryCoder
+        } else {
+            Role::FastCoder
+        }
     }
 
     /// Record what the context assembler retrieved for a step so it
@@ -1288,6 +1740,7 @@ impl AgentDriver {
             cancel,
             launcher: self.launcher.clone(),
             sandbox_profile: self.sandbox_profile.clone(),
+            store: self.store.clone(),
         }
     }
 }
@@ -1298,6 +1751,41 @@ impl AgentDriver {
 pub(crate) enum Flow {
     Continue,
     Return,
+}
+
+/// [`AgentDriver::graph_neighbors_for`]'s actual work, as a free function
+/// so it's testable without a full `AgentDriver` (M2): every file whose
+/// graph edges depend on one of `changed`'s files, within
+/// `GraphStore::impact_of`'s standard depth, as `(changed_file, neighbor)`
+/// pairs — the shape `valyria_verify::diagnose` matches a failure location
+/// against. Empty, never an error, when there's no index generation yet
+/// or a query fails — an enrichment, never a hard dependency.
+async fn graph_neighbors(
+    store: &Arc<valyria_store::Store>,
+    changed: &[PathBuf],
+) -> Vec<(PathBuf, PathBuf)> {
+    let index = valyria_index::IndexStore::new(store.clone());
+    let Ok(Some(info)) = index.current().await else {
+        return Vec::new();
+    };
+    let graph = valyria_graph::GraphStore::new(store.clone());
+
+    const IMPACT_DEPTH: usize = 2;
+    let mut pairs = Vec::new();
+    for path in changed {
+        let Some(path_str) = path.to_str() else {
+            continue;
+        };
+        if let Ok(impact) = graph
+            .impact_of(info.generation, path_str, IMPACT_DEPTH)
+            .await
+        {
+            for affected in impact.affected_files {
+                pairs.push((path.clone(), PathBuf::from(affected)));
+            }
+        }
+    }
+    pairs
 }
 
 /// Wire shape for one parsed verification failure (§19, §35, G15).
@@ -1337,6 +1825,127 @@ fn describe_finding(f: &LoopFinding) -> String {
         LoopFinding::FrontierStalled { iterations } => {
             format!("{iterations} cycles, no progress")
         }
+    }
+}
+
+/// M5, C8: rebuilds a [`LoopDetector`] and [`RepairLedger`] by replaying
+/// one task's journal from the start, in order — the same technique
+/// `plan_exec::plan_rejection_count` already uses for the plan-repair
+/// budget. Every mutation the live driver ever makes to these two structs
+/// is driven by data this function can also see in the journal (the
+/// `DIAGNOSIS` entry carries the loop detector's inputs; `REPAIR_ATTEMPT`
+/// and the `decision` field of `REPAIR_DECISION` carry the ledger's), so a
+/// task with no gaps in its journal reconstructs to bit-for-bit the same
+/// state a process that never crashed would have — a crash simply cannot
+/// be distinguished from a resume by anything downstream of this.
+fn reconstruct_verify_state(
+    entries: &[valyria_task::JournalEntry],
+    max_repair_attempts: u32,
+) -> (LoopDetector, RepairLedger) {
+    let mut detector = LoopDetector::default();
+    let mut repair = RepairLedger::new(max_repair_attempts);
+    let mut files_touched: BTreeSet<PathBuf> = BTreeSet::new();
+
+    for entry in entries {
+        let JournalEntryKind::EffectCompleted {
+            outcome_kind,
+            payload,
+            ..
+        } = &entry.kind
+        else {
+            continue;
+        };
+        match outcome_kind.as_str() {
+            kinds::VERIFY_RESULT => {
+                if payload.get("passed").and_then(|v| v.as_bool()) == Some(true) {
+                    detector.observe_failure(None);
+                }
+            }
+            kinds::DIAGNOSIS => {
+                let fingerprint = payload
+                    .get("fingerprint")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let file_state_hash: ContentHash = payload
+                    .get("file_state_hash")
+                    .cloned()
+                    .and_then(|v| serde_json::from_value(v).ok())
+                    .unwrap_or_else(|| ContentHash::of_bytes(b""));
+                let verification_frontier = payload
+                    .get("verification_frontier")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize;
+                let failure_count = payload
+                    .get("failure_count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize;
+                if let Some(paths) = payload.get("files_touched").and_then(|v| v.as_array()) {
+                    for p in paths {
+                        if let Some(s) = p.as_str() {
+                            files_touched.insert(PathBuf::from(s));
+                        }
+                    }
+                }
+
+                let step_sig = StepSignature::default()
+                    .with_error(fingerprint)
+                    .with_file_state(file_state_hash);
+                let _finding = detector
+                    .observe_step(step_sig)
+                    .or_else(|| detector.observe_failure(Some(fingerprint)))
+                    .or_else(|| {
+                        detector.observe_progress(ProgressMetric {
+                            verification_frontier,
+                            failure_count,
+                            files_touched: files_touched.clone(),
+                        })
+                    });
+            }
+            kinds::REPAIR_ATTEMPT => {
+                let diagnosis_fingerprint = payload
+                    .get("diagnosis_fingerprint")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let edit_summary = payload
+                    .get("edit_summary")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let outcome = match payload.get("outcome").and_then(|v| v.as_str()) {
+                    Some("fixed") => RepairOutcome::Fixed,
+                    Some("improved") => RepairOutcome::Improved,
+                    Some("regressed") => RepairOutcome::Regressed,
+                    _ => RepairOutcome::NoChange,
+                };
+                repair.record(RepairAttempt {
+                    attempt: 0,
+                    diagnosis_fingerprint,
+                    edit_summary,
+                    outcome,
+                });
+            }
+            kinds::REPAIR_DECISION => {
+                let decision = payload.get("decision").and_then(|v| v.as_str());
+                match decision {
+                    Some("escalate_strategy") => repair.mark_escalated(),
+                    Some("switch_role") => repair.mark_switched_role(),
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    (detector, repair)
+}
+
+fn repair_outcome_tag(outcome: RepairOutcome) -> &'static str {
+    match outcome {
+        RepairOutcome::Fixed => "fixed",
+        RepairOutcome::Improved => "improved",
+        RepairOutcome::NoChange => "no_change",
+        RepairOutcome::Regressed => "regressed",
     }
 }
 
@@ -1380,5 +1989,267 @@ mod diagnostics_tests {
         assert_eq!(v["kind"], "timeout");
         assert_eq!(v["location"].as_array().unwrap().len(), 0);
         assert!(v["failing_test"].is_null());
+    }
+}
+
+#[cfg(test)]
+mod reconstruct_verify_state_tests {
+    use super::*;
+    use valyria_task::JournalEntry;
+    use valyria_types::Timestamp;
+
+    fn entry(kind: JournalEntryKind) -> JournalEntry {
+        JournalEntry {
+            seq: JournalSeq::ZERO,
+            task_id: TaskId::new(),
+            kind,
+            created_at: Timestamp::from_millis(0),
+        }
+    }
+
+    fn verify_result(passed: bool) -> JournalEntry {
+        entry(JournalEntryKind::EffectCompleted {
+            effect_id: EffectId::new(),
+            step_id: StepId::new(),
+            outcome_kind: kinds::VERIFY_RESULT.into(),
+            payload: serde_json::json!({"passed": passed}),
+        })
+    }
+
+    /// `frontier` also seeds the file-state hash — a real repair cycle
+    /// edits the file between diagnoses, so the same failure fingerprint
+    /// recurring across cycles never carries an *identical* file state too
+    /// (that combination is what `ExactRepeat` — "the literal same step
+    /// again" — detects, a distinct class from `RepeatedFailure` — "the
+    /// same failure, but the agent keeps trying different things").
+    fn diagnosis(fingerprint: &str, frontier: usize) -> JournalEntry {
+        entry(JournalEntryKind::EffectCompleted {
+            effect_id: EffectId::new(),
+            step_id: StepId::new(),
+            outcome_kind: kinds::DIAGNOSIS.into(),
+            payload: serde_json::json!({
+                "summary": "boom",
+                "fingerprint": fingerprint,
+                "suspects": [],
+                "digest": "",
+                "file_state_hash": ContentHash::of_bytes(format!("{fingerprint}#{frontier}").as_bytes()),
+                "verification_frontier": frontier,
+                "failure_count": 1,
+                "files_touched": ["src/lib.rs"],
+            }),
+        })
+    }
+
+    fn repair_attempt(fingerprint: &str, outcome: &str) -> JournalEntry {
+        entry(JournalEntryKind::EffectCompleted {
+            effect_id: EffectId::new(),
+            step_id: StepId::new(),
+            outcome_kind: kinds::REPAIR_ATTEMPT.into(),
+            payload: serde_json::json!({
+                "diagnosis_fingerprint": fingerprint,
+                "edit_summary": "an edit",
+                "outcome": outcome,
+            }),
+        })
+    }
+
+    fn repair_decision(decision: &str) -> JournalEntry {
+        entry(JournalEntryKind::EffectCompleted {
+            effect_id: EffectId::new(),
+            step_id: StepId::new(),
+            outcome_kind: kinds::REPAIR_DECISION.into(),
+            payload: serde_json::json!({"decision": decision}),
+        })
+    }
+
+    #[test]
+    fn an_empty_journal_reconstructs_to_the_same_empty_state_a_fresh_task_starts_with() {
+        let (detector, repair) = reconstruct_verify_state(&[], MAX_REPAIR_ATTEMPTS);
+        assert_eq!(detector.step_count(), 0);
+        assert_eq!(repair.count(), 0);
+        assert_eq!(repair.decide("fp", None), RepairDecision::Continue);
+    }
+
+    /// The core C8 guarantee: a repeated-failure loop that would have
+    /// tripped `RepeatedFailure` had the process never restarted still
+    /// trips it after reconstruction — the third occurrence of the same
+    /// fingerprint counts the two that happened "before the crash" too.
+    #[test]
+    fn repeated_failure_history_survives_reconstruction() {
+        let entries = vec![
+            diagnosis("same-fingerprint", 0),
+            diagnosis("same-fingerprint", 1),
+        ];
+        let (mut detector, _) = reconstruct_verify_state(&entries, MAX_REPAIR_ATTEMPTS);
+
+        // A third occurrence of the identical fingerprint (different file
+        // state, as a real edit-between-cycles would produce), observed as
+        // the live driver would on the next cycle, must trip
+        // RepeatedFailure — proving the first two are genuinely counted,
+        // not discarded.
+        let step_sig = StepSignature::default()
+            .with_error("same-fingerprint")
+            .with_file_state(ContentHash::of_bytes(b"same-fingerprint#2"));
+        let finding = detector
+            .observe_step(step_sig)
+            .or_else(|| detector.observe_failure(Some("same-fingerprint")));
+        assert!(
+            matches!(finding, Some(LoopFinding::RepeatedFailure { count: 3, .. })),
+            "{finding:?}"
+        );
+    }
+
+    /// A passing VERIFY_RESULT between two failures must clear the streak
+    /// on reconstruction exactly as it does live (`observe_failure(None)`
+    /// on a pass) — otherwise a resumed task would spuriously trip
+    /// RepeatedFailure on failures that aren't actually consecutive.
+    #[test]
+    fn a_pass_in_the_journal_clears_the_failure_streak_on_reconstruction() {
+        let entries = vec![
+            diagnosis("fp", 0),
+            diagnosis("fp", 1),
+            verify_result(true), // clears the streak
+        ];
+        let (mut detector, _) = reconstruct_verify_state(&entries, MAX_REPAIR_ATTEMPTS);
+        let step_sig = StepSignature::default()
+            .with_error("fp")
+            .with_file_state(ContentHash::of_bytes(b"fp#2"));
+        let finding = detector
+            .observe_step(step_sig)
+            .or_else(|| detector.observe_failure(Some("fp")));
+        assert_eq!(finding, None, "the pass should have reset the streak");
+    }
+
+    /// The repair budget itself must not reset on a crash — replaying the
+    /// same number of REPAIR_ATTEMPT entries the live ledger would have
+    /// recorded must exhaust the same budget, or a resumed task could
+    /// retry forever across repeated restarts (exactly the bug C8 exists
+    /// to close).
+    #[test]
+    fn repair_attempt_budget_survives_reconstruction() {
+        let entries = vec![
+            repair_attempt("fp", "improved"),
+            repair_attempt("fp", "no_change"),
+        ];
+        let (_, repair) = reconstruct_verify_state(&entries, 2);
+        assert_eq!(repair.count(), 2);
+        assert!(matches!(
+            repair.decide("fp", None),
+            RepairDecision::GiveUp { .. }
+        ));
+    }
+
+    /// `mark_escalated`/`mark_switched_role` are replayed from the
+    /// `REPAIR_DECISION` entries' own `decision` field — reconstruction
+    /// must land on `SwitchRole` next, not re-offer `EscalateStrategy`,
+    /// for a task that had already escalated before the crash.
+    #[test]
+    fn escalation_state_survives_reconstruction() {
+        let entries = vec![
+            repair_attempt("fp", "no_change"),
+            repair_attempt("fp", "no_change"),
+            repair_decision("escalate_strategy"),
+        ];
+        let (_, repair) = reconstruct_verify_state(&entries, 9);
+        assert_eq!(repair.decide("fp", None), RepairDecision::SwitchRole);
+    }
+
+    #[test]
+    fn files_touched_accumulates_across_diagnosis_entries_in_order() {
+        let entries = vec![diagnosis("fp1", 0), diagnosis("fp2", 1)];
+        // Two distinct fingerprints and frontiers: the progress metric only
+        // fires once the earlier detectors return None on both cycles, but
+        // reconstruction must not panic or lose track of accumulation
+        // regardless — this is primarily a no-panic / determinism check.
+        let (detector, _) = reconstruct_verify_state(&entries, MAX_REPAIR_ATTEMPTS);
+        assert_eq!(detector.step_count(), 2);
+    }
+}
+
+#[cfg(test)]
+mod graph_neighbors_tests {
+    use super::*;
+    use std::path::Path;
+    use valyria_embed::{EmbedPipeline, EmbedStore, HashingEmbedder};
+    use valyria_graph::GraphStore as TestGraphStore;
+    use valyria_index::{IndexPipeline, IndexStore};
+    use valyria_lang::LanguageRegistry;
+
+    fn migrations() -> Vec<valyria_store::Migration> {
+        let mut m: Vec<valyria_store::Migration> = valyria_index::MIGRATIONS.to_vec();
+        m.extend(valyria_graph::MIGRATIONS.iter().copied());
+        m.extend(valyria_embed::MIGRATIONS.iter().copied());
+        m
+    }
+
+    /// M2: a caller depending on a changed callee shows up as a graph
+    /// neighbour of the changed file — the property `diagnose`'s
+    /// `GraphNeighbor` suspect reason relies on to flag "you broke this
+    /// caller by changing what it depends on", not just "this file itself
+    /// changed". Direct unit test of the free function (no full
+    /// `AgentDriver`/model/task machinery needed — see the function's own
+    /// doc comment for why it's split out).
+    #[tokio::test]
+    async fn a_caller_is_a_graph_neighbour_of_a_changed_callee() {
+        let ws = valyria_testkit::TempWorkspace::new();
+        ws.write(
+            "src/callee.rs",
+            "//! The changed file.\n\
+             pub fn compute_total(items: &[f64]) -> f64 {\n\
+             \x20   items.iter().sum()\n\
+             }\n",
+        );
+        ws.write(
+            "src/caller.rs",
+            "//! Depends on callee — where the failure actually shows up.\n\
+             use crate::callee::compute_total;\n\
+             \n\
+             pub fn checkout(items: &[f64]) -> f64 {\n\
+             \x20   compute_total(items)\n\
+             }\n",
+        );
+
+        let store = Arc::new(valyria_store::Store::open_in_memory(&migrations()).unwrap());
+        let index = IndexStore::new(store.clone());
+        let graph = TestGraphStore::new(store.clone());
+        let embed = EmbedStore::new(store.clone());
+
+        let pipeline = IndexPipeline::new(
+            ws.path().to_path_buf(),
+            LanguageRegistry::with_builtin_languages().unwrap(),
+            index.clone(),
+        );
+        let delta = pipeline.bootstrap_unstaged(&|_| {}).await.unwrap();
+        graph.build_for(&index, delta.generation).await.unwrap();
+        EmbedPipeline::new(
+            ws.path().to_path_buf(),
+            LanguageRegistry::with_builtin_languages().unwrap(),
+            Arc::new(HashingEmbedder::default()),
+            embed,
+        )
+        .bootstrap(&index, delta.generation)
+        .await
+        .unwrap();
+
+        let changed = vec![PathBuf::from("src/callee.rs")];
+        let pairs = graph_neighbors(&store, &changed).await;
+
+        assert!(
+            pairs.iter().any(
+                |(changed_file, neighbor)| changed_file == Path::new("src/callee.rs")
+                    && neighbor == Path::new("src/caller.rs")
+            ),
+            "expected (callee.rs, caller.rs) among the graph-neighbour pairs, got {pairs:?}"
+        );
+    }
+
+    /// No store — the honest, error-free empty result the live driver's
+    /// `graph_neighbors_for` falls back to.
+    #[tokio::test]
+    async fn no_generation_yet_is_an_empty_result_not_an_error() {
+        let store = Arc::new(valyria_store::Store::open_in_memory(&migrations()).unwrap());
+        let changed = vec![PathBuf::from("src/anything.rs")];
+        let pairs = graph_neighbors(&store, &changed).await;
+        assert!(pairs.is_empty());
     }
 }

@@ -16,6 +16,8 @@ pub enum AgentError {
     UnknownTool(String),
     #[error("task {0} is not currently waiting for a permission decision")]
     NotWaitingForPermission(TaskId),
+    #[error("task {0} is not currently waiting for a user response")]
+    NotWaitingForUser(TaskId),
     #[error("task {0} has no pending tool call to resolve")]
     NoPendingToolCall(TaskId),
     #[error("approval request `{got}` is stale; the current pending request is `{current}`")]
@@ -36,6 +38,7 @@ impl ErrorCode for AgentError {
             AgentError::MalformedCompletion { .. } => "agent.malformed_completion",
             AgentError::UnknownTool(_) => "agent.unknown_tool",
             AgentError::NotWaitingForPermission(_) => "agent.not_waiting_for_permission",
+            AgentError::NotWaitingForUser(_) => "agent.not_waiting_for_user",
             AgentError::NoPendingToolCall(_) => "agent.no_pending_tool_call",
             AgentError::ApprovalSuperseded { .. } => "approval.superseded",
             AgentError::Plan(_) => "agent.plan",

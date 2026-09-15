@@ -14,17 +14,19 @@ use std::sync::Arc;
 use futures::stream::{BoxStream, StreamExt};
 use valyria_events::{Delivery, EventEnvelope, Seq};
 use valyria_protocol::{
-    capability, Client, ConfigEntryWire, ConfigShowResponse, CpuInfoWire, DoctorCheckWire,
-    DoctorRunResponse, GitBranchWire, GitBranchesResponse, GitCommitWire, GitDiffResponse,
-    GitFileStatusWire, GitLogResponse, GitStatusResponse, GpuInfoWire, HardwareProbeResponse,
-    HelloResponse, IndexStatusResponse, LedgerChangeWire, LedgerChangesResponse, MemoryEntryWire,
-    MemoryListRequest, MemoryListResponse, ModelCandidateWire, ModelInspectResponse,
-    ModelListResponse, ModelRecommendResponse, ModelRemoveResponse, ModelSummaryWire,
-    PermissionResolveRequest, PlanGetResponse, PlanStepSummary, PurgeResponse, Request, Response,
+    capability, ArtifactWire, Client, ConfigEntryWire, ConfigShowResponse, CpuInfoWire,
+    DoctorCheckWire, DoctorRunResponse, GitBranchWire, GitBranchesResponse, GitCommitWire,
+    GitDiffResponse, GitFileStatusWire, GitLogResponse, GitStatusResponse, GpuInfoWire,
+    HardwareProbeResponse, HelloResponse, IndexStatusResponse, LedgerChangeWire,
+    LedgerChangesResponse, MemoryEntryWire, MemoryListRequest, MemoryListResponse,
+    ModelCandidateWire, ModelInspectResponse, ModelListResponse, ModelRecommendResponse,
+    ModelRemoveResponse, ModelSummaryWire, PermissionResolveRequest, PlanDiffWire, PlanGetResponse,
+    PlanRevisionWire, PlanRevisionsResponse, PlanStepSummary, PurgeResponse, Request, Response,
     ScoreExplanationWire, SearchFeatureWire, SearchHitWire, SearchQueryResponse,
     SearchStageScoreWire, StorageEntryWire, StorageInspectResponse, StoragePurgeRequest,
-    TaskCreateResponse, TaskIdRequest, TaskListResponse, TaskReportResponse, TaskRollbackRequest,
-    TaskRollbackResponse, TaskStatusResponse, TaskSummary, VerifiedClaimWire, WireError, WireEvent,
+    TaskArtifactsResponse, TaskChildrenResponse, TaskCreateResponse, TaskIdRequest,
+    TaskListResponse, TaskReportResponse, TaskRollbackRequest, TaskRollbackResponse,
+    TaskStatusResponse, TaskSummary, VerifiedClaimWire, WireError, WireEvent,
     WorkspaceStatusResponse, PROTOCOL_VERSION,
 };
 use valyria_types::{CheckpointId, ErrorCode, PermissionMode, TaskId};
@@ -89,7 +91,72 @@ fn task_summary(t: &valyria_task::Task) -> TaskSummary {
         state: t.state.to_string(),
         created_at_ms: t.created_at.as_millis() as u64,
         updated_at_ms: t.updated_at.as_millis() as u64,
+        parent_task_id: t.parent_task.map(|p| p.to_string()),
     }
+}
+
+/// M5, protocol 1.13.0.
+fn stored_artifact_wire(a: &valyria_plan::StoredArtifact) -> ArtifactWire {
+    ArtifactWire {
+        produced_by: a.produced_by.as_str().to_string(),
+        kind: a.artifact.kind().as_str().to_string(),
+        artifact: serde_json::to_value(&a.artifact).unwrap_or(serde_json::Value::Null),
+        created_at_ms: a.created_at.as_millis() as u64,
+    }
+}
+
+/// M5, protocol 1.13.0. Unlike `Request::TaskPlan`'s own step mapping,
+/// `checkpoint_id` is always `None` here — checkpoints are tied to a
+/// specific step id within the *current* revision, and this renders
+/// every historical revision, not just the latest.
+fn plan_step_summary(s: &valyria_plan::PlanStep) -> PlanStepSummary {
+    PlanStepSummary {
+        id: s.id.to_string(),
+        intent: s.intent.clone(),
+        targets: s.targets.iter().map(|p| p.display().to_string()).collect(),
+        depends_on: s.depends_on.iter().map(|d| d.to_string()).collect(),
+        rollback_boundary: s.rollback_boundary,
+        checkpoint: s.checkpoint,
+        checkpoint_id: None,
+    }
+}
+
+/// M5, protocol 1.13.0. `revisions` must be in ascending-revision order —
+/// the diff for each entry is against the one immediately before it in
+/// the slice, not a re-fetch from the store.
+fn plan_revisions_wire(revisions: &[valyria_plan::PlanRevision]) -> Vec<PlanRevisionWire> {
+    let mut out = Vec::with_capacity(revisions.len());
+    for (i, rev) in revisions.iter().enumerate() {
+        let diff_from_parent = if i == 0 {
+            None
+        } else {
+            let prior = &revisions[i - 1];
+            let diff = rev.plan.diff(&prior.plan);
+            Some(PlanDiffWire {
+                added: diff.added.iter().map(|s| s.as_str().to_string()).collect(),
+                removed: diff
+                    .removed
+                    .iter()
+                    .map(|s| s.as_str().to_string())
+                    .collect(),
+                changed: diff
+                    .changed
+                    .iter()
+                    .map(|s| s.as_str().to_string())
+                    .collect(),
+            })
+        };
+        out.push(PlanRevisionWire {
+            revision: rev.revision,
+            parent_hash: rev.parent_hash.clone(),
+            rationale: rev.rationale.clone(),
+            content_hash: rev.plan.content_hash().to_hex(),
+            steps: rev.plan.steps.iter().map(plan_step_summary).collect(),
+            created_at_ms: rev.created_at.as_millis() as u64,
+            diff_from_parent,
+        });
+    }
+    out
 }
 
 fn git_file_status_wire(f: &valyria_git::FileStatus) -> GitFileStatusWire {
@@ -373,6 +440,42 @@ impl Client for EmbeddedClient {
                         revision: None,
                         content_hash: None,
                         steps: vec![],
+                    }),
+                    Err(e) => error_response(e),
+                }
+            }
+            Request::TaskChildren(r) => {
+                let task_id = match task_id_from(r) {
+                    Ok(id) => id,
+                    Err(resp) => return resp,
+                };
+                match self.runtime.task_children(task_id).await {
+                    Ok(children) => Response::TaskChildren(TaskChildrenResponse {
+                        children: children.iter().map(task_summary).collect(),
+                    }),
+                    Err(e) => error_response(e),
+                }
+            }
+            Request::TaskArtifacts(r) => {
+                let task_id = match task_id_from(r) {
+                    Ok(id) => id,
+                    Err(resp) => return resp,
+                };
+                match self.runtime.task_artifacts(task_id).await {
+                    Ok(artifacts) => Response::TaskArtifacts(TaskArtifactsResponse {
+                        artifacts: artifacts.iter().map(stored_artifact_wire).collect(),
+                    }),
+                    Err(e) => error_response(e),
+                }
+            }
+            Request::PlanRevisions(r) => {
+                let task_id = match task_id_from(r) {
+                    Ok(id) => id,
+                    Err(resp) => return resp,
+                };
+                match self.runtime.plan_revisions(task_id).await {
+                    Ok(revisions) => Response::PlanRevisions(PlanRevisionsResponse {
+                        revisions: plan_revisions_wire(&revisions),
                     }),
                     Err(e) => error_response(e),
                 }

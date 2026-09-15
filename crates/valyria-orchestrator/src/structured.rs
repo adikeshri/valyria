@@ -15,11 +15,13 @@
 
 use serde_json::Value;
 use valyria_model::{
-    Capabilities, Completion, FinishReason, GenerateRequest, Message, ModelRuntime, ToolCall,
+    Capabilities, Completion, FinishReason, GenerateRequest, Message, ModelRuntime, TokenUsage,
+    ToolCall,
 };
 use valyria_util::CancellationToken;
 
 use crate::error::{OrchestratorError, Result};
+use crate::role::Role;
 
 /// The outcome of trying to read a tool call out of a completion.
 #[derive(Debug, Clone, PartialEq)]
@@ -188,6 +190,46 @@ pub async fn resolve_action<M: ModelRuntime + ?Sized>(
                 }
             }
         }
+    }
+}
+
+/// Turn a [`ResolvedAction`] into the [`Completion`] shape the driver
+/// expects (`Finish` / `Ask` / exactly one tool call), warning and dropping
+/// any call after the first when a model emits more than one in a single
+/// turn. Shared by [`crate::Orchestrator::generate_action`] and
+/// [`crate::RoleRouter::generate_action`] so the two model-binding paths —
+/// one model per role, and a fallback chain per role — can't drift on this
+/// policy.
+pub fn action_to_completion(role: Role, action: ResolvedAction) -> Completion {
+    match action {
+        ResolvedAction::ToolCalls(mut calls) => {
+            if calls.len() > 1 {
+                tracing::warn!(
+                    role = role.as_str(),
+                    dropped = calls.len() - 1,
+                    "model emitted multiple tool calls in one turn; taking the first"
+                );
+                calls.truncate(1);
+            }
+            Completion {
+                text: String::new(),
+                tool_calls: calls,
+                finish_reason: FinishReason::ToolCalls,
+                usage: TokenUsage::default(),
+            }
+        }
+        ResolvedAction::Answer { text, ask: true } => Completion {
+            text,
+            tool_calls: Vec::new(),
+            finish_reason: FinishReason::Ask,
+            usage: TokenUsage::default(),
+        },
+        ResolvedAction::Answer { text, ask: false } => Completion {
+            text,
+            tool_calls: Vec::new(),
+            finish_reason: FinishReason::Stop,
+            usage: TokenUsage::default(),
+        },
     }
 }
 

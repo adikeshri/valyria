@@ -6,10 +6,13 @@ use valyria_model::ToolSpec;
 use valyria_tools::ToolRuntime;
 
 /// Registered but stubbed (`tools.not_yet_implemented` unconditionally) —
-/// offering these lets a model "successfully" pick a tool call that can
-/// never succeed. Excluded until the real search/index pipeline lands
-/// (docs/ROADMAP.md's context/search wiring follow-up).
-const EXCLUDED: &[&str] = &["search", "symbol_search"];
+/// offering one of these lets a model "successfully" pick a tool call that
+/// can never succeed. `search` / `symbol_search` were here until M2 wired
+/// them to the real fused search engine (`docs/COMPLETION-PLAN.md`);
+/// `git_blame` still is — `valyria-git` has no blame implementation at all
+/// yet (PLAN §4.8 calls for one; `gix`-based line-range blame is real,
+/// separate work, not part of M2's scope).
+const EXCLUDED: &[&str] = &["git_blame"];
 
 /// Every tool the model is allowed to call this turn — the full registry
 /// minus the not-yet-implemented stubs.
@@ -41,15 +44,23 @@ mod tests {
     }
 
     #[test]
-    fn excludes_not_yet_implemented_search_tools() {
+    fn excludes_the_unimplemented_git_blame_tool() {
         let specs = bound_tool_specs(&runtime());
-        assert!(!specs.iter().any(|s| s.name == "search"));
-        assert!(!specs.iter().any(|s| s.name == "symbol_search"));
+        assert!(!specs.iter().any(|s| s.name == "git_blame"));
     }
 
     #[test]
     fn includes_real_tools() {
         let specs = bound_tool_specs(&runtime());
         assert!(specs.iter().any(|s| s.name == "read_file"));
+    }
+
+    /// M2 (`docs/COMPLETION-PLAN.md`): `search`/`symbol_search` used to be
+    /// stubs — this is the regression guard for that fix staying fixed.
+    #[test]
+    fn offers_the_now_implemented_search_tools() {
+        let specs = bound_tool_specs(&runtime());
+        assert!(specs.iter().any(|s| s.name == "search"));
+        assert!(specs.iter().any(|s| s.name == "symbol_search"));
     }
 }

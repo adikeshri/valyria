@@ -26,17 +26,23 @@ valyria-plan = { workspace = true }
 valyria-verify = { workspace = true }
 valyria-vfs = { workspace = true }
 valyria-sandbox = { workspace = true }
+valyria-store = { workspace = true }
+valyria-index = { workspace = true }
+valyria-graph = { workspace = true }
+valyria-memory = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
+futures = { workspace = true }
 
 [dev-dependencies]
 valyria-testkit = { workspace = true }
 valyria-runtime-fake = { workspace = true }
-valyria-store = { workspace = true }
 valyria-events = { workspace = true }
+valyria-embed = { workspace = true }
+valyria-lang = { workspace = true }
+valyria-search = { workspace = true }
 tempfile = { workspace = true }
 async-trait = { workspace = true }
-futures = { workspace = true }

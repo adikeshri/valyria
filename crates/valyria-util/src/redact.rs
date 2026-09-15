@@ -51,9 +51,21 @@ static PATTERNS: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
     ]
 });
 
+/// A run of characters `looks_like_secret` can meaningfully judge —
+/// broken on the same boundaries prose and shell/log output naturally
+/// have (whitespace and common quoting/bracketing punctuation), so a
+/// long high-entropy *token* gets evaluated on its own rather than as
+/// part of a whole line.
+static TOKEN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"[A-Za-z0-9\-_./+=]{20,512}"#).unwrap());
+
 /// Redact known credential shapes from `text`, returning the redacted text
 /// and the names of every pattern that matched (for logging/telemetry —
-/// never log the matched value itself).
+/// never log the matched value itself). Two passes, as the module docs
+/// describe: known shapes first (precise, so their names are worth
+/// reporting), then a generic high-entropy-token sweep (M3) for whatever
+/// doesn't match a known shape but still looks like an opaque secret —
+/// e.g. a bare API key with no recognizable prefix or `KEY=` framing.
 pub fn redact(text: &str) -> (String, Vec<&'static str>) {
     let mut out = text.to_string();
     let mut hit: Vec<&'static str> = Vec::new();
@@ -76,6 +88,22 @@ pub fn redact(text: &str) -> (String, Vec<&'static str>) {
                 })
                 .into_owned();
         }
+    }
+
+    let mut generic_hit = false;
+    out = TOKEN
+        .replace_all(&out, |caps: &regex::Captures| {
+            let token = &caps[0];
+            if looks_like_secret(token) {
+                generic_hit = true;
+                REDACTED.to_string()
+            } else {
+                token.to_string()
+            }
+        })
+        .into_owned();
+    if generic_hit {
+        hit.push("high_entropy_token");
     }
 
     (out, hit)
@@ -171,5 +199,25 @@ mod tests {
         assert!(looks_like_secret("kX9mQ2pL7vN4zR8wT3jH6bY1"));
         assert!(!looks_like_secret("the_quick_brown_fox_jumps"));
         assert!(!looks_like_secret("short"));
+    }
+
+    /// M3: a bare high-entropy token with no recognizable prefix or
+    /// `KEY=` framing — the case none of the known-shape patterns catch,
+    /// which `redact()` used to let straight through.
+    #[test]
+    fn redacts_a_bare_high_entropy_token_with_no_known_shape() {
+        let (out, hits) = redact("saw this in the log: kX9mQ2pL7vN4zR8wT3jH6bY1 — investigate");
+        assert!(!out.contains("kX9mQ2pL7vN4zR8wT3jH6bY1"));
+        assert!(hits.contains(&"high_entropy_token"));
+    }
+
+    #[test]
+    fn ordinary_prose_and_identifiers_are_not_flagged_as_high_entropy() {
+        let (out, hits) = redact(
+            "fn compute_total(items: &[f64], discount_pct: f64) -> f64 { /* ... */ } \
+             the_quick_brown_fox_jumps_over_the_lazy_dog",
+        );
+        assert!(hits.is_empty(), "unexpected hits: {hits:?}");
+        assert!(out.contains("compute_total"));
     }
 }

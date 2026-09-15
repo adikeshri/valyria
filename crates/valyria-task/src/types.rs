@@ -29,6 +29,16 @@ pub mod kinds {
     pub const TOOL_RESULT: &str = "tool_result";
     pub const TOOL_DENIED: &str = "tool_denied";
     pub const PERMISSION_ASK: &str = "permission_ask";
+    /// The user's answer to a model-asked question (M4, §13 "ask" flow) —
+    /// an `EffectCompleted` with no matching `EffectIssued` (the "ask" is
+    /// the `MODEL_COMPLETION` entry with `finish_reason: "Ask"` right
+    /// before the task entered `WAITING_FOR_USER`; there is nothing to
+    /// correlate an effect id against on the way in, since the model
+    /// asked rather than the runtime issuing a request). Payload carries
+    /// `{ answer }`. `TaskManager::respond_to_user` journals this and
+    /// resumes the task; `AgentDriver::build_conversation` replays it as
+    /// the user turn following the question.
+    pub const USER_RESPONSE: &str = "user_response";
     /// A verification command the driver ran itself (§27) — not a model
     /// tool call. Payload carries the command and, on completion, the
     /// outcome + parsed failure count.
@@ -40,6 +50,13 @@ pub mod kinds {
     pub const LOOP_DETECTED: &str = "loop_detected";
     /// The repair ledger's decision after a non-fixing repair cycle (§30).
     pub const REPAIR_DECISION: &str = "repair_decision";
+    /// One [`crate` — see `valyria_agent::repair::RepairAttempt`] recorded
+    /// against the ledger (M5, C8): payload carries
+    /// `{diagnosis_fingerprint, edit_summary, outcome}` so `RepairLedger`
+    /// can be replayed exactly from the journal after a crash, instead of
+    /// resetting its attempt history and budget to zero on every
+    /// cross-process resume.
+    pub const REPAIR_ATTEMPT: &str = "repair_attempt";
     /// A model-authored plan the runtime validated and accepted (§10). The
     /// plan body itself lives in `plan_revision` (block 800-899); this
     /// payload carries `{revision, hash, step_count}`.
@@ -62,6 +79,20 @@ pub mod kinds {
     /// A step tried to write outside the plan's declared `plan_scope` — a
     /// permission event (§4.25). Payload: `{path}`.
     pub const PLAN_SCOPE_EXPANSION: &str = "plan_scope_expansion";
+    /// M5: journaled onto the *parent's* journal (not the child's own)
+    /// when `TaskManager::create_child` mints a new child task. Payload:
+    /// `{child_task_id, objective}`. Projects to `EventKind::
+    /// SubtaskStarted`.
+    pub const SUBTASK_STARTED: &str = "subtask_started";
+    /// M5: journaled onto the *parent's* journal when a child task reaches
+    /// a terminal state. Payload: `{child_task_id, final_state}`. Projects
+    /// to `EventKind::SubtaskCompleted`.
+    pub const SUBTASK_COMPLETED: &str = "subtask_completed";
+    /// M5: journaled by `valyria_agent::role_pipeline` (a layer-5 crate;
+    /// `valyria-task` only owns the string tag, exactly like every other
+    /// kind here) when a role-pipeline `Artifact` is persisted. Payload:
+    /// `{role, kind}`. Projects to `EventKind::ArtifactPublished`.
+    pub const ARTIFACT_PUBLISHED: &str = "artifact_published";
 }
 
 #[derive(Debug, Clone, PartialEq)]

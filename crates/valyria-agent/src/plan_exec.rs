@@ -25,19 +25,103 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use valyria_model::{GenerateRequest, Message};
+use valyria_model::{GenerateRequest, Message, ToolSpec};
 use valyria_orchestrator::Role;
 use valyria_plan::{
     schedule, validate, Plan, PlanContext, PlanError, PlanErrorCode, PlanRepairDecision,
-    PlanRepairLedger, PlanRevision, PlanStepId, RollbackError, RollbackReport,
+    PlanRepairLedger, PlanRevision, PlanStep, PlanStepId, RollbackError, RollbackReport,
 };
 use valyria_task::{kinds, JournalEntryKind, JournalSeq};
 use valyria_types::{AgentState, CheckpointId, EffectId, StepId, TaskId};
 use valyria_util::{CancellationToken, ContentHash};
 
 use crate::action::ActionRequest;
-use crate::driver::{AgentDriver, Flow, MAX_PLAN_REPAIR_ATTEMPTS, MAX_STEP_TURNS};
+use crate::driver::{
+    AgentDriver, Flow, MAX_PLAN_REPAIR_ATTEMPTS, MAX_REFORMAT_RETRIES, MAX_STEP_TURNS,
+};
 use crate::error::{AgentError, Result};
+
+/// The `submit_plan` tool a `ModelAuthored` planning turn is offered — with
+/// M1's `generate_action` wiring (the D5 transport ladder), a real model
+/// finally has a JSON Schema to call it against instead of prose alone
+/// ("Respond with a single `submit_plan` tool call…") and nothing telling
+/// it, or any grammar-constrained runtime, what shape to produce. The
+/// schema mirrors `valyria_plan::model::{Plan, PlanStep}` closely enough to
+/// guide a real model; it is not the source of truth for correctness —
+/// `valyria_plan::validate` and the bounded structural-repair loop below
+/// are, exactly as before this schema existed.
+fn submit_plan_tool_spec() -> ToolSpec {
+    ToolSpec {
+        name: crate::driver::SUBMIT_PLAN_ACTION.to_string(),
+        description: "Submit the plan for this task: an ordered set of steps, each with its \
+            targets, dependencies, and how it will be verified."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "required": ["steps"],
+            "properties": {
+                "plan_scope": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Paths (or glob-like prefixes) this whole plan is allowed to touch."
+                },
+                "steps": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "required": ["id", "intent"],
+                        "properties": {
+                            "id": { "type": "string", "description": "Unique step id, e.g. \"s1\"." },
+                            "intent": { "type": "string", "description": "What this step does." },
+                            "targets": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "description": "Files this step will touch. Empty for a read-only step."
+                            },
+                            "depends_on": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "description": "Ids of steps that must complete before this one."
+                            },
+                            "parallelizable": { "type": "boolean" },
+                            "checkpoint": {
+                                "type": "boolean",
+                                "description": "Capture a rollback point after this step."
+                            },
+                            "rollback_boundary": {
+                                "type": "boolean",
+                                "description": "Required alongside checkpoint: true."
+                            },
+                            "approval_required": { "type": "boolean" },
+                            "verification": {
+                                "type": "object",
+                                "description": "Required for any step with targets.",
+                                "properties": {
+                                    "mode": {
+                                        "type": "string",
+                                        "enum": ["none", "inherit", "command"]
+                                    },
+                                    "command": {
+                                        "type": "string",
+                                        "description": "Only when mode is \"command\"."
+                                    }
+                                }
+                            },
+                            "estimated_scope": {
+                                "type": "object",
+                                "properties": {
+                                    "files": { "type": "integer" },
+                                    "risk": { "type": "string", "enum": ["low", "medium", "high"] }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }),
+    }
+}
 
 impl AgentDriver {
     // --- Planning -----------------------------------------------------
@@ -53,10 +137,19 @@ impl AgentDriver {
     /// the shared model-turn counter (and therefore the scripted fake
     /// model) in sync across a restart. An already-accepted plan just
     /// re-enters `Implementing`.
+    /// `role_override` (M5): when `Some`, every model call this drives
+    /// (including any repair-feedback retries) uses that exact
+    /// `valyria_orchestrator::Role` instead of the ordinary FastCoder/
+    /// PrimaryCoder escalation `model_role` picks — the role pipeline's
+    /// Planner role passes `Some(Role::Planner)` so it gets its own model
+    /// binding independent of the single-task loop's escalation state.
+    /// `None` (every pre-M5 caller, via `run`) preserves the exact prior
+    /// behavior.
     pub(crate) async fn step_planning(
         &self,
         task_id: TaskId,
         cancel: &CancellationToken,
+        role_override: Option<Role>,
     ) -> Result<Flow> {
         if self.has_accepted_plan(task_id).await? {
             self.tasks
@@ -96,7 +189,7 @@ impl AgentDriver {
             let submission = match self.unprocessed_plan_submission(task_id).await? {
                 Some(v) => v,
                 None => {
-                    self.request_plan_from_model(task_id, cancel, &feedback)
+                    self.request_plan_from_model(task_id, cancel, &feedback, role_override)
                         .await?
                 }
             };
@@ -183,6 +276,7 @@ impl AgentDriver {
         task_id: TaskId,
         cancel: &CancellationToken,
         feedback: &Option<String>,
+        role_override: Option<Role>,
     ) -> Result<serde_json::Value> {
         let objective = self.tasks.get(task_id).await?.objective;
         let turn_index = self.tasks.count_model_calls(task_id).await?;
@@ -208,11 +302,16 @@ impl AgentDriver {
             ),
             Some(fb) => format!("{objective}\n\n{fb}\n\nResubmit the corrected plan."),
         };
-        let request = GenerateRequest::new(vec![Message::user(prompt)]).with_turn_hint(turn_index);
+        let role =
+            role_override.unwrap_or_else(|| self.model_role(self.is_role_escalated(task_id)));
+        let request = GenerateRequest::new(vec![Message::user(prompt)])
+            .with_tools(vec![submit_plan_tool_spec()])
+            .with_turn_hint(turn_index);
         let completion = self
             .orchestrator
-            .generate(Role::PrimaryCoder, request, cancel.child())
-            .await?;
+            .generate_action(role, request, cancel.child(), MAX_REFORMAT_RETRIES)
+            .await?
+            .completion;
 
         let submission = match ActionRequest::from_completion(&completion)? {
             ActionRequest::ToolCall { tool, input }
@@ -246,10 +345,14 @@ impl AgentDriver {
 
     // --- plan-driven Implementing ----------------------------------
 
+    /// `role_override`: see `step_planning`'s docs — same meaning, same
+    /// `None`-preserves-prior-behavior contract, threaded through to every
+    /// per-step model call.
     pub(crate) async fn step_implementing_plan(
         &self,
         task_id: TaskId,
         cancel: &CancellationToken,
+        role_override: Option<Role>,
     ) -> Result<Flow> {
         // D1: redo an interrupted tool call before anything new.
         if let Some(pending) = self.tasks.interrupted_tool_call(task_id).await? {
@@ -305,6 +408,30 @@ impl AgentDriver {
             Some(step) => step.clone(),
         };
 
+        // M5: the next incomplete step may belong to a real multi-step
+        // parallel bucket (`parallelizable: true` steps the schedule
+        // grouped together) rather than being a lone solo step — hand the
+        // *whole remaining group* to the concurrent wave executor instead
+        // of processing just this one step inline.
+        if let Some(group) = sched.group_for(&step.id) {
+            let incomplete_in_group: Vec<PlanStepId> = group
+                .iter()
+                .filter(|id| !done.contains(*id))
+                .cloned()
+                .collect();
+            if incomplete_in_group.len() > 1 {
+                return self
+                    .run_parallel_group(
+                        task_id,
+                        validated.plan(),
+                        incomplete_in_group,
+                        cancel,
+                        role_override,
+                    )
+                    .await;
+            }
+        }
+
         // Checkpoint at a rollback boundary — once per step.
         if step.checkpoint && !self.checkpoint_taken_for(task_id, &step.id).await? {
             self.take_checkpoint(task_id, &step.id).await?;
@@ -343,7 +470,10 @@ impl AgentDriver {
         let sid = StepId::new();
         let action = match self.unprocessed_step_action(task_id, &step.id).await? {
             Some(a) => a,
-            None => self.request_step_action(task_id, cancel, &step).await?,
+            None => {
+                self.request_step_action(task_id, cancel, &step, role_override)
+                    .await?
+            }
         };
 
         match action {
@@ -382,6 +512,7 @@ impl AgentDriver {
         task_id: TaskId,
         cancel: &CancellationToken,
         step: &valyria_plan::PlanStep,
+        role_override: Option<Role>,
     ) -> Result<StepAction> {
         let objective = self.tasks.get(task_id).await?.objective;
         let turn_index = self.tasks.count_model_calls(task_id).await?;
@@ -420,11 +551,22 @@ impl AgentDriver {
                 targets.join(", ")
             },
         );
-        let request = GenerateRequest::new(vec![Message::user(prompt)]).with_turn_hint(turn_index);
+        // `self.tool_specs` (M1): a plan step's model call used to be built
+        // with no `tools` field at all — every fake-model test scripts its
+        // turns directly and never looks at what was offered, so this went
+        // unnoticed, but a real model had no schema for any tool it was
+        // asked to call one of. `generate_action` also gets it the same
+        // ladder recovery and fallback chain as the main Implementing loop.
+        let role =
+            role_override.unwrap_or_else(|| self.model_role(self.is_role_escalated(task_id)));
+        let request = GenerateRequest::new(vec![Message::user(prompt)])
+            .with_tools(self.tool_specs.clone())
+            .with_turn_hint(turn_index);
         let completion = self
             .orchestrator
-            .generate(Role::PrimaryCoder, request, cancel.child())
-            .await?;
+            .generate_action(role, request, cancel.child(), MAX_REFORMAT_RETRIES)
+            .await?
+            .completion;
 
         let action = match ActionRequest::from_completion(&completion)? {
             ActionRequest::ToolCall { tool, input } => StepAction::ToolCall { tool, input },
@@ -735,7 +877,7 @@ impl AgentDriver {
     }
 
     async fn take_checkpoint(&self, task_id: TaskId, step: &PlanStepId) -> Result<()> {
-        let changed = self.task_changed_files(task_id);
+        let changed = self.task_changed_files(task_id).await;
         let touched: Vec<(PathBuf, Option<ContentHash>)> = changed
             .iter()
             .map(|p| {
@@ -769,6 +911,204 @@ impl AgentDriver {
             )
             .await?;
         Ok(())
+    }
+
+    // --- M5: parallel wave executor -------------------------------------
+
+    /// Runs every step in `step_ids` (a real multi-step parallel bucket —
+    /// see `step_implementing_plan`'s caller) to completion, as concurrent
+    /// child tasks, then folds each success back into `task_id`'s own
+    /// journal (`PLAN_STEP_STARTED`/`PLAN_STEP_COMPLETED`, a checkpoint if
+    /// declared) so the ordinary schedule-driven loop sees them as done on
+    /// its next iteration exactly like a sequential step.
+    ///
+    /// Steps whose declared `targets` overlap never run in the same
+    /// concurrent batch — "overlapping targets serialize" is enforced
+    /// *before* anything runs, from the plan's own declarations, not
+    /// discovered after the fact from the ledger. A batch itself is capped
+    /// at [`MAX_PARALLEL_CHILDREN`] concurrent children.
+    ///
+    /// Any child that doesn't cleanly complete (needs permission, asks the
+    /// user, or fails) fails the *whole* wave rather than trying to
+    /// partially resume — a bounded, honest limitation recorded in
+    /// `docs/COMPLETION-PLAN.md`, not a silent gap.
+    async fn run_parallel_group(
+        &self,
+        task_id: TaskId,
+        plan: &Plan,
+        step_ids: Vec<PlanStepId>,
+        cancel: &CancellationToken,
+        role_override: Option<Role>,
+    ) -> Result<Flow> {
+        for batch in partition_conflict_free(&step_ids, plan) {
+            for chunk in batch.chunks(MAX_PARALLEL_CHILDREN) {
+                let results = futures::future::join_all(chunk.iter().map(|id| {
+                    let step = plan
+                        .step(id)
+                        .cloned()
+                        .expect("schedule only ever names steps that exist in its own plan");
+                    self.run_parallel_step_child(
+                        task_id,
+                        step,
+                        plan.plan_scope.clone(),
+                        cancel,
+                        role_override,
+                    )
+                }))
+                .await;
+
+                for result in results {
+                    let (step_id, ok) = result?;
+                    if !ok {
+                        self.tasks
+                            .append_journal(
+                                task_id,
+                                JournalEntryKind::RecoveryNote {
+                                    note: format!(
+                                        "parallel step `{step_id}` did not complete cleanly \
+                                         (needed permission, asked the user, or failed) — the \
+                                         wave executor fails the whole wave rather than \
+                                         partially resuming it"
+                                    ),
+                                },
+                            )
+                            .await?;
+                        self.tasks.transition(task_id, AgentState::Failed).await?;
+                        return Ok(Flow::Return);
+                    }
+
+                    let step = plan
+                        .step(&step_id)
+                        .expect("schedule only ever names steps that exist in its own plan");
+                    if step.checkpoint && !self.checkpoint_taken_for(task_id, &step_id).await? {
+                        self.take_checkpoint(task_id, &step_id).await?;
+                    }
+                    if !self.step_started(task_id, &step_id).await? {
+                        self.tasks
+                            .append_journal(
+                                task_id,
+                                JournalEntryKind::EffectIssued {
+                                    effect_id: EffectId::new(),
+                                    step_id: StepId::new(),
+                                    effect_kind: kinds::PLAN_STEP_STARTED.into(),
+                                    payload: serde_json::json!({
+                                        "step_id": step_id.as_str(),
+                                        "intent": step.intent,
+                                        "ran_in_child": true,
+                                    }),
+                                },
+                            )
+                            .await?;
+                    }
+                    self.complete_step(task_id, &step_id).await?;
+                }
+            }
+        }
+        Ok(Flow::Continue)
+    }
+
+    /// One parallel-wave step's concurrent child: a fresh child task
+    /// carrying a single-step plan (the group step, `depends_on` cleared —
+    /// its dependencies are already satisfied by wave ordering), fast-
+    /// forwarded straight to `Implementing` (it needs no `Understanding`/
+    /// `Discovery`/`Planning` model calls of its own) and driven by
+    /// repeated `step_implementing_plan` calls *only* until its one step
+    /// completes — deliberately never far enough to reach the child's own
+    /// `Verifying`, since per-step verification is a separate, still-
+    /// deferred M5 item (the mandatory full suite after the whole plan
+    /// remains the only verification pass).
+    ///
+    /// Prefers `Role::FastCoder` over `role_override` when it's bound:
+    /// parallel work is exactly the case a cheaper/faster model earns its
+    /// keep (many concurrent steps rather than one careful one), and it
+    /// also keeps a wave step's model calls on a binding distinct from
+    /// whatever produced the plan itself — every wave-step child starts
+    /// its own `count_model_calls` at zero, so if it shared the parent's
+    /// exact binding it would replay the *parent's* `turn_hint = 0`
+    /// response (e.g. `submit_plan`) instead of a step action. Falls back
+    /// to `role_override` (then the ordinary `model_role` selection) when
+    /// nothing dedicated is bound, so a driver with only `PrimaryCoder`
+    /// bound still runs parallel waves correctly on that one model.
+    async fn run_parallel_step_child(
+        &self,
+        parent_id: TaskId,
+        step: PlanStep,
+        plan_scope: Vec<String>,
+        cancel: &CancellationToken,
+        role_override: Option<Role>,
+    ) -> Result<(PlanStepId, bool)> {
+        let role_override = if self.orchestrator.is_bound(Role::FastCoder) {
+            Some(Role::FastCoder)
+        } else {
+            role_override
+        };
+        let step_id = step.id.clone();
+        let mut solo_step = step;
+        solo_step.depends_on.clear();
+        let solo_plan = Plan {
+            plan_scope,
+            steps: vec![solo_step],
+        };
+
+        let child = self
+            .tasks
+            .create_child(
+                parent_id,
+                solo_plan.steps[0].intent.clone(),
+                valyria_task::Budget::default(),
+            )
+            .await?;
+        let rev = PlanRevision::first(solo_plan, "parallel wave step", self.clock.now());
+        self.plan_store
+            .save_revision(child.id, &rev)
+            .await
+            .map_err(plan_err)?;
+        for state in [
+            AgentState::Understanding,
+            AgentState::Discovery,
+            AgentState::Planning,
+            AgentState::Implementing,
+        ] {
+            self.tasks.transition(child.id, state).await?;
+        }
+
+        loop {
+            if cancel.is_cancelled() {
+                self.tasks
+                    .transition(child.id, AgentState::Cancelled)
+                    .await?;
+                return Ok((step_id, false));
+            }
+            if self
+                .completed_plan_steps(child.id)
+                .await?
+                .contains(&step_id)
+            {
+                // Pure bookkeeping, exactly like `role_pipeline::
+                // finish_role_child`: `transition` has no side effects
+                // beyond journaling (the real verification command only
+                // ever runs inside `step_verifying`'s own handler, which
+                // this never calls), so walking the child on to
+                // `Completed` here does not perform — or skip — any
+                // per-step verification. Without this the child would sit
+                // at `Implementing` forever, indistinguishable from one a
+                // crash actually interrupted.
+                self.tasks
+                    .transition(child.id, AgentState::Verifying)
+                    .await?;
+                self.tasks
+                    .transition(child.id, AgentState::Completed)
+                    .await?;
+                return Ok((step_id, true));
+            }
+            match self
+                .step_implementing_plan(child.id, cancel, role_override)
+                .await?
+            {
+                Flow::Continue => continue,
+                Flow::Return => return Ok((step_id, false)),
+            }
+        }
     }
 
     /// If a write tool's target lands outside the plan's declared
@@ -809,7 +1149,7 @@ impl AgentDriver {
     }
 }
 
-fn plan_err(e: valyria_plan::PlanCrateError) -> AgentError {
+pub(crate) fn plan_err(e: valyria_plan::PlanCrateError) -> AgentError {
     AgentError::Plan(e.to_string())
 }
 
@@ -849,6 +1189,39 @@ impl StepAction {
     }
 }
 
+/// Cap on concurrently-running children within one parallel batch (M5) —
+/// a per-workspace concurrency cap, arbitrary but generous: real limits
+/// (model pool admission, hardware) are Phase 9's job, not this one's.
+const MAX_PARALLEL_CHILDREN: usize = 4;
+
+/// Greedily buckets `step_ids` into batches where no two steps in the same
+/// batch declare an overlapping `targets` path (M5: "overlapping targets
+/// serialize"). Declarative and static — computed from the plan's own
+/// declared targets before anything runs, not discovered after the fact
+/// from the ledger, so two steps that *would* collide never even get a
+/// chance to race. Deterministic: `step_ids` is walked in order, and each
+/// step joins the first batch it doesn't conflict with.
+fn partition_conflict_free(step_ids: &[PlanStepId], plan: &Plan) -> Vec<Vec<PlanStepId>> {
+    let mut batches: Vec<Vec<PlanStepId>> = Vec::new();
+    for id in step_ids {
+        let targets: &[PathBuf] = plan.step(id).map(|s| s.targets.as_slice()).unwrap_or(&[]);
+        let batch = batches.iter_mut().find(|batch| {
+            !batch.iter().any(|other| {
+                let other_targets = plan
+                    .step(other)
+                    .map(|s| s.targets.as_slice())
+                    .unwrap_or(&[]);
+                targets.iter().any(|t| other_targets.contains(t))
+            })
+        });
+        match batch {
+            Some(batch) => batch.push(id.clone()),
+            None => batches.push(vec![id.clone()]),
+        }
+    }
+    batches
+}
+
 /// Turn a raw plan submission value into a `Plan`, or the structured
 /// error the repair loop feeds back to the model.
 fn submission_to_plan(value: serde_json::Value) -> std::result::Result<Plan, Vec<PlanError>> {
@@ -871,4 +1244,78 @@ fn submission_to_plan(value: serde_json::Value) -> std::result::Result<Plan, Vec
             hint: "emit valid plan JSON: an object with `plan_scope` and `steps`".into(),
         }]
     })
+}
+
+#[cfg(test)]
+mod partition_conflict_free_tests {
+    use super::*;
+    use valyria_plan::{EstimatedScope, VerificationRequirement};
+
+    fn step(id: &str, targets: &[&str]) -> PlanStep {
+        PlanStep {
+            id: PlanStepId::new(id).unwrap(),
+            intent: format!("do {id}"),
+            targets: targets.iter().map(PathBuf::from).collect(),
+            depends_on: vec![],
+            parallelizable: true,
+            checkpoint: false,
+            verification: VerificationRequirement::None,
+            rollback_boundary: false,
+            approval_required: false,
+            estimated_scope: EstimatedScope::default(),
+        }
+    }
+
+    fn plan(steps: Vec<PlanStep>) -> Plan {
+        Plan {
+            plan_scope: vec![],
+            steps,
+        }
+    }
+
+    fn ids(strs: &[&str]) -> Vec<PlanStepId> {
+        strs.iter().map(|s| PlanStepId::new(*s).unwrap()).collect()
+    }
+
+    #[test]
+    fn disjoint_targets_all_land_in_one_batch() {
+        let p = plan(vec![
+            step("a", &["src/a.rs"]),
+            step("b", &["src/b.rs"]),
+            step("c", &["src/c.rs"]),
+        ]);
+        let batches = partition_conflict_free(&ids(&["a", "b", "c"]), &p);
+        assert_eq!(batches, vec![ids(&["a", "b", "c"])]);
+    }
+
+    #[test]
+    fn an_overlapping_target_forces_a_separate_batch() {
+        let p = plan(vec![
+            step("a", &["src/shared.rs"]),
+            step("b", &["src/shared.rs"]),
+        ]);
+        let batches = partition_conflict_free(&ids(&["a", "b"]), &p);
+        assert_eq!(batches, vec![ids(&["a"]), ids(&["b"])]);
+    }
+
+    #[test]
+    fn a_step_joins_the_first_batch_it_does_not_conflict_with() {
+        // a and b conflict (shared.rs); c conflicts with neither, so it
+        // should land alongside a in the first batch rather than opening
+        // a third one.
+        let p = plan(vec![
+            step("a", &["src/shared.rs"]),
+            step("b", &["src/shared.rs"]),
+            step("c", &["src/c.rs"]),
+        ]);
+        let batches = partition_conflict_free(&ids(&["a", "b", "c"]), &p);
+        assert_eq!(batches, vec![ids(&["a", "c"]), ids(&["b"])]);
+    }
+
+    #[test]
+    fn read_only_steps_with_no_targets_never_conflict() {
+        let p = plan(vec![step("a", &[]), step("b", &[])]);
+        let batches = partition_conflict_free(&ids(&["a", "b"]), &p);
+        assert_eq!(batches, vec![ids(&["a", "b"])]);
+    }
 }

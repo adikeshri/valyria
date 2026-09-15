@@ -104,6 +104,18 @@ fn render_profile(allow_write: &[std::path::PathBuf], allow_network: bool) -> St
         "(allow sysctl-read)".to_string(),
         "(allow mach-lookup)".to_string(),
         "(allow signal (target self))".to_string(),
+        // Standard, harmless system devices: reading/writing them can
+        // never leak or persist anything (a discard sink and PRNG
+        // sources), and an enormous fraction of ordinary CLI tools use at
+        // least one unconditionally — `git`, among many others, opens
+        // `/dev/null` as part of perfectly normal operation. Without this,
+        // "no explicit write scope covers it" denies a write every
+        // well-behaved process makes, not just a risky one, in a way
+        // that has nothing to do with the confinement this profile is
+        // actually meant to enforce (§21).
+        "(allow file-read* file-write* (literal \"/dev/null\") (literal \"/dev/zero\") \
+         (literal \"/dev/random\") (literal \"/dev/urandom\"))"
+            .to_string(),
     ];
 
     for path in allow_write {
@@ -213,6 +225,37 @@ mod tests {
                 .trim(),
             "ok"
         );
+    }
+
+    /// M4 (`docs/COMPLETION-PLAN.md`): discovered while wiring the
+    /// `git_commit` tool — `git`, like most well-behaved CLI tools,
+    /// unconditionally opens `/dev/null` during perfectly normal
+    /// operation, and with no explicit allowance it got denied by the
+    /// same "no write scope covers it" rule meant for the workspace
+    /// filesystem, nothing to do with `/dev/null`'s actual safety.
+    #[tokio::test]
+    async fn end_to_end_dev_null_is_always_writable() {
+        let launcher = SeatbeltLauncher::detect().expect("sandbox-exec must exist on macOS CI");
+        let workdir = tempfile::tempdir().unwrap();
+        // No allow_write at all — /dev/null must work regardless of the
+        // workspace write scope.
+        let profile = SandboxProfile::new();
+
+        let spec = CommandSpec::new("/bin/sh", workdir.path())
+            .arg("-c")
+            .arg("echo ok > /dev/null && echo wrote-ok");
+        let wrapped = launcher.wrap(spec, &profile).unwrap();
+
+        let result = valyria_process::run(&wrapped, valyria_util::CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert!(
+            result.success(),
+            "writing to /dev/null must always succeed: {:?}",
+            result.stderr.text
+        );
+        assert!(result.stdout.text.contains("wrote-ok"));
     }
 
     #[tokio::test]

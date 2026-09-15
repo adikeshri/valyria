@@ -230,6 +230,7 @@ mod tests {
                 called: called.clone(),
             }),
             sandbox_profile: SandboxProfile::new(),
+            store: None,
         };
         let input = serde_json::json!({"program": "echo", "args": ["hi"]});
         build_spec(&ctx, &input, "run_command").unwrap();

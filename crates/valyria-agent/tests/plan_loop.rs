@@ -16,7 +16,7 @@ use valyria_agent::{AgentDriver, PlanningMode};
 use valyria_context::ContextAssembler;
 use valyria_events::{EventBus, EventKind, Seq};
 use valyria_ledger::Ledger;
-use valyria_orchestrator::{Orchestrator, Role};
+use valyria_orchestrator::{Role, RoleRouter};
 use valyria_permissions::PermissionEngine;
 use valyria_plan::{PlanStore, RollbackError};
 use valyria_runtime_fake::{FakeModelRuntime, Scenario, ScriptedTurn};
@@ -66,6 +66,45 @@ fn build_driver(
     backing: &Backing,
     scenario: Scenario,
 ) -> (Arc<TaskManager>, Arc<PlanStore>, AgentDriver) {
+    let orch = RoleRouter::new();
+    orch.bind_single(
+        Role::PrimaryCoder,
+        "fake",
+        Arc::new(FakeModelRuntime::from_scenario(scenario)),
+    );
+    build_driver_with_router(backing, orch)
+}
+
+/// M5: a parent scenario bound to `PrimaryCoder` (its own Planning call)
+/// plus a *separate* scenario bound to `FastCoder` for every parallel-wave
+/// step child (`plan_exec::run_parallel_step_child` prefers `FastCoder`
+/// when it's bound) — needed because a child's own `count_model_calls`
+/// restarts at zero independently of the parent's, so sharing one binding
+/// would replay the parent's `turn_hint = 0` response (`submit_plan`)
+/// instead of a step action.
+fn build_driver_with_wave_children(
+    backing: &Backing,
+    parent_scenario: Scenario,
+    child_scenario: Scenario,
+) -> (Arc<TaskManager>, Arc<PlanStore>, AgentDriver) {
+    let orch = RoleRouter::new();
+    orch.bind_single(
+        Role::PrimaryCoder,
+        "fake-parent",
+        Arc::new(FakeModelRuntime::from_scenario(parent_scenario)),
+    );
+    orch.bind_single(
+        Role::FastCoder,
+        "fake-wave-child",
+        Arc::new(FakeModelRuntime::from_scenario(child_scenario)),
+    );
+    build_driver_with_router(backing, orch)
+}
+
+fn build_driver_with_router(
+    backing: &Backing,
+    orch: RoleRouter,
+) -> (Arc<TaskManager>, Arc<PlanStore>, AgentDriver) {
     let clock: Arc<dyn Clock> = Arc::new(FixedClock::at_millis(1_000_000));
     let tasks = Arc::new(TaskManager::new(
         backing.store.clone(),
@@ -83,11 +122,6 @@ fn build_driver(
         engine.clone(),
         clock.clone(),
     ));
-    let orch = Orchestrator::new();
-    orch.bind(
-        Role::PrimaryCoder,
-        Arc::new(FakeModelRuntime::from_scenario(scenario)),
-    );
     let context = Arc::new(ContextAssembler::new(tools.clone()));
     let verification_log = Arc::new(VerificationLog::new(backing.store.clone()));
     let plan_store = Arc::new(PlanStore::new(backing.store.clone()));
@@ -322,6 +356,156 @@ async fn a_multi_step_plan_executes_step_by_step_with_a_checkpoint() {
             .unwrap()
             .len(),
         1
+    );
+}
+
+/// M5's parallel wave executor: two `parallelizable: true` steps in the
+/// same wave (no dependency between them, disjoint declared `targets`) run
+/// as concurrent child tasks rather than one after another in the parent's
+/// own journal. Both steps are scripted with the *same* `Finish` turn on
+/// purpose: `FakeModelRuntime` resolves purely by `turn_hint`
+/// (`count_model_calls`), which restarts at 0 independently for every
+/// child, so two concurrent children sharing one bound model cannot be
+/// given genuinely different scripted responses without colliding on
+/// index 0 — proving the *orchestration* (both children spawned, tracked
+/// back to the parent, completed, and the plan proceeds) is what this
+/// test is for; `plan_exec::partition_conflict_free_tests` already covers
+/// the target-overlap-serializes rule at the unit level directly.
+#[tokio::test]
+async fn parallel_steps_in_one_wave_run_as_concurrent_child_tasks() {
+    let backing = workspace();
+    let plan = serde_json::json!({
+        "plan_scope": ["src/"],
+        "steps": [
+            {"id": "touch_a", "intent": "look at a", "targets": ["src/a.txt"],
+             "verification": {"mode": "inherit"}, "parallelizable": true},
+            {"id": "touch_b", "intent": "look at b", "targets": ["src/b.txt"],
+             "verification": {"mode": "inherit"}, "parallelizable": true},
+        ]
+    });
+    let parent_scenario = Scenario {
+        name: "parallel-wave-parent".into(),
+        turns: vec![submit_plan(plan)],
+    };
+    let child_scenario = Scenario {
+        name: "parallel-wave-child".into(),
+        turns: vec![ScriptedTurn::Finish {
+            summary: "done".into(),
+        }], // shared by both children's turn 0
+    };
+    let (tasks, plan_store, driver) =
+        build_driver_with_wave_children(&backing, parent_scenario, child_scenario);
+    let task = tasks
+        .create(
+            WorkspaceId::new(),
+            "touch a and b".into(),
+            Budget::default(),
+        )
+        .await
+        .unwrap();
+    // Pinned to PrimaryCoder explicitly: `FastCoder` is also bound (for
+    // the wave children), and `model_role`'s "prefer FastCoder whenever
+    // it's bound" check is global — without pinning, the parent's own
+    // Planning call would be silently redirected to it too.
+    driver
+        .run_with_role(task.id, CancellationToken::new(), Some(Role::PrimaryCoder))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        tasks.get(task.id).await.unwrap().state,
+        AgentState::Completed
+    );
+
+    // Two children, one per parallel step, both linked back to the parent
+    // and both terminal.
+    let children = tasks.children_of(task.id).await.unwrap();
+    assert_eq!(children.len(), 2, "{children:#?}");
+    for child in &children {
+        assert!(child.state.is_terminal(), "{child:#?}");
+        assert_eq!(child.parent_task, Some(task.id));
+    }
+
+    // The parent's own journal records both steps as started (noting they
+    // ran in a child) and completed — the schedule-driven loop treats them
+    // exactly like sequential steps from here on.
+    let started = journal_payloads(&tasks, task.id, kinds::PLAN_STEP_STARTED).await;
+    assert_eq!(started.len(), 2, "{started:#?}");
+    assert!(started.iter().all(|p| p["ran_in_child"] == true));
+    let completed_ids: std::collections::BTreeSet<String> =
+        journal_payloads(&tasks, task.id, kinds::PLAN_STEP_COMPLETED)
+            .await
+            .iter()
+            .filter_map(|p| p["step_id"].as_str().map(str::to_string))
+            .collect();
+    assert_eq!(
+        completed_ids,
+        ["touch_a".to_string(), "touch_b".to_string()]
+            .into_iter()
+            .collect()
+    );
+
+    // Exactly one plan revision — the wave executor didn't cause the
+    // parent to re-plan or fork extra revisions.
+    assert_eq!(plan_store.all_revisions(task.id).await.unwrap().len(), 1);
+}
+
+/// A parallel group whose steps declare *overlapping* targets must still
+/// all complete correctly — `run_parallel_group` walks multiple
+/// conflict-free batches in sequence rather than assuming one batch always
+/// covers the whole group.
+#[tokio::test]
+async fn a_parallel_group_with_overlapping_targets_still_completes_via_serialized_batches() {
+    let backing = workspace();
+    let plan = serde_json::json!({
+        "plan_scope": ["src/"],
+        "steps": [
+            {"id": "touch_a_1", "intent": "look at a (1)", "targets": ["src/a.txt"],
+             "verification": {"mode": "inherit"}, "parallelizable": true},
+            {"id": "touch_a_2", "intent": "look at a (2)", "targets": ["src/a.txt"],
+             "verification": {"mode": "inherit"}, "parallelizable": true},
+        ]
+    });
+    let parent_scenario = Scenario {
+        name: "parallel-wave-conflict-parent".into(),
+        turns: vec![submit_plan(plan)],
+    };
+    let child_scenario = Scenario {
+        name: "parallel-wave-conflict-child".into(),
+        turns: vec![ScriptedTurn::Finish {
+            summary: "done".into(),
+        }],
+    };
+    let (tasks, _plan_store, driver) =
+        build_driver_with_wave_children(&backing, parent_scenario, child_scenario);
+    let task = tasks
+        .create(
+            WorkspaceId::new(),
+            "look at a twice".into(),
+            Budget::default(),
+        )
+        .await
+        .unwrap();
+    driver
+        .run_with_role(task.id, CancellationToken::new(), Some(Role::PrimaryCoder))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        tasks.get(task.id).await.unwrap().state,
+        AgentState::Completed
+    );
+    let completed_ids: std::collections::BTreeSet<String> =
+        journal_payloads(&tasks, task.id, kinds::PLAN_STEP_COMPLETED)
+            .await
+            .iter()
+            .filter_map(|p| p["step_id"].as_str().map(str::to_string))
+            .collect();
+    assert_eq!(
+        completed_ids,
+        ["touch_a_1".to_string(), "touch_a_2".to_string()]
+            .into_iter()
+            .collect()
     );
 }
 

@@ -120,6 +120,60 @@
         "result": {
           "type": "string",
           "enum": [
+            "task_children"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/TaskChildrenResponse"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "task_artifacts"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/TaskArtifactsResponse"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "plan_revisions"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/PlanRevisionsResponse"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
             "task_rollback"
           ]
         },
@@ -506,6 +560,32 @@
     }
   ],
   "definitions": {
+    "ArtifactWire": {
+      "description": "One role-pipeline `Artifact` as stored (M5, `valyria_plan::roles:: StoredArtifact`). `artifact` carries the role-specific payload verbatim (`ResearchBrief`/`Plan`/`ChangeSet`/`VerificationReport`/ `ReviewFindings`) — deliberately raw JSON rather than one struct per variant, matching how `WireEvent.payload` stays open per §4.27's own event-payload convention; `kind` names which shape it is.",
+      "type": "object",
+      "required": [
+        "artifact",
+        "created_at_ms",
+        "kind",
+        "produced_by"
+      ],
+      "properties": {
+        "artifact": true,
+        "created_at_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "kind": {
+          "description": "`research_brief` | `plan` | `change_set` | `verification_report` | `review_findings`.",
+          "type": "string"
+        },
+        "produced_by": {
+          "description": "`researcher` | `planner` | `implementer` | `tester` | `reviewer`.",
+          "type": "string"
+        }
+      }
+    },
     "ConfigEntryWire": {
       "type": "object",
       "required": [
@@ -1308,6 +1388,35 @@
         }
       }
     },
+    "PlanDiffWire": {
+      "description": "`valyria_plan::model::PlanDiff` — added/removed/changed step ids against the prior revision.",
+      "type": "object",
+      "required": [
+        "added",
+        "changed",
+        "removed"
+      ],
+      "properties": {
+        "added": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "changed": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "removed": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
     "PlanGetResponse": {
       "type": "object",
       "required": [
@@ -1333,6 +1442,72 @@
           "type": "array",
           "items": {
             "$ref": "#/definitions/PlanStepSummary"
+          }
+        }
+      }
+    },
+    "PlanRevisionWire": {
+      "description": "One persisted plan revision (M5, `valyria_plan::model::PlanRevision`), with its structural diff against the immediately preceding revision — `diff_from_parent` is `None` for the first revision (`parent_hash` is also `None` then) and whenever the parent revision itself is no longer stored (defensive; `PlanStore` never actually deletes a revision).",
+      "type": "object",
+      "required": [
+        "content_hash",
+        "created_at_ms",
+        "rationale",
+        "revision",
+        "steps"
+      ],
+      "properties": {
+        "content_hash": {
+          "type": "string"
+        },
+        "created_at_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "diff_from_parent": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PlanDiffWire"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parent_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rationale": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PlanStepSummary"
+          }
+        }
+      }
+    },
+    "PlanRevisionsResponse": {
+      "description": "M5, protocol 1.13.0: every plan revision for a task, oldest first — \"each revision journaled and diffable\" (§4.25).",
+      "type": "object",
+      "required": [
+        "revisions"
+      ],
+      "properties": {
+        "revisions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PlanRevisionWire"
           }
         }
       }
@@ -1603,6 +1778,36 @@
         }
       }
     },
+    "TaskArtifactsResponse": {
+      "description": "M5, protocol 1.13.0: every artifact produced against a task, oldest first.",
+      "type": "object",
+      "required": [
+        "artifacts"
+      ],
+      "properties": {
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ArtifactWire"
+          }
+        }
+      }
+    },
+    "TaskChildrenResponse": {
+      "description": "M5, protocol 1.13.0: every direct child of a task (`TaskManager:: children_of` — not recursive; a grandchild belongs to its own parent).",
+      "type": "object",
+      "required": [
+        "children"
+      ],
+      "properties": {
+        "children": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/TaskSummary"
+          }
+        }
+      }
+    },
     "TaskCreateResponse": {
       "type": "object",
       "required": [
@@ -1726,6 +1931,13 @@
         },
         "objective": {
           "type": "string"
+        },
+        "parent_task_id": {
+          "description": "The parent task this one was spawned under (M5, `TaskManager:: create_child`), or `None` for an ordinary top-level task. Additive as of protocol 1.13.0 — an older client ignores it.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "state": {
           "type": "string"

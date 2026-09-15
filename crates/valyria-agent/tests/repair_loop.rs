@@ -8,17 +8,18 @@
 //! `Verifying` runs it itself; the model's only job is the repair edit.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use valyria_agent::AgentDriver;
 use valyria_context::ContextAssembler;
-use valyria_events::{EventBus, EventKind, Seq};
+use valyria_events::{Delivery, EventBus, EventKind, Seq};
 use valyria_ledger::Ledger;
-use valyria_orchestrator::{Orchestrator, Role};
+use valyria_orchestrator::{Role, RoleRouter};
 use valyria_permissions::PermissionEngine;
 use valyria_runtime_fake::{FakeModelRuntime, Scenario, ScriptedTurn};
 use valyria_sandbox::{detect_platform_launcher, ProcessLauncher, SandboxProfile};
 use valyria_store::{Migration, Store};
-use valyria_task::{Budget, TaskManager};
+use valyria_task::{kinds, Budget, JournalEntryKind, JournalSeq, TaskManager};
 use valyria_tools::ToolRuntime;
 use valyria_types::{AgentState, PermissionMode, WorkspaceId};
 use valyria_util::{CancellationToken, Clock, FixedClock};
@@ -30,6 +31,7 @@ fn migrations() -> Vec<Migration> {
     m.extend(valyria_task::MIGRATIONS.iter().copied());
     m.extend(valyria_verify::MIGRATIONS.iter().copied());
     m.extend(valyria_plan::MIGRATIONS.iter().copied());
+    m.extend(valyria_memory::MIGRATIONS.iter().copied());
     m
 }
 
@@ -61,6 +63,44 @@ fn seeded_bug_workspace() -> Backing {
 }
 
 fn build_driver(backing: &Backing, scenario: Scenario) -> (Arc<TaskManager>, AgentDriver) {
+    let orch = RoleRouter::new();
+    orch.bind_single(
+        Role::PrimaryCoder,
+        "fake",
+        Arc::new(FakeModelRuntime::from_scenario(scenario)),
+    );
+    build_driver_with_router(backing, orch)
+}
+
+/// M1: `FastCoder` bound alongside `PrimaryCoder` with its own,
+/// independently scripted model — `AgentDriver::model_role` picks
+/// `FastCoder` for the main loop and every repair attempt until a
+/// `SwitchRole` repair decision escalates the task to `PrimaryCoder` for
+/// the rest of its run (`is_role_escalates_from_fast_to_primary_coder`
+/// below exercises this end to end).
+fn build_driver_two_roles(
+    backing: &Backing,
+    fast_scenario: Scenario,
+    primary_scenario: Scenario,
+) -> (Arc<TaskManager>, AgentDriver) {
+    let orch = RoleRouter::new();
+    orch.bind_single(
+        Role::FastCoder,
+        "fake-fast",
+        Arc::new(FakeModelRuntime::from_scenario(fast_scenario)),
+    );
+    orch.bind_single(
+        Role::PrimaryCoder,
+        "fake-primary",
+        Arc::new(FakeModelRuntime::from_scenario(primary_scenario)),
+    );
+    build_driver_with_router(backing, orch)
+}
+
+fn build_driver_with_router(
+    backing: &Backing,
+    orch: RoleRouter,
+) -> (Arc<TaskManager>, AgentDriver) {
     let clock: Arc<dyn Clock> = Arc::new(FixedClock::at_millis(1_000_000));
     let tasks = Arc::new(TaskManager::new(
         backing.store.clone(),
@@ -78,11 +118,6 @@ fn build_driver(backing: &Backing, scenario: Scenario) -> (Arc<TaskManager>, Age
         engine.clone(),
         clock.clone(),
     ));
-    let orch = Orchestrator::new();
-    orch.bind(
-        Role::PrimaryCoder,
-        Arc::new(FakeModelRuntime::from_scenario(scenario)),
-    );
     let context = Arc::new(ContextAssembler::new(tools.clone()));
     let verification_log = Arc::new(VerificationLog::new(backing.store.clone()));
     let plan_store = Arc::new(valyria_plan::PlanStore::new(backing.store.clone()));
@@ -124,6 +159,33 @@ fn edit_config_turn(from: &str, to: &str) -> ScriptedTurn {
 
 fn config_contents(b: &Backing) -> String {
     std::fs::read_to_string(b.ws.full_path("src/config.txt")).unwrap()
+}
+
+async fn wait_for_nth(
+    sub: &mut valyria_events::Subscription,
+    events: &EventBus,
+    kind: EventKind,
+    n: usize,
+) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut seen = 0;
+        loop {
+            match sub.recv().await.unwrap() {
+                Delivery::Event(env) if env.kind == kind => {
+                    seen += 1;
+                    if seen >= n {
+                        return;
+                    }
+                }
+                Delivery::Lagged { resume_from } => {
+                    *sub = events.subscribe_since(resume_from).await.unwrap();
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for event")
 }
 
 async fn kinds_of(b: &Backing) -> Vec<EventKind> {
@@ -265,6 +327,140 @@ async fn an_unfixable_bug_trips_loop_detection_and_is_handed_off() {
     assert!(runs.iter().all(|r| !r.passed()));
 }
 
+/// M5, C8: a real crash (aborted, not gracefully paused) mid-repair-loop
+/// must not hand the resumed task a fresh repair budget or an empty loop
+/// detector — otherwise a task that crashes repeatedly could retry
+/// forever across restarts even though a single uninterrupted process
+/// would have given up. Same unfixable-bug scenario as
+/// `an_unfixable_bug_trips_loop_detection_and_is_handed_off`, but the
+/// driver is killed after two verification failures (well before the
+/// 4-attempt repair budget is exhausted) and resumed under a completely
+/// fresh `AgentDriver` — the same "reopen the app" shape every other
+/// crash-recovery test in this workspace uses.
+#[tokio::test]
+async fn a_crash_mid_repair_does_not_reset_the_attempt_budget_or_loop_history() {
+    let backing = seeded_bug_workspace();
+    let mut turns = vec![ScriptedTurn::Finish {
+        summary: "looks fine to me".into(),
+    }];
+    for _ in 0..12 {
+        turns.push(ScriptedTurn::Finish {
+            summary: "still looks fine".into(),
+        });
+    }
+    let (tasks, driver) = build_driver(
+        &backing,
+        Scenario {
+            name: "stuck".into(),
+            turns,
+        },
+    );
+
+    let task = tasks
+        .create(
+            WorkspaceId::new(),
+            "set the answer to 42".into(),
+            Budget::default(),
+        )
+        .await
+        .unwrap();
+
+    let mut sub = backing.events.subscribe_since(Seq::ZERO).await.unwrap();
+    let handle = tokio::spawn({
+        let driver_task = task.id;
+        async move { driver.run(driver_task, CancellationToken::new()).await }
+    });
+
+    // Two failed verification cycles in: at least one repair attempt has
+    // already been recorded, but the 4-attempt budget is nowhere near
+    // exhausted yet.
+    wait_for_nth(&mut sub, &backing.events, EventKind::TestFailed, 2).await;
+    handle.abort();
+    let _ = handle.await;
+
+    let mid_flight = tasks.get(task.id).await.unwrap();
+    assert!(
+        !mid_flight.state.is_terminal(),
+        "task should still be mid-flight: {:?}",
+        mid_flight.state
+    );
+    let attempts_before_crash = tasks
+        .journal_since(task.id, JournalSeq::ZERO)
+        .await
+        .unwrap()
+        .iter()
+        .filter(|e| {
+            matches!(&e.kind, JournalEntryKind::EffectCompleted { outcome_kind, .. } if outcome_kind == kinds::REPAIR_ATTEMPT)
+        })
+        .count();
+    assert!(
+        attempts_before_crash >= 1,
+        "expected at least one repair attempt journaled before the simulated crash"
+    );
+
+    // Fresh manager + driver against the same backing store, exactly as a
+    // restarted process would build them — a brand new, empty
+    // `verify_states` map with nothing cached for this task.
+    // `turn_hint` is a global per-task counter (not reset by a resume), so
+    // the resumed scenario must cover the same index range the original
+    // one did — this scenario is only ever asked for `Finish`, same as
+    // before the crash, so a flat run of them is enough regardless of
+    // exactly which index the crash landed on.
+    let resumed_turns: Vec<ScriptedTurn> = (0..12)
+        .map(|_| ScriptedTurn::Finish {
+            summary: "still looks fine after resume".into(),
+        })
+        .collect();
+    let (tasks2, driver2) = build_driver(
+        &backing,
+        Scenario {
+            name: "stuck-resumed".into(),
+            turns: resumed_turns,
+        },
+    );
+    let recovered = tasks2.recover_incomplete_tasks().await.unwrap();
+    assert_eq!(recovered, vec![task.id]);
+    let paused = tasks2.get(task.id).await.unwrap();
+    let resume_target = paused.paused_from.unwrap();
+    tasks2.transition(task.id, resume_target).await.unwrap();
+    driver2
+        .run(task.id, CancellationToken::new())
+        .await
+        .unwrap();
+
+    let final_task = tasks2.get(task.id).await.unwrap();
+    assert!(
+        matches!(
+            final_task.state,
+            AgentState::WaitingForUser | AgentState::Failed
+        ),
+        "a repair loop resumed after a crash must still converge (hand off), not spin — ended in {:?}",
+        final_task.state
+    );
+
+    // The load-bearing assertion: total repair attempts across *both*
+    // driver instances stay within the same 4-attempt budget a single
+    // uninterrupted process is held to — the resumed driver did not start
+    // counting from zero.
+    let total_attempts = tasks2
+        .journal_since(task.id, JournalSeq::ZERO)
+        .await
+        .unwrap()
+        .iter()
+        .filter(|e| {
+            matches!(&e.kind, JournalEntryKind::EffectCompleted { outcome_kind, .. } if outcome_kind == kinds::REPAIR_ATTEMPT)
+        })
+        .count();
+    assert!(
+        total_attempts <= 4,
+        "expected the repair budget (4 attempts) to survive the crash, got {total_attempts} total attempts"
+    );
+
+    // Never fixed — the scenario never makes a real edit either side of
+    // the crash.
+    assert_eq!(config_contents(&backing), "ANSWER=0\n");
+}
+
 #[tokio::test]
 async fn a_workspace_with_no_tooling_completes_without_verifying() {
     // No verify.sh, no manifest — discovery finds nothing, Verifying is a
@@ -299,4 +495,192 @@ async fn a_workspace_with_no_tooling_completes_without_verifying() {
     );
     let log = VerificationLog::new(backing.store.clone());
     assert!(log.list_for_task(task.id).await.unwrap().is_empty());
+}
+
+/// M1 (`docs/COMPLETION-PLAN.md`): `SwitchRole` used to bump a bookkeeping
+/// flag (`repair_role_primary`) that nothing downstream ever read — every
+/// repair call hardcoded `Role::PrimaryCoder` regardless. With `FastCoder`
+/// now consulted by `AgentDriver::model_role`, a task that starts on a
+/// `FastCoder` that can never converge (it only ever "finishes" without
+/// touching the file, reproducing the exact loop the *un*fixable-bug test
+/// above proves gets detected) must actually reach a real, distinct
+/// `PrimaryCoder` model once the repair ledger escalates — and that model,
+/// making the one edit `FastCoder` never attempted, finishes the task.
+#[tokio::test]
+async fn a_switch_role_decision_actually_escalates_from_fast_to_primary_coder() {
+    let backing = seeded_bug_workspace();
+
+    // FastCoder: turn 0 (the main Implementing loop's only turn — it keeps
+    // calling the model on every `ToolCall` and only leaves on `Finish`/
+    // `Ask`, unlike `Repairing`, which always re-verifies after exactly
+    // one call) is a no-op `Finish`, driving straight into a failing
+    // Verify exactly like `seeded_bug_is_verified_diagnosed_and_repaired_
+    // end_to_end`'s turn 0. Every turn after that is a real edit — but to
+    // a *different* wrong value each time (ANSWER=1, ANSWER=2, …), never
+    // the fix. A repair phase that repeats the exact same no-op or the
+    // exact same edit trips the loop detector's `Oscillation` class within
+    // a few cycles (the diagnose step's signature is constant while the
+    // repair step's is too), which `RepairLedger::decide` routes straight
+    // to `AskUser` — bypassing `SwitchRole` entirely, by design (§31: an
+    // oscillating repair is its own distinct, worse signal, so this isn't
+    // a bug to route around). Varying the (still wrong) edit changes the
+    // repair step's signature every cycle (`StepSignature::patch_hash`/
+    // `file_state_hash`), so neither `ExactRepeat` nor `Oscillation` fires;
+    // the *verification* failure is identical every time regardless (`grep
+    // ANSWER=42` never matches whatever wrong value is there), so
+    // `RepeatedFailure` reliably does — exercising exactly the
+    // `EscalateStrategy → SwitchRole` ladder this test is about.
+    let mut fast_turns: Vec<ScriptedTurn> = vec![ScriptedTurn::Finish {
+        summary: "done (but it isn't)".into(),
+    }];
+    fast_turns.extend(
+        (0..10).map(|i: u32| {
+            edit_config_turn(&format!("ANSWER={i}\n"), &format!("ANSWER={}\n", i + 1))
+        }),
+    );
+    let fast_scenario = Scenario {
+        name: "fast_never_fixes_it".into(),
+        turns: fast_turns,
+    };
+
+    // PrimaryCoder: makes the actual fix the very first time it is called,
+    // whichever global turn index that turns out to be, and regardless of
+    // which wrong value FastCoder left the file at — a whole-file
+    // replacement rather than an exact-anchor replacement, since the exact
+    // prior content depends on exactly how many FastCoder turns ran before
+    // the ledger escalated.
+    let primary_turns: Vec<ScriptedTurn> = (0..10)
+        .map(|_| ScriptedTurn::ToolCall {
+            name: "edit_file".into(),
+            arguments: serde_json::json!({
+                "path": "src/config.txt",
+                "precondition": "any",
+                "strategy": {
+                    "type": "whole_file_replacement",
+                    "content": "ANSWER=42\n",
+                    "reason": "primary coder fix",
+                    "force": false,
+                }
+            }),
+        })
+        .collect();
+    let primary_scenario = Scenario {
+        name: "primary_fixes_it_immediately".into(),
+        turns: primary_turns,
+    };
+
+    let (tasks, driver) = build_driver_two_roles(&backing, fast_scenario, primary_scenario);
+    let task = tasks
+        .create(
+            WorkspaceId::new(),
+            "set the answer to 42".into(),
+            Budget::default(),
+        )
+        .await
+        .unwrap();
+    driver.run(task.id, CancellationToken::new()).await.unwrap();
+
+    let final_task = tasks.get(task.id).await.unwrap();
+    assert_eq!(
+        final_task.state,
+        AgentState::Completed,
+        "expected COMPLETED once PrimaryCoder took over, got {:?}",
+        final_task.state
+    );
+    assert_eq!(config_contents(&backing), "ANSWER=42\n");
+
+    // The journal's MODEL_COMPLETION payloads (driver.rs's `"role"` /
+    // `"model_id"` fields, added alongside `generate_action`'s
+    // `RoutedCompletion`) name every model that actually served a turn —
+    // proof this ran through two distinct models, not one model that
+    // happened to eventually emit the right edit.
+    let events = backing.events.replay_since(Seq::ZERO).await.unwrap();
+    let roles_seen: std::collections::BTreeSet<String> = events
+        .iter()
+        .filter(|e| e.kind == EventKind::ModelCompleted)
+        .filter_map(|e| e.payload.get("role")?.as_str().map(str::to_string))
+        .collect();
+    assert!(
+        roles_seen.contains("fast_coder"),
+        "FastCoder should have been tried first: {roles_seen:?}"
+    );
+    assert!(
+        roles_seen.contains("primary_coder"),
+        "PrimaryCoder should have been escalated to: {roles_seen:?}"
+    );
+
+    // And the escalation was real, not a fluke: at least one verification
+    // run failed (FastCoder's futile attempts) before the final pass.
+    let log = VerificationLog::new(backing.store.clone());
+    let runs = log.list_for_task(task.id).await.unwrap();
+    assert!(
+        runs.len() >= 2,
+        "expected at least one failed run before the fix, got {}",
+        runs.len()
+    );
+    assert!(!runs.first().unwrap().passed());
+    assert!(runs.last().unwrap().passed());
+}
+
+/// M3 (`docs/COMPLETION-PLAN.md`): a task whose mandatory full
+/// verification run actually passes writes repository memory — the
+/// working `verify.sh` command becomes a `Command` memory entry a later
+/// task's retrieval can find. Reuses the already-proven fix scenario from
+/// `seeded_bug_is_verified_diagnosed_and_repaired_end_to_end`.
+#[tokio::test]
+async fn a_verified_completion_writes_repository_memory() {
+    let backing = seeded_bug_workspace();
+    let scenario = Scenario {
+        name: "repair".into(),
+        turns: vec![
+            ScriptedTurn::Finish {
+                summary: "done (but it isn't)".into(),
+            },
+            edit_config_turn("ANSWER=0\n", "ANSWER=42\n"),
+        ],
+    };
+    let (tasks, driver) = build_driver(&backing, scenario);
+    let memory = std::sync::Arc::new(valyria_memory::MemoryStore::new(backing.store.clone()));
+    let driver = driver.with_memory(memory.clone());
+
+    let task = tasks
+        .create(
+            WorkspaceId::new(),
+            "set the answer to 42".into(),
+            Budget::default(),
+        )
+        .await
+        .unwrap();
+    driver.run(task.id, CancellationToken::new()).await.unwrap();
+    assert_eq!(
+        tasks.get(task.id).await.unwrap().state,
+        AgentState::Completed
+    );
+
+    let stats = memory.stats().await.unwrap();
+    assert!(
+        stats.live > 0,
+        "expected at least one memory entry written after a verified completion"
+    );
+
+    let retrieved = memory
+        .retrieve(
+            valyria_memory::RetrievalRequest::new("verify.sh", 1_000_000)
+                .scope(valyria_memory::MemoryScope::Repository)
+                .min_effective_confidence(0.0),
+        )
+        .await
+        .unwrap();
+    assert!(
+        retrieved
+            .ranked
+            .iter()
+            .any(|s| s.entry.text.contains("verify.sh") && s.entry.text.contains("working")),
+        "expected a 'working command' memory entry naming verify.sh, got {:?}",
+        retrieved
+            .ranked
+            .iter()
+            .map(|s| &s.entry.text)
+            .collect::<Vec<_>>()
+    );
 }

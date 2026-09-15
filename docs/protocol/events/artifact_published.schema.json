@@ -1,0 +1,20 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ArtifactPublishedPayload",
+  "description": "`artifact_published` — a role-pipeline `Artifact` was persisted (M5, `valyria-agent::role_pipeline`).",
+  "type": "object",
+  "required": [
+    "kind",
+    "role"
+  ],
+  "properties": {
+    "kind": {
+      "description": "`research_brief` | `plan` | `change_set` | `verification_report` | `review_findings`.",
+      "type": "string"
+    },
+    "role": {
+      "description": "`researcher` | `planner` | `implementer` | `tester` | `reviewer`.",
+      "type": "string"
+    }
+  }
+}

@@ -39,6 +39,7 @@ fn harness(mode: PermissionMode) -> Harness {
         step_id: StepId::new(),
         cancel: valyria_util::CancellationToken::new(),
         launcher: Arc::from(detect_platform_launcher()),
+        store: None,
     };
 
     Harness {
@@ -54,6 +55,17 @@ fn expect_success(result: InvocationResult) -> ToolOutcome {
         InvocationResult::Executed { outcome, record } => {
             assert!(record.authorized);
             assert_eq!(outcome.is_success(), record.success);
+            // M4: the helper's own name is the contract — every prior
+            // caller already only ever fed it a genuinely successful
+            // outcome (the consistency check above was the only thing
+            // enforced, so a silently-failing tool call would pass
+            // straight through unnoticed, which is exactly what a
+            // git_commit sandbox regression did here before this line
+            // existed).
+            assert!(
+                outcome.is_success(),
+                "expected a successful outcome, got {outcome:?}"
+            );
             outcome
         }
         other => panic!("expected Executed, got {other:?}"),
@@ -401,19 +413,43 @@ async fn git_status_reports_a_dirty_workspace() {
 #[tokio::test]
 async fn not_yet_implemented_tools_fail_cleanly() {
     let h = harness(PermissionMode::Autonomous);
-    for tool in ["search", "symbol_search", "git_blame"] {
-        let input = if tool == "git_blame" {
-            serde_json::json!({"path": "f.txt"})
-        } else {
-            serde_json::json!({"query": "foo"})
-        };
-        let result = h.runtime.invoke(&h.ctx, tool, input).await;
+    let result = h
+        .runtime
+        .invoke(&h.ctx, "git_blame", serde_json::json!({"path": "f.txt"}))
+        .await;
+    match result {
+        InvocationResult::Executed { outcome, .. } => {
+            assert!(
+                !outcome.is_success(),
+                "git_blame should report failure, not succeed"
+            );
+        }
+        other => panic!("expected Executed(Failure) for git_blame, got {other:?}"),
+    }
+}
+
+/// M2 (`docs/COMPLETION-PLAN.md`): `search` / `symbol_search` are real now
+/// — implemented, not stubbed — but this harness's `ToolCtx` has no
+/// workspace database (`store: None`, matching a context built before an
+/// index bootstrap ever ran), so they degrade to a plain, honest failure
+/// rather than panicking or silently returning nothing.
+#[tokio::test]
+async fn search_tools_without_a_store_degrade_to_a_clean_failure() {
+    let h = harness(PermissionMode::Autonomous);
+    for tool in ["search", "symbol_search"] {
+        let result = h
+            .runtime
+            .invoke(&h.ctx, tool, serde_json::json!({"query": "foo"}))
+            .await;
         match result {
             InvocationResult::Executed { outcome, .. } => {
                 assert!(
                     !outcome.is_success(),
                     "{tool} should report failure, not succeed"
                 );
+                if let ToolOutcome::Failure { code, .. } = outcome {
+                    assert_eq!(code, "tools.search_unavailable");
+                }
             }
             other => panic!("expected Executed(Failure) for {tool}, got {other:?}"),
         }
@@ -437,6 +473,7 @@ async fn descriptors_cover_every_registered_tool() {
         "git_log",
         "git_show",
         "git_blame",
+        "git_commit",
         "run_command",
         "run_test",
         "run_formatter",
@@ -449,5 +486,147 @@ async fn descriptors_cover_every_registered_tool() {
             names.contains(&expected),
             "missing descriptor for {expected}"
         );
+    }
+}
+
+/// M3 (`docs/COMPLETION-PLAN.md`): `valyria_util::redact` existed, fully
+/// tested, and was never actually called from anywhere in the workspace —
+/// a secret a tool reads off disk or a command prints to stdout reached
+/// the model's context and the journal verbatim. `ToolRuntime::run` now
+/// redacts every outcome on the way out, the single choke point every
+/// tool call passes through.
+#[tokio::test]
+async fn a_secret_read_from_a_file_is_redacted_before_it_reaches_the_model_or_the_journal() {
+    let h = harness(PermissionMode::Autonomous);
+    h.runtime
+        .invoke(
+            &h.ctx,
+            "write_file",
+            serde_json::json!({
+                "path": ".env",
+                "content": "DATABASE_URL=postgres://x\nAWS_ACCESS_KEY_ID=AKIAABCDEFGHIJKLMNOP\n",
+                "reason": "seed"
+            }),
+        )
+        .await;
+
+    let read = h
+        .runtime
+        .invoke(&h.ctx, "read_file", serde_json::json!({"path": ".env"}))
+        .await;
+    let InvocationResult::Executed { outcome, record } = read else {
+        panic!("expected Executed");
+    };
+
+    // What the model would see (ToolOutcome::Success.structured.content,
+    // rendered by AgentDriver into a Message::tool_result) never carries
+    // the real key.
+    match &outcome {
+        ToolOutcome::Success { structured, .. } => {
+            let content = structured["content"].as_str().unwrap();
+            assert!(!content.contains("AKIAABCDEFGHIJKLMNOP"), "{content}");
+            assert!(content.contains("[REDACTED]"), "{content}");
+            // Non-secret content is untouched.
+            assert!(content.contains("DATABASE_URL="));
+        }
+        other => panic!("expected Success, got {other:?}"),
+    }
+
+    // What gets journaled (ToolInvocationRecord) never carries it either —
+    // stdout/stderr specifically, the fields a real shell command's
+    // output would land in.
+    if let Some(stdout) = &record.stdout {
+        assert!(!stdout.contains("AKIAABCDEFGHIJKLMNOP"));
+    }
+}
+
+/// M4 (`docs/COMPLETION-PLAN.md`): `git_commit` — the first git *write*
+/// tool. `valyria-git` has no write API, so this shells to the real `git`
+/// binary (same sandboxed-process path `run_command` uses) rather than
+/// building one; the test proves the actual repository ends up committed,
+/// not just that the tool reports success.
+#[tokio::test]
+async fn git_commit_stages_and_commits_real_changes() {
+    let h = harness(PermissionMode::Autonomous);
+    let dir = h.ctx.workspace_root.as_path();
+    let run = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap()
+    };
+    run(&["init", "-q", "-b", "main"]);
+    run(&["config", "user.email", "t@example.com"]);
+    run(&["config", "user.name", "T"]);
+    std::fs::write(dir.join("README.md"), "hi").unwrap();
+    run(&["add", "."]);
+    run(&["commit", "-q", "-m", "init"]);
+
+    std::fs::write(dir.join("README.md"), "changed by the agent").unwrap();
+    std::fs::write(dir.join("new.txt"), "brand new file").unwrap();
+
+    let result = h
+        .runtime
+        .invoke(
+            &h.ctx,
+            "git_commit",
+            serde_json::json!({"message": "agent: update README and add new.txt"}),
+        )
+        .await;
+    expect_success(result);
+
+    // The real repository actually has a new commit with both files, not
+    // just a tool that claimed success.
+    let log = run(&["log", "--oneline", "-1"]);
+    let log_text = String::from_utf8_lossy(&log.stdout);
+    assert!(log_text.contains("agent: update README and add new.txt"));
+
+    let status = run(&["status", "--porcelain"]);
+    assert!(
+        status.stdout.is_empty(),
+        "expected a clean working tree after commit, got: {}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+
+    let show = run(&["show", "--stat", "HEAD"]);
+    let show_text = String::from_utf8_lossy(&show.stdout);
+    assert!(show_text.contains("README.md"));
+    assert!(show_text.contains("new.txt"));
+}
+
+/// A `git_commit` with nothing staged and nothing to commit reports
+/// failure cleanly rather than silently succeeding.
+#[tokio::test]
+async fn git_commit_with_nothing_to_commit_fails_cleanly() {
+    let h = harness(PermissionMode::Autonomous);
+    let dir = h.ctx.workspace_root.as_path();
+    let run = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap()
+    };
+    run(&["init", "-q", "-b", "main"]);
+    run(&["config", "user.email", "t@example.com"]);
+    run(&["config", "user.name", "T"]);
+    std::fs::write(dir.join("README.md"), "hi").unwrap();
+    run(&["add", "."]);
+    run(&["commit", "-q", "-m", "init"]);
+
+    let result = h
+        .runtime
+        .invoke(
+            &h.ctx,
+            "git_commit",
+            serde_json::json!({"message": "nothing changed"}),
+        )
+        .await;
+    match result {
+        InvocationResult::Executed { outcome, .. } => {
+            assert!(!outcome.is_success(), "expected failure, nothing to commit");
+        }
+        other => panic!("expected Executed, got {other:?}"),
     }
 }

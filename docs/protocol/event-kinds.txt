@@ -30,3 +30,6 @@ model_server_starting
 model_server_ready
 model_server_failed
 model_server_stopped
+subtask_started
+subtask_completed
+artifact_published

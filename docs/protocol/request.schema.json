@@ -111,6 +111,63 @@
       }
     },
     {
+      "description": "Every direct child of a task, oldest first. Protocol 1.13.0 (M5).",
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "task_children"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/TaskIdRequest"
+        }
+      }
+    },
+    {
+      "description": "Every role-pipeline artifact produced against a task, oldest first. Protocol 1.13.0 (M5).",
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "task_artifacts"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/TaskIdRequest"
+        }
+      }
+    },
+    {
+      "description": "Every plan revision for a task, oldest first, each with its diff against the immediately preceding one. Protocol 1.13.0 (M5).",
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "plan_revisions"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/TaskIdRequest"
+        }
+      }
+    },
+    {
       "type": "object",
       "required": [
         "method",

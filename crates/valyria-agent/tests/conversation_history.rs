@@ -17,7 +17,7 @@ use valyria_model::{
     Capabilities, Chunk, Completion, GenerateRequest, Health, ModelError, ModelRuntime,
     Role as MessageRole,
 };
-use valyria_orchestrator::{Orchestrator, Role};
+use valyria_orchestrator::{Role, RoleRouter};
 use valyria_permissions::PermissionEngine;
 use valyria_runtime_fake::{FakeModelRuntime, Scenario, ScriptedTurn};
 use valyria_sandbox::{detect_platform_launcher, ProcessLauncher, SandboxProfile};
@@ -116,8 +116,8 @@ async fn implementing_turns_carry_a_system_prompt_tools_and_replay_tool_history(
         }),
         seen: seen.clone(),
     };
-    let orch = Orchestrator::new();
-    orch.bind(Role::PrimaryCoder, Arc::new(capturing));
+    let orch = RoleRouter::new();
+    orch.bind_single(Role::PrimaryCoder, "fake", Arc::new(capturing));
     let orchestrator = Arc::new(orch);
 
     let context = Arc::new(ContextAssembler::new(tool_runtime.clone()));
@@ -182,11 +182,14 @@ async fn implementing_turns_carry_a_system_prompt_tools_and_replay_tool_history(
     );
     assert!(!first.tools.is_empty(), "tools are bound to the request");
     assert!(first.tools.iter().any(|t| t.name == "read_file"));
+    // M2: search/symbol_search are real now and offered to the model;
+    // git_blame is still the one genuinely not-yet-implemented tool
+    // (valyria-git has no blame implementation at all — see
+    // docs/COMPLETION-PLAN.md).
+    assert!(first.tools.iter().any(|t| t.name == "search"));
+    assert!(first.tools.iter().any(|t| t.name == "symbol_search"));
     assert!(
-        !first
-            .tools
-            .iter()
-            .any(|t| t.name == "search" || t.name == "symbol_search"),
+        !first.tools.iter().any(|t| t.name == "git_blame"),
         "not-yet-implemented tools are excluded: {:?}",
         first.tools.iter().map(|t| &t.name).collect::<Vec<_>>()
     );
@@ -217,5 +220,136 @@ async fn implementing_turns_carry_a_system_prompt_tools_and_replay_tool_history(
     assert!(
         !second.tools.is_empty(),
         "tools stay bound on later turns too"
+    );
+}
+
+/// M4 (`docs/COMPLETION-PLAN.md`): `ActionRequest::Ask` could park a task
+/// in `WAITING_FOR_USER`, but nothing could ever answer it — the other
+/// half, `AgentDriver::respond_to_user`, is new. Proves the full round
+/// trip: the model asks, the answer is journaled and the task resumes,
+/// and the *next* model call's message history actually carries both the
+/// question and the answer — not just that the state machine transitions
+/// correctly, but that the model would really see what was asked and
+/// answered.
+#[tokio::test]
+async fn respond_to_user_answers_the_question_and_the_next_turn_sees_both() {
+    let store = Arc::new(Store::open_in_memory(&combined_migrations()).unwrap());
+    let events = Arc::new(EventBus::new(store.clone()));
+    let ws = valyria_testkit::TempWorkspace::new();
+    let blob_dir = tempfile::tempdir().unwrap();
+
+    let clock: Arc<dyn Clock> = Arc::new(FixedClock::at_millis(1_000_000));
+    let tasks = Arc::new(TaskManager::new(
+        store.clone(),
+        events.clone(),
+        clock.clone(),
+    ));
+
+    let root = WorkspaceRoot::new(ws.path()).unwrap();
+    let ledger = Arc::new(Ledger::new(blob_dir.path()).unwrap());
+    let engine = Arc::new(PermissionEngine::new(
+        PermissionMode::Assisted,
+        clock.clone(),
+    ));
+    let tool_runtime = Arc::new(ToolRuntime::new(
+        valyria_tools::all_tools(),
+        engine.clone(),
+        clock.clone(),
+    ));
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let capturing = CapturingRuntime {
+        inner: FakeModelRuntime::from_scenario(Scenario {
+            name: "ask_and_respond".into(),
+            turns: vec![
+                ScriptedTurn::Ask {
+                    question: "what should the greeting say?".into(),
+                },
+                ScriptedTurn::Finish {
+                    summary: "used the answer".into(),
+                },
+            ],
+        }),
+        seen: seen.clone(),
+    };
+    let orch = RoleRouter::new();
+    orch.bind_single(Role::PrimaryCoder, "fake", Arc::new(capturing));
+    let orchestrator = Arc::new(orch);
+
+    let context = Arc::new(ContextAssembler::new(tool_runtime.clone()));
+    let verification_log = Arc::new(VerificationLog::new(store.clone()));
+    let plan_store = Arc::new(valyria_plan::PlanStore::new(store.clone()));
+    let hash_cache = Arc::new(HashCache::new());
+    let launcher: Arc<dyn ProcessLauncher> = Arc::from(detect_platform_launcher());
+    let sandbox_profile = SandboxProfile::new().allow_write(root.as_path());
+
+    let driver = AgentDriver::new(
+        tasks.clone(),
+        tool_runtime,
+        orchestrator,
+        context,
+        ledger,
+        engine,
+        verification_log,
+        plan_store,
+        root,
+        hash_cache,
+        clock,
+        launcher,
+        sandbox_profile,
+    );
+
+    let task = tasks
+        .create(
+            WorkspaceId::new(),
+            "write a greeting".into(),
+            Budget::default(),
+        )
+        .await
+        .unwrap();
+
+    driver.run(task.id, CancellationToken::new()).await.unwrap();
+    assert_eq!(
+        tasks.get(task.id).await.unwrap().state,
+        AgentState::WaitingForUser,
+        "the model's Ask should park the task"
+    );
+
+    driver
+        .respond_to_user(task.id, "make it say hello in French".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        tasks.get(task.id).await.unwrap().state,
+        AgentState::Implementing,
+        "respond_to_user should resume the task"
+    );
+
+    driver.run(task.id, CancellationToken::new()).await.unwrap();
+    assert_eq!(
+        tasks.get(task.id).await.unwrap().state,
+        AgentState::Completed
+    );
+
+    let requests = seen.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let second = &requests[1];
+    assert!(
+        second
+            .messages
+            .iter()
+            .any(|m| m.role == MessageRole::Assistant
+                && m.content.contains("what should the greeting say?")),
+        "second turn should replay the question: {:?}",
+        second.messages
+    );
+    assert!(
+        second
+            .messages
+            .iter()
+            .any(|m| m.role == MessageRole::User
+                && m.content.contains("make it say hello in French")),
+        "second turn should carry the answer: {:?}",
+        second.messages
     );
 }

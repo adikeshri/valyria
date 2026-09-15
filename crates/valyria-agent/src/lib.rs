@@ -14,6 +14,7 @@ pub mod error;
 pub mod loop_detect;
 pub mod plan_exec;
 pub mod repair;
+pub mod role_pipeline;
 mod tool_specs;
 
 pub use action::ActionRequest;
