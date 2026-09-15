@@ -558,6 +558,22 @@ impl Runtime {
         Ok(())
     }
 
+    /// Answer a task parked in `WAITING_FOR_USER` (M4) and, if that leaves
+    /// it live, spawn a fresh driver to keep it running — mirrors
+    /// `resolve_permission_scoped` exactly: `AgentDriver::respond_to_user`
+    /// only performs the one resolution step.
+    pub async fn respond_to_user(&self, task_id: TaskId, answer: String) -> Result<()> {
+        self.driver.respond_to_user(task_id, answer).await?;
+        let task = self.tasks.get(task_id).await?;
+        if !task.state.is_terminal()
+            && task.state != AgentState::WaitingForPermission
+            && task.state != AgentState::WaitingForUser
+        {
+            self.spawn_driver(task_id);
+        }
+        Ok(())
+    }
+
     pub async fn task_status(&self, task_id: TaskId) -> Result<Task> {
         Ok(self.tasks.get(task_id).await?)
     }

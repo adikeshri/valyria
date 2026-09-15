@@ -29,6 +29,16 @@ pub mod kinds {
     pub const TOOL_RESULT: &str = "tool_result";
     pub const TOOL_DENIED: &str = "tool_denied";
     pub const PERMISSION_ASK: &str = "permission_ask";
+    /// The user's answer to a model-asked question (M4, §13 "ask" flow) —
+    /// an `EffectCompleted` with no matching `EffectIssued` (the "ask" is
+    /// the `MODEL_COMPLETION` entry with `finish_reason: "Ask"` right
+    /// before the task entered `WAITING_FOR_USER`; there is nothing to
+    /// correlate an effect id against on the way in, since the model
+    /// asked rather than the runtime issuing a request). Payload carries
+    /// `{ answer }`. `TaskManager::respond_to_user` journals this and
+    /// resumes the task; `AgentDriver::build_conversation` replays it as
+    /// the user turn following the question.
+    pub const USER_RESPONSE: &str = "user_response";
     /// A verification command the driver ran itself (§27) — not a model
     /// tool call. Payload carries the command and, on completion, the
     /// outcome + parsed failure count.

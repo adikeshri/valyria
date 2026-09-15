@@ -380,13 +380,26 @@ impl AgentDriver {
     /// serialize one for outgoing messages today, and extending it is out
     /// of scope here. Worth revisiting once this is exercised against a
     /// real model rather than the fake runtime.
+    ///
+    /// M4 extends the replay to a model-asked question and the user's
+    /// answer (`ActionRequest::Ask` / `TaskManager::respond_to_user`):
+    /// there is no effect id to correlate a question against its answer
+    /// (the model asked; nothing issued a request), so those two turns
+    /// are paired by adjacency instead — the most recent unanswered
+    /// `MODEL_COMPLETION{finish_reason: "Ask"}` is the question a
+    /// following `USER_RESPONSE` entry answers. Both turn kinds are then
+    /// merged into one journal-order sequence by the seq of whichever
+    /// entry completed the turn (a tool's `TOOL_RESULT`/`TOOL_DENIED`, or
+    /// the response's own `USER_RESPONSE`), since that's the only ordering
+    /// that's meaningful when the two kinds interleave across a task with
+    /// more than one question in it.
     async fn build_conversation(&self, task_id: TaskId) -> Result<Vec<Message>> {
         let mut messages = self.system_and_task_messages(task_id).await?;
 
         let entries = self.tasks.journal_since(task_id, JournalSeq::ZERO).await?;
         let mut issued: HashMap<EffectId, (String, serde_json::Value)> = HashMap::new();
-        let mut resolved: HashMap<EffectId, (bool, String)> = HashMap::new(); // (denied, text)
-        let mut order: Vec<EffectId> = Vec::new();
+        let mut pending_question: Option<String> = None;
+        let mut turns: Vec<(JournalSeq, Vec<Message>)> = Vec::new();
 
         for entry in &entries {
             match &entry.kind {
@@ -396,9 +409,6 @@ impl AgentDriver {
                     payload,
                     ..
                 } if effect_kind == kinds::TOOL => {
-                    if !issued.contains_key(effect_id) {
-                        order.push(*effect_id);
-                    }
                     let tool = payload
                         .get("tool")
                         .and_then(|v| v.as_str())
@@ -415,12 +425,20 @@ impl AgentDriver {
                     payload,
                     ..
                 } if outcome_kind == kinds::TOOL_RESULT => {
-                    let rendered = payload
-                        .get("rendered")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string();
-                    resolved.insert(*effect_id, (false, rendered));
+                    if let Some((tool, input)) = issued.get(effect_id) {
+                        let rendered = payload
+                            .get("rendered")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        turns.push((
+                            entry.seq,
+                            vec![
+                                Message::assistant(format!("Calling `{tool}` with {input}")),
+                                Message::tool_result(effect_id.to_string(), rendered),
+                            ],
+                        ));
+                    }
                 }
                 JournalEntryKind::EffectCompleted {
                     effect_id,
@@ -428,31 +446,60 @@ impl AgentDriver {
                     payload,
                     ..
                 } if outcome_kind == kinds::TOOL_DENIED => {
-                    let reason = payload
-                        .get("reason")
+                    if let Some((tool, input)) = issued.get(effect_id) {
+                        let reason = payload
+                            .get("reason")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        turns.push((
+                            entry.seq,
+                            vec![
+                                Message::assistant(format!("Calling `{tool}` with {input}")),
+                                Message::tool_result(
+                                    effect_id.to_string(),
+                                    format!("Denied: {reason}"),
+                                ),
+                            ],
+                        ));
+                    }
+                }
+                JournalEntryKind::EffectCompleted {
+                    outcome_kind,
+                    payload,
+                    ..
+                } if outcome_kind == kinds::MODEL_COMPLETION => {
+                    if payload.get("finish_reason").and_then(|v| v.as_str()) == Some("Ask") {
+                        pending_question = payload
+                            .get("text")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string);
+                    }
+                }
+                JournalEntryKind::EffectCompleted {
+                    outcome_kind,
+                    payload,
+                    ..
+                } if outcome_kind == kinds::USER_RESPONSE => {
+                    let answer = payload
+                        .get("answer")
                         .and_then(|v| v.as_str())
                         .unwrap_or_default()
                         .to_string();
-                    resolved.insert(*effect_id, (true, reason));
+                    let mut pair = Vec::new();
+                    if let Some(question) = pending_question.take() {
+                        pair.push(Message::assistant(question));
+                    }
+                    pair.push(Message::user(answer));
+                    turns.push((entry.seq, pair));
                 }
                 _ => {}
             }
         }
 
-        for effect_id in order {
-            let Some((tool, input)) = issued.get(&effect_id) else {
-                continue;
-            };
-            let Some((denied, text)) = resolved.get(&effect_id) else {
-                continue;
-            };
-            messages.push(Message::assistant(format!("Calling `{tool}` with {input}")));
-            let body = if *denied {
-                format!("Denied: {text}")
-            } else {
-                text.clone()
-            };
-            messages.push(Message::tool_result(effect_id.to_string(), body));
+        turns.sort_by_key(|(seq, _)| *seq);
+        for (_, turn_messages) in turns {
+            messages.extend(turn_messages);
         }
 
         Ok(messages)
@@ -1232,6 +1279,39 @@ impl AgentDriver {
             }
             InvocationResult::UnknownTool(name) => Err(AgentError::UnknownTool(name.clone())),
         }
+    }
+
+    /// Answer a task parked in `WAITING_FOR_USER` (M4) — the other half of
+    /// `ActionRequest::Ask`, which could get a task *into* that state but
+    /// had no way back out short of cancelling it. Journals the answer
+    /// (`USER_RESPONSE`, replayed by `build_conversation` as the user turn
+    /// following the question — `Trust::Instruction`, since this is the
+    /// user speaking, the same authority level a repo-owned instruction
+    /// file carries) and transitions back to `Implementing` so the next
+    /// model call sees both the question and the answer. Mirrors
+    /// `resolve_permission_scoped`'s shape: one resolution step, not a
+    /// loop — the caller (`valyria_app::Runtime::respond_to_user`) spawns
+    /// a fresh driver run afterward if that leaves the task live.
+    pub async fn respond_to_user(&self, task_id: TaskId, answer: String) -> Result<()> {
+        let task = self.tasks.get(task_id).await?;
+        if task.state != AgentState::WaitingForUser {
+            return Err(AgentError::NotWaitingForUser(task_id));
+        }
+        self.tasks
+            .append_journal(
+                task_id,
+                JournalEntryKind::EffectCompleted {
+                    effect_id: EffectId::new(),
+                    step_id: StepId::new(),
+                    outcome_kind: kinds::USER_RESPONSE.into(),
+                    payload: serde_json::json!({ "answer": answer }),
+                },
+            )
+            .await?;
+        self.tasks
+            .transition(task_id, AgentState::Implementing)
+            .await?;
+        Ok(())
     }
 
     // --- helpers ---------------------------------------------------
