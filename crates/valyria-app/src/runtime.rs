@@ -408,7 +408,8 @@ impl Runtime {
             )
             .with_planning_mode(config.planning_mode)
             .with_retriever(retriever)
-            .with_store(store.clone()),
+            .with_store(store.clone())
+            .with_memory(memory.clone()),
         );
 
         Ok(Self {

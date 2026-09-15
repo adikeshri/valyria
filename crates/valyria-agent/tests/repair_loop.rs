@@ -30,6 +30,7 @@ fn migrations() -> Vec<Migration> {
     m.extend(valyria_task::MIGRATIONS.iter().copied());
     m.extend(valyria_verify::MIGRATIONS.iter().copied());
     m.extend(valyria_plan::MIGRATIONS.iter().copied());
+    m.extend(valyria_memory::MIGRATIONS.iter().copied());
     m
 }
 
@@ -457,4 +458,67 @@ async fn a_switch_role_decision_actually_escalates_from_fast_to_primary_coder() 
     );
     assert!(!runs.first().unwrap().passed());
     assert!(runs.last().unwrap().passed());
+}
+
+/// M3 (`docs/COMPLETION-PLAN.md`): a task whose mandatory full
+/// verification run actually passes writes repository memory — the
+/// working `verify.sh` command becomes a `Command` memory entry a later
+/// task's retrieval can find. Reuses the already-proven fix scenario from
+/// `seeded_bug_is_verified_diagnosed_and_repaired_end_to_end`.
+#[tokio::test]
+async fn a_verified_completion_writes_repository_memory() {
+    let backing = seeded_bug_workspace();
+    let scenario = Scenario {
+        name: "repair".into(),
+        turns: vec![
+            ScriptedTurn::Finish {
+                summary: "done (but it isn't)".into(),
+            },
+            edit_config_turn("ANSWER=0\n", "ANSWER=42\n"),
+        ],
+    };
+    let (tasks, driver) = build_driver(&backing, scenario);
+    let memory = std::sync::Arc::new(valyria_memory::MemoryStore::new(backing.store.clone()));
+    let driver = driver.with_memory(memory.clone());
+
+    let task = tasks
+        .create(
+            WorkspaceId::new(),
+            "set the answer to 42".into(),
+            Budget::default(),
+        )
+        .await
+        .unwrap();
+    driver.run(task.id, CancellationToken::new()).await.unwrap();
+    assert_eq!(
+        tasks.get(task.id).await.unwrap().state,
+        AgentState::Completed
+    );
+
+    let stats = memory.stats().await.unwrap();
+    assert!(
+        stats.live > 0,
+        "expected at least one memory entry written after a verified completion"
+    );
+
+    let retrieved = memory
+        .retrieve(
+            valyria_memory::RetrievalRequest::new("verify.sh", 1_000_000)
+                .scope(valyria_memory::MemoryScope::Repository)
+                .min_effective_confidence(0.0),
+        )
+        .await
+        .unwrap();
+    assert!(
+        retrieved
+            .ranked
+            .iter()
+            .any(|s| s.entry.text.contains("verify.sh") && s.entry.text.contains("working")),
+        "expected a 'working command' memory entry naming verify.sh, got {:?}",
+        retrieved
+            .ranked
+            .iter()
+            .map(|s| &s.entry.text)
+            .collect::<Vec<_>>()
+    );
 }

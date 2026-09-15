@@ -29,6 +29,7 @@ valyria-sandbox = { workspace = true }
 valyria-store = { workspace = true }
 valyria-index = { workspace = true }
 valyria-graph = { workspace = true }
+valyria-memory = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

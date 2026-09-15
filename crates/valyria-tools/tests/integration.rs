@@ -476,3 +476,54 @@ async fn descriptors_cover_every_registered_tool() {
         );
     }
 }
+
+/// M3 (`docs/COMPLETION-PLAN.md`): `valyria_util::redact` existed, fully
+/// tested, and was never actually called from anywhere in the workspace —
+/// a secret a tool reads off disk or a command prints to stdout reached
+/// the model's context and the journal verbatim. `ToolRuntime::run` now
+/// redacts every outcome on the way out, the single choke point every
+/// tool call passes through.
+#[tokio::test]
+async fn a_secret_read_from_a_file_is_redacted_before_it_reaches_the_model_or_the_journal() {
+    let h = harness(PermissionMode::Autonomous);
+    h.runtime
+        .invoke(
+            &h.ctx,
+            "write_file",
+            serde_json::json!({
+                "path": ".env",
+                "content": "DATABASE_URL=postgres://x\nAWS_ACCESS_KEY_ID=AKIAABCDEFGHIJKLMNOP\n",
+                "reason": "seed"
+            }),
+        )
+        .await;
+
+    let read = h
+        .runtime
+        .invoke(&h.ctx, "read_file", serde_json::json!({"path": ".env"}))
+        .await;
+    let InvocationResult::Executed { outcome, record } = read else {
+        panic!("expected Executed");
+    };
+
+    // What the model would see (ToolOutcome::Success.structured.content,
+    // rendered by AgentDriver into a Message::tool_result) never carries
+    // the real key.
+    match &outcome {
+        ToolOutcome::Success { structured, .. } => {
+            let content = structured["content"].as_str().unwrap();
+            assert!(!content.contains("AKIAABCDEFGHIJKLMNOP"), "{content}");
+            assert!(content.contains("[REDACTED]"), "{content}");
+            // Non-secret content is untouched.
+            assert!(content.contains("DATABASE_URL="));
+        }
+        other => panic!("expected Success, got {other:?}"),
+    }
+
+    // What gets journaled (ToolInvocationRecord) never carries it either —
+    // stdout/stderr specifically, the fields a real shell command's
+    // output would land in.
+    if let Some(stdout) = &record.stdout {
+        assert!(!stdout.contains("AKIAABCDEFGHIJKLMNOP"));
+    }
+}

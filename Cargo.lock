@@ -3436,6 +3436,7 @@ dependencies = [
  "valyria-instructions",
  "valyria-lang",
  "valyria-ledger",
+ "valyria-memory",
  "valyria-model",
  "valyria-orchestrator",
  "valyria-permissions",

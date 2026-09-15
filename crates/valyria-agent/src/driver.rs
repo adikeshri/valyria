@@ -149,6 +149,12 @@ pub struct AgentDriver {
     /// tools report plainly that no index is available) — unless
     /// `with_store` was called.
     pub(crate) store: Option<Arc<valyria_store::Store>>,
+    /// Repository memory (M3): written to after a task's mandatory broad
+    /// verification run actually passes — commands observed to work,
+    /// repeatedly-failing commands as pitfalls (`valyria_memory::extract`).
+    /// `None` — nothing is extracted, every pre-M3 scenario's exact
+    /// behaviour — unless `with_memory` was called.
+    pub(crate) memory: Option<Arc<valyria_memory::MemoryStore>>,
     pub(crate) workspace_root: WorkspaceRoot,
     pub(crate) hash_cache: Arc<HashCache>,
     pub(crate) clock: Arc<dyn Clock>,
@@ -191,6 +197,7 @@ impl AgentDriver {
             planning_mode: PlanningMode::Passthrough,
             retriever: LiveRetriever::empty(),
             store: None,
+            memory: None,
             workspace_root,
             hash_cache,
             clock,
@@ -222,6 +229,13 @@ impl AgentDriver {
     /// database (M2), so `search` / `symbol_search` can open the index.
     pub fn with_store(mut self, store: Arc<valyria_store::Store>) -> Self {
         self.store = Some(store);
+        self
+    }
+
+    /// Extract and persist repository memory after a task's mandatory
+    /// broad verification run passes (M3).
+    pub fn with_memory(mut self, memory: Arc<valyria_memory::MemoryStore>) -> Self {
+        self.memory = Some(memory);
         self
     }
 
@@ -585,7 +599,13 @@ impl AgentDriver {
                 return Ok(Flow::Continue);
             }
             None => {
-                // Plan exhausted, everything passed, broad run satisfied.
+                // Plan exhausted, everything passed, broad run satisfied —
+                // the one Completed path that is an actual *verified*
+                // success, so it's the one that earns repository memory
+                // (M3): commands observed to work here, and any that took
+                // repeated failures to get right, feed the next task's
+                // Verifying discovery and repair strategy.
+                self.extract_and_write_memory(task_id).await;
                 self.put_verify_state(task_id, vs);
                 self.tasks
                     .transition(task_id, AgentState::Completed)
@@ -1275,6 +1295,71 @@ impl AgentDriver {
             return Vec::new();
         };
         graph_neighbors(&store, changed).await
+    }
+
+    /// This task's verification runs, turned into repository memory (M3):
+    /// each run becomes one `Observation` (kind from its `Tier`, success
+    /// from its outcome), and `valyria_memory::extract`'s existing
+    /// heuristics do the rest — a command seen to pass is worth
+    /// remembering as "this works here"; one that took several failures
+    /// to get right becomes a pitfall. Best-effort: no `store`/`memory`
+    /// wired, no runs recorded, or a write error all just mean nothing is
+    /// extracted this time — never a reason to fail an otherwise-completed
+    /// task.
+    async fn extract_and_write_memory(&self, task_id: TaskId) {
+        let Some(memory) = self.memory.clone() else {
+            return;
+        };
+        let runs = match self.verification_log.list_for_task(task_id).await {
+            Ok(runs) => runs,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not list verification runs for memory extraction");
+                return;
+            }
+        };
+        if runs.is_empty() {
+            return;
+        }
+
+        // A command can appear multiple times across the task (a targeted
+        // run, then the mandatory full run); fold to its last-seen outcome
+        // and total failure count, matching what a human would actually
+        // conclude about it.
+        use std::collections::BTreeMap;
+        let mut folded: BTreeMap<String, valyria_memory::Observation> = BTreeMap::new();
+        for run in &runs {
+            // `tier` is `Tier`'s Debug format (`evidence.rs`:
+            // `run.tier.map(|t| format!("{t:?}"))`) — PascalCase variant
+            // names, not a serde rename.
+            let kind = match run.tier.as_deref() {
+                Some("Syntax") => valyria_memory::ObservationKind::BuildRun,
+                Some("TargetedTest") | Some("RelatedTests") | Some("Full") => {
+                    valyria_memory::ObservationKind::TestRun
+                }
+                Some("Style") => valyria_memory::ObservationKind::LintRun,
+                _ => valyria_memory::ObservationKind::CommandRun,
+            };
+            let entry = folded
+                .entry(run.command_display.clone())
+                .or_insert_with(|| {
+                    valyria_memory::Observation::new(kind, run.command_display.clone(), true)
+                        .with_provenance(task_id.to_string())
+                });
+            entry.success = run.passed();
+            if !run.passed() {
+                entry.failures += 1;
+            }
+        }
+
+        let now_ms = self.clock.now().as_millis() as i64;
+        let observations: Vec<valyria_memory::Observation> = folded.into_values().collect();
+        let entries = valyria_memory::extract(&observations, now_ms);
+        if entries.is_empty() {
+            return;
+        }
+        if let Err(e) = memory.write_all(entries).await {
+            tracing::warn!(error = %e, "failed to write extracted repository memory");
+        }
     }
 
     /// [`Self::journal_context_retrieved`]'s sibling for

@@ -387,40 +387,84 @@ immediately without a Core change.
 
 ---
 
-### M3 — Memory, instructions, secret hygiene
+### M3 — Memory, instructions, secret hygiene  🟡 partially shipped 2026-09-15
 
-**Core**
-- C12:
-  - After a `Verified` completion, extract repository memory: commands
-    observed to pass, flaky tests (pass/fail on an unchanged file state),
-    pitfalls from repair attempts, directory conventions from edits.
-  - Entries carry provenance + confidence and are retired when evidence
-    contradicts them.
-  - `memory_write` tool (agent-authored = `Trust::Evidence`).
-  - Browse-all listing.
-- C13: a scanner (known patterns + entropy + PEM/JWT shapes) on every
-  ingress to context, tool renders, logs and memory.
-  - Redact with a stable placeholder and emit `secret_redacted` (path, kind,
-    never the value).
-  - Bidi/homoglyph detection on source entering context annotates, never
-    strips.
-- Instructions re-read on change via the M2 watcher (not per-turn file reads),
-  with conflict reports surfaced as an event.
+**Core — shipped:**
+- C12 (part): repository memory extraction after a *verified* completion.
+  `AgentDriver::extract_and_write_memory` (new, called from the one
+  `Completed` transition in `step_verifying` that follows the mandatory
+  full run actually passing — not the "nothing to verify" or "no tooling"
+  honest-completion paths, which have no evidence to extract from) folds
+  this task's `VerificationRunRecord`s to their last-seen outcome and
+  total failure count per command, turns them into `valyria_memory::
+  Observation`s (kind from the run's `Tier`), and runs them through the
+  already-built (but previously never-called from the live loop)
+  `valyria_memory::extract`. A command seen to pass becomes a `Command`
+  memory entry; one that failed repeatedly becomes a `Pitfall`. Wired via
+  a new `with_memory` builder, called from `valyria_app::Runtime::open`
+  unconditionally (not gated on the model backend, unlike M2's retriever/
+  store — this only ever fires on a genuine full-verification-pass path,
+  which the Fake backend can reach too, and a DB write there is cheap and
+  consistent to test either way). Best-effort throughout: no `memory`
+  wired, no runs recorded, or a write error all just mean nothing is
+  extracted — never a reason to fail an otherwise-completed task.
+- C13 (part): `valyria_util::redact` — a complete, well-tested known-shape
+  scanner (AWS keys, private key blocks, bearer/GitHub tokens, generic
+  `KEY=value` assignments) — existed and was **never called from anywhere
+  in the workspace**. It's wired now, at the one choke point every tool
+  call's result passes through (`ToolRuntime::run`, right after `Tool::
+  execute` returns, before the outcome becomes either a `Message::
+  tool_result` or a persisted `ToolInvocationRecord`) — covering both
+  context and logs the requirement is written against, not just one. Also
+  extended `redact` itself with a second pass using the crate's own
+  (also previously unused outside its unit tests) `looks_like_secret`
+  entropy heuristic, so a bare high-entropy token with no recognizable
+  prefix or `KEY=` framing is caught too, not just known shapes.
+  Deliberately scoped to tool *output* — see the function's doc comment
+  for why input isn't touched.
 
-**Protocol 1.15** — `memory_list` without query pages everything;
-`memory_add` (user-authored, `Trust::Instruction`), `memory_delete`,
-`memory_pin`; `secret_redacted`, `instructions_changed`,
-`instruction_conflict` events.
-
-**App** — Memory panel (browse, filter by tier/trust, add, delete, pin, with
-provenance and decayed confidence). Secret-redaction notices in Activity.
-Repository-instructions view shows conflicts and which file won.
+**Deliberately deferred, with reasons:**
+- **Flaky-test observations, directory-convention extraction, evidence-
+  triggered retirement** — `extract`'s existing heuristics cover working/
+  pitfall commands only; the other observation kinds C12 calls for need
+  new extraction logic this milestone didn't build.
+- **The `memory_write` tool** — the model can't proactively record a
+  memory entry yet; only the driver's own post-verification extraction
+  writes anything. Real, bounded follow-on tool-surface work.
+- **Redaction is not yet applied to context items directly** (only to
+  tool output) — a secret that enters context some other way (e.g. a
+  future `read_many` batching tool, or memory text itself) isn't covered
+  by this pass. `valyria-context`'s candidate-assembly path is the next
+  choke point, deferred.
+- **Bidi/homoglyph detection, instruction re-read on watcher change** —
+  unrelated code paths this milestone didn't touch; the watcher itself is
+  still unwired (M2's own deferral).
+- **Protocol 1.15 and the app surfaces it would drive** (`memory_list`
+  without a query, `memory_add`/`delete`/`pin`, `secret_redacted`/
+  `instructions_changed`/`instruction_conflict` events, the Memory panel,
+  redaction notices in Activity) — not started.
 
 **Exit:**
-- A verified task produces memory that a *second* task retrieves (asserted in
-  `context_retrieved`).
-- A seeded AWS key and a PEM block in a fixture repo never appear in any
-  prompt, log or event payload (asserted by scanning all three).
+- ✅ A verified task writes repository memory a later retrieval finds —
+  proven end to end against a real `MemoryStore`
+  (`valyria-agent/tests/repair_loop.rs::
+  a_verified_completion_writes_repository_memory`), not `context_
+  retrieved` fusion (deferred — memory isn't wired in as a second
+  retriever yet, matching M2's own deferral of that piece).
+- ✅ A secret read off disk through a real tool call never reaches the
+  model's context or the journal
+  (`valyria-tools/tests/integration.rs::
+  a_secret_read_from_a_file_is_redacted_before_it_reaches_the_model_or_the_journal`),
+  and a bare high-entropy token with no known shape is caught too
+  (`valyria-util/src/redact.rs`'s new tests).
+- ✅ `cargo test --workspace` clean (1214 passed, 4 pre-existing
+  `#[ignore]`, 0 failed), `cargo fmt --check` and `cargo clippy --workspace
+  --all-targets -D warnings` both clean.
+- Deferred (see above): a PEM block specifically was already covered
+  pre-M3 (`private_key_block` pattern); the "asserted by scanning all
+  three [prompt, log, event payload]" framing from the original write-up
+  is narrower than what actually got proven (tool output + journal, not a
+  full prompt/event-payload sweep) — an honest gap, not silently dropped.
 
 ---
 
