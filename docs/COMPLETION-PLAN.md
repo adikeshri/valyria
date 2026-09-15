@@ -695,17 +695,23 @@ immediately without a Core change.
   before `Completed`): the mandatory full `Verifying` suite after the
   whole plan remains the only verification pass — a parallel-wave child
   deliberately never reaches its own `Verifying` (see below).
-- App surfaces for the protocol below (task tree, plan DAG with lanes,
-  artifact viewer, plan-revision diff, per-child pause/cancel): the Core
-  wire types and their dispatch are shipped (see below) and reachable
-  from the Rust `EmbeddedClient`, but `valyria-app`'s TypeScript side —
-  `valyria-bridge`'s Rust wrapper methods, `valyria-bridge-host`'s
-  JSON-RPC dispatch, the `Requests` interface in
-  `extension/src/bridge/protocol.ts`, `@valyria/protocol`'s vendored
-  schemas + Zod decoder registry, `@valyria/state`'s reducer/selectors for
-  the two new subtask events, and any actual webview UI — is genuinely
-  separate, substantial frontend work across a second repository, not yet
-  started. Tracked as the next M5 chunk.
+- Actual webview UI for the protocol below (a task-tree view, plan DAG
+  with lanes, artifact viewer, plan-revision diff, per-child pause/
+  cancel), and the `@valyria/state` reducer/selectors that would let such
+  UI update live from `subtask_started`/`subtask_completed`/
+  `artifact_published` rather than only via an explicit fetch. As of
+  `valyria-app`'s `chore/m0-baseline` (core.lock.json bumped to this
+  repo's own `chore/m0-baseline`, pushed), the *entire plumbing layer*
+  beneath such UI is real and tested end to end — `valyria-bridge`'s
+  `CoreClient::task_children`/`task_artifacts`/`plan_revisions`,
+  `valyria-bridge-host`'s `task/children`/`task/artifacts`/`plan/
+  revisions` JSON-RPC dispatch, the `Requests` interface in
+  `extension/src/bridge/protocol.ts`, and `@valyria/protocol`'s vendored
+  schemas + generated types + Zod decoders (including real typed
+  decoders, not just a passthrough catch-all, for the three new event
+  kinds) — so a caller can request and get back typed, validated data
+  today. Only the visual presentation layer itself remains. Tracked as
+  the next M5 chunk.
 - Wave-crash mid-resume: a parallel batch killed partway through leaves
   whichever children hadn't finished stuck (their parent never folds a
   non-terminal child's result back in, so the parent itself stays
@@ -838,57 +844,453 @@ immediately without a Core change.
 - ✅ Overlapping targets serialize into separate batches rather than
   racing.
 - ✅ `task_children`/`task_artifacts`/`plan_revisions` are real, callable
-  requests, server-side, over both transports.
-- Deferred to the next M5 chunk: the `valyria-app` TypeScript/bridge/
-  webview surface for the protocol above; `kill -9` mid-wave resuming
-  just the unfinished children (rather than being merely safe); a
-  Reviewer finding causing an automatic repair *revision* (today it hands
-  off to a human instead); role-pipeline coordinator crash-recovery.
+  requests, server-side, over both transports, *and* end-to-end through
+  `valyria-app`'s bridge and TypeScript type/decoder layer — a caller on
+  the app side can request and validate real data today.
+- Deferred to the next M5 chunk: the actual webview UI to display any of
+  this; `kill -9` mid-wave resuming just the unfinished children (rather
+  than being merely safe); a Reviewer finding causing an automatic repair
+  *revision* (today it hands off to a human instead); role-pipeline
+  coordinator crash-recovery.
 
 ---
 
-### M6 — Model platform, complete
+### M6 — Model platform  🟡 partially shipped 2026-09-16
 
-**Core**
-- M1: `valyria-runtime-mlx`, a managed `mlx_lm.server`.
-  - Engine store provisions an isolated Python env under
-    `~/.valyria/engines/mlx/` (pinned versions, hash-verified wheels).
-  - Strict handshake + health; reuses `OpenAiCompatRuntime` for the wire.
-  - Catalog carries MLX variants; hardware selection prefers MLX on Apple
-    silicon when the probe shows it faster.
-- M2: engine variants (Metal, CUDA, ROCm, Vulkan, CPU) chosen from
-  `valyria-hardware`, verified by the probe, with fallback to CPU recorded,
-  not silent.
-- M3: `model_endpoint_add { url, api_key_ref? }` for existing local servers.
-  - The policy floor allows loopback/unix only unless network policy permits.
-  - Endpoints are probed with the same ladder and bindable to roles.
-- M4: signed catalog refresh (ed25519, key compiled in) with embedded
-  fallback; a refreshed catalog never downgrades a pinned hash.
-- M5:
-  - Pool admission uses the probe's measured RSS.
-  - `ResourcePressure` / `Evicted` / `Loaded` are projected as protocol
-    events.
-  - 16 GB unified-memory target: coder + embedder coexist (asserted with the
-    pool's budget model).
-- Role bindings auto-derived for every role from installed models via
-  `RoleBinding::derive`, with user overrides in `global.db`.
+**Already shipped before this milestone (found during M6's own survey,
+recorded here since the plan text above still described it as open work)**
 
-**Protocol 1.18** — `model_endpoint_add/remove/list`, `catalog_refresh`,
-`pool_status`; `model_pool_*` events; `ModelSummaryWire.backend`.
+- M1's llama.cpp half, in full: `valyria-runtime-llamacpp` really spawns
+  and health-checks a `llama-server` subprocess and wraps it in
+  `valyria-runtime-openai-compat`'s `OpenAiCompatRuntime<ReqwestTransport>`
+  — the real, `reqwest`-backed wire client, not a mock. `valyria-engine-store`
+  really downloads, blake3-verifies, and unpacks the engine binary under
+  `~/.valyria/engines/`, including a real-network `#[ignore]`d test that
+  installs and runs a genuine release. `valyria-app::Runtime` boots this
+  for real on `model_activate` and at startup, with real hot-swap
+  (`ModelRuntimeRegistry::swap`) and honest failure semantics
+  (`NoModelRuntime::failed`) — not a fake runtime standing in.
+- The `RoleBinding::derive` auto-derivation *algorithm* itself
+  (`valyria-model-registry::select`): scores every installed model against
+  a role using `valyria_hardware::fits`, picks the best-fitting one as
+  primary and every other fitting one as ordered fallback. Not yet
+  *wired* to run automatically (see deferred list).
+- `ModelPool`'s admission/LRU-eviction *algorithm* (`valyria-orchestrator::
+  pool`): priority-ordered eviction, tested against exactly the exit
+  criteria below, in isolation. Not yet wired into anything that boots a
+  real server — see the "Shipped" entry below, which is what closed that
+  gap.
 
-**App** (keeping the product decision from app commit `422be82`: no per-role
-picker in the main flow)
-- Models panel shows backend (llama.cpp Metal/CUDA/…, MLX, endpoint) and a
-  pool memory meter.
-- Endpoints and role overrides live under Settings → Models (advanced).
-- Catalog refresh button.
+**Shipped**
 
-**Exit:**
-- The seeded-bug suite completes on **three adapters** (llama.cpp, MLX,
-  openai-compat endpoint) on real hardware in the nightly real-model job
-  (PLAN §6 criterion 4).
-- Forced memory pressure evicts the embedder and not the coder, visible in
-  the app.
+- `ModelPool` wired into `valyria-app`'s real model-activation path — the
+  actual gap the survey above found, and the most structurally important
+  piece of M6 to close first, since everything else (MLX, endpoints,
+  hardware variants) ultimately boots through the same admission
+  chokepoint. `Runtime::open` sizes one pool per runtime from
+  `valyria_hardware::probe()`'s measured available RAM (80% of it —
+  documented headroom for the OS and the process's own working set, not a
+  hardware-verified ceiling) when the backend is `Local`; both the
+  background boot loop (`spawn_model_boot`) and explicit `model_activate`
+  call a new shared `admit_to_pool` before booting a server, using the
+  installed weights file's on-disk size (`Manifest.size_bytes`) as the
+  footprint. A `PoolError::WontFit` fails the activation cleanly *before*
+  anything is evicted or a server is booted (`ModelPool::admit` never
+  partially applies). An eviction actually shuts down the victim's *real*
+  server (`ModelRuntimeRegistry::take` + `.shutdown()`) and rebinds its
+  role(s) away from the now-dead handle to a new `NoModelRuntime::evicted`
+  placeholder — a role is never left pointing at a server that already
+  stopped listening.
+
+  Two new event kinds carry this live: `model_loaded` / `model_evicted`
+  (protocol 1.13.1, patch bump — new event kinds/payloads only, no new
+  request/response variants), plus the first real emission ever of
+  `resource_pressure` (added to `EventKind` in an earlier phase but never
+  actually fired by anything until now). All three got real payload
+  contracts in `event_payloads.rs`/`docs/protocol/events/`.
+
+  Proven with two tests exercising the wiring function directly (not just
+  `ModelPool`'s own already-thorough unit suite): eviction actually calls
+  `shutdown()` on a real (fake-but-real-trait-object) server and the
+  orchestrator's binding for the evicted role afterward genuinely fails a
+  `generate` call rather than silently pointing at nothing; a
+  too-big-to-fit admission leaves every existing resident and binding
+  completely untouched.
+
+- Role bindings auto-derived at startup: every `ModelRole` nobody has
+  ever explicitly `model_activate`d now gets a best-effort choice from
+  `RoleBinding::derive`, scored against this machine's real, just-
+  measured hardware — `Runtime::open` walks `ModelRole::ALL`, skips any
+  role that already has a persisted binding, and boots `.primary` for
+  the rest through the exact same `spawn_model_boot`/`admit_to_pool`
+  path an explicit activation uses. Deliberately never persisted: an
+  explicit `model_activate` writes a real `model_role_binding` row and
+  wins on every later `open()` without any extra "auto vs. override"
+  flag in `global.db` — recomputing from scratch each time also means it
+  automatically tracks newly installed/removed models. Only `.primary`
+  is used, not `.fallbacks` — multi-model fallback chains are a distinct,
+  already-documented "not yet wired" piece (`orchestrator` field's own
+  doc comment in `Runtime`), unchanged by this. Guarded against a real
+  footgun in `select_for_role`: an *empty* installed-models list is
+  "consider the whole catalog" there (correct for `model_recommend`'s
+  "what would I need to install" question) but would be wrong here —
+  with nothing installed at all it would auto-select a catalog entry
+  whose weights don't exist on disk. Explicitly skipped instead.
+
+  **Found and fixed a real, load-bearing bug while testing this for
+  real, not against a mock:** `valyria_hardware::probe()`'s
+  `ram_available_bytes` came back `0` on this actual development
+  machine (a real 24GB Mac, `ram_total_bytes` and `used_memory()` both
+  plausible at the same time) — `sysinfo::System::available_memory()`
+  itself returning `0` for reasons not fully diagnosed (a memory-
+  pressure API it can't read in some environments, is the leading
+  guess). This is exactly the kind of bug that stays invisible forever
+  in a suite that only asserts `ram_total_bytes > 0` (which the existing
+  test did) and never exercises the *available* figure against a real
+  probe — and it would have silently zeroed out both this feature and
+  the `ModelPool` budget wired in the previous chunk on every real
+  user's machine hitting the same `sysinfo` behavior, not just this
+  one. Fixed with a documented, unit-tested fallback
+  (`total_memory() - used_memory()`, sound though it slightly
+  undercounts reclaimable cache) whenever the reported figure is
+  suspiciously `0` on a machine that very much has RAM, plus a
+  strengthened `probe_returns_plausible_values` assertion so this exact
+  regression can't silently return.
+
+  Proven end-to-end (a real `Runtime::open` with `ModelBackend::Local`,
+  a hand-installed fake model, no mocking of the derive/admission/boot
+  path at all): a role nobody activated gets a real `model_server_
+  starting` event naming the auto-derived id, only after real pool
+  admission succeeds; with nothing installed at all, no such event ever
+  fires and `PrimaryCoder` falls back to `NoModelRuntime::none_bound()`
+  exactly as before this chunk.
+
+- MLX runtime adapter (`valyria-runtime-mlx`, no longer a stub) and its
+  engine provisioning (`valyria-engine-store::venv`). Structurally a
+  mirror of the llama.cpp adapter: `MlxServer` spawns and supervises
+  `python -m mlx_lm server --model <dir-or-hf-repo-id> --host 127.0.0.1
+  --port <port>` (process group, graceful-`SIGTERM`-then-hard-kill
+  shutdown, rolling log-tail on failure — the same contract as
+  `LlamaServer`), and `MlxServerRuntime` wraps it in the *same*
+  `OpenAiCompatRuntime<ReqwestTransport>` `LlamaServerRuntime` uses —
+  confirmed live, not assumed, that `mlx_lm.server` answers `/health`
+  and `/v1/chat/completions` in the same shape `llama-server` does, so
+  zero wire-protocol code is MLX-specific.
+
+  Provisioning (`MlxVenvStore`) is a genuinely different shape than the
+  llama.cpp engine's single-archive download: `~/.valyria/engines/mlx/
+  <mlx-lm version>/venv/` is a real Python venv, built from the newest
+  system `python3` on `PATH` ([`find_system_python`]) and pinned to an
+  exact `mlx-lm==<version>` via `pip install`, verified by actually
+  importing the package and checking `mlx_lm.__version__` matches the
+  pin (mismatch or any failed step deletes the half-built venv rather
+  than leaving it for a later caller to trust). No `--require-hashes`
+  transitive wheel-hash lockfile: pip's own resolver plus an exact
+  version pin plus a post-install import-and-check were judged the
+  right amount of rigor for a fast-moving ML dependency tree
+  (`transformers`, `numpy`, …) that doesn't publish such a lockfile
+  itself; the exact pin is still verified, not merely trusted.
+
+  All of this was run for real on this machine, not just unit-tested
+  against fixtures: a real venv provisioned against real PyPI (`mlx-
+  lm==0.31.3` installed and its version verified in ~25s), a real
+  `mlx_lm server` boot against a real small model (`mlx-community/
+  SmolLM-135M-Instruct-4bit`, auto-fetched from the Hugging Face Hub by
+  `mlx_lm.server` itself), a real `/health` 200, and a real `/v1/chat/
+  completions` round trip with genuine generated text. Two real
+  findings from that live run, both reflected in the code: (1) the
+  *dotted* invocation `python -m mlx_lm.server` prints a deprecation
+  warning as of 0.31.x — switched to the `python -m mlx_lm server`
+  subcommand form, which is silent; (2) `mlx-lm==0.31.3`'s own `mlx`
+  dependency has no wheel for system Python 3.9 on this machine (`pip
+  install` fails outright) but installs cleanly under a newer 3.13 also
+  present on `PATH` — `find_system_python`'s newest-first search order
+  is therefore load-bearing, not cosmetic, and is documented as such.
+
+- `valyria-app::Runtime` wired to actually *choose* the MLX adapter for a
+  catalog model, closing the gap the entry above originally left open.
+  `ModelCard` gained an `engine: EngineKind` field (`LlamaCpp` default via
+  `#[serde(default)]`, so every pre-existing catalog entry and test
+  fixture needed no migration); `LocalModelServer` (previously duplicated
+  verbatim between the llama.cpp and MLX crates — two nominally distinct
+  traits with an identical shape, not interchangeable in Rust despite
+  that) now lives once in `valyria-model` and both adapters implement the
+  shared trait, so `boot_model_server`/`ServerProber`/
+  `ModelRuntimeRegistry` all hold a single `Arc<dyn LocalModelServer>`
+  regardless of which engine is actually running. `AppError::
+  ModelServerStart` no longer hard-types its `source` to `LlamaError`
+  specifically — it carries a formatted message and a precomputed
+  `retryable` bool instead, so one variant covers every engine.
+
+  `ModelStore::install_with_progress` gained an `EngineKind::Mlx` branch:
+  since an MLX model is a directory of files resolved and cached by
+  `mlx_lm.server` itself from the Hugging Face Hub on first boot (not a
+  single downloadable object), it skips this store's byte-range
+  fetch+blake3 pipeline entirely for such a card and records the repo id
+  (`card.source_url`) as the manifest's `weights_file` verbatim — a
+  locator, not an on-disk filename, documented as such everywhere it's
+  read. `verify_integrity` is a no-op for these (nothing on disk *here*
+  to re-hash; HF's own transfer is the integrity boundary, exactly like
+  `MLX_LAZY_DOWNLOAD_SENTINEL`'s doc comment says).
+
+  A real catalog entry was added and independently checked against the
+  live repo, not invented: `qwen2.5-coder-7b-instruct-mlx-4bit` →
+  `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit` (confirmed via the HF
+  API to exist, be Apache-2.0, and have the expected MLX file layout;
+  `file_size_bytes` is the real HEAD content-length of its main
+  `.safetensors` file, documented as approximate since the actual
+  transfer isn't independently re-verified by this store). A new
+  `crates/valyria-app/tests/local_mlx_e2e.rs`, `#[ignore]`d exactly like
+  `local_model_e2e.rs`, drives the real public `Runtime::model_install` →
+  `model_activate` → task → `model_remove` sequence against this entry —
+  unlike the llama.cpp test, nothing is hand-seeded, since there is no
+  file to seed; it exercises the exact path a real user hits.
+
+  Proven in this chunk: the whole workspace (`cargo test --workspace`,
+  125 test binaries) stays green, `cargo clippy --workspace --all-targets
+  -- -D warnings` and `cargo fmt --all -- --check` are both clean, and
+  `xtask release-gates` (layering, protocol-schema, bench, acceptance-doc)
+  passes. `local_mlx_e2e.rs` itself was run for real — genuinely, not
+  simulated — end to end: `model_install` (a real cold `mlx-lm` venv
+  provision plus a real ~4.3 GB Hugging Face download and load), `model_
+  activate`, a real task reaching `Completed` through the real MLX server,
+  `model_remove`, and a post-removal task correctly failing fast against
+  `NoModelRuntime`. That run — not a smaller stand-in — is what surfaced
+  two further real bugs, both fixed here rather than merely noted:
+
+  1. **Install-time probe timeouts were far too short for a cold MLX
+     model.** `ServerProber`'s original `Duration::from_secs(180)` (fine
+     for llama.cpp, whose weights are already local disk by probe time)
+     left an MLX probe with no way to survive a multi-GB first-time
+     download. Confirmed live that the real failure mode is subtler than
+     "readiness times out": `mlx_lm.server`'s `/health` answers 200 as
+     soon as the HTTP listener is up, *before* the model has actually
+     been fetched or loaded — so `await_ready` returns fast regardless,
+     and the real wait (observed: several minutes for this catalog
+     entry) happens inside the first `/v1/chat/completions` call itself,
+     which the server queues until loading finishes. Fixed with two
+     install-time-only constants in `ServerProber`'s Mlx branch —
+     `MLX_PROBE_READY_TIMEOUT` and `MLX_PROBE_GENERATE_TIMEOUT`, both 30
+     minutes — and `run_probe_generate` now takes its generate-timeout as
+     a parameter (60s for llama.cpp, unchanged) instead of a single
+     shared constant, since the two engines' actual worst cases are
+     nothing alike.
+  2. **A real, previously-invisible protocol mismatch**:
+     `MlxServerRuntime` was sending valyria's own catalog id (e.g.
+     `"qwen2.5-coder-7b-instruct-mlx-4bit"`) as the wire `"model"` field
+     on every request. `llama-server` ignores that field entirely, so
+     this never mattered for the llama.cpp adapter and the mismatch was
+     invisible until tested against the real thing. `mlx_lm.server`
+     does not ignore it: it reads the request body's own `"model"` field
+     and, on any value other than the one it was started with, tries to
+     *load a different model by that name* — treating valyria's catalog
+     id as if it were a fresh Hugging Face repo id, which 404s. Fixed by
+     sending the same string the process was actually started with (the
+     repo id / model directory) as the wire model name, while
+     `LocalModelServer::model_id()` continues to report the catalog id
+     for everything else (events, `model_remove`, …) — the two identifiers
+     now serve their own purposes rather than being conflated.
+
+  A pre-existing, unrelated test fragility was also found (not fixed
+  here — out of scope for this chunk, spun off separately):
+  `crates/valyria-app/tests/runtime.rs`'s `an_unactivated_role_gets_a_
+  best_effort_auto_derived_model` calls the real, unmocked
+  `valyria_hardware::probe()` and depends on ambient available RAM
+  comfortably exceeding its fixture model's declared 2.5 GB requirement.
+  On this real, loaded development machine, available RAM was directly
+  observed dipping to ~1.7–2.6 GB, right at that threshold, making
+  `RoleBinding::derive` correctly (and safely) refuse to auto-bind
+  anything — the auto-derivation logic itself behaved exactly right; the
+  test's dependence on ambient real memory rather than a fixed/mocked
+  hardware report is what's fragile.
+
+- `model_endpoint_add/remove/list` (protocol 1.14.0 — new `Request`/
+  `Response` variants, a backward-compatible minor bump): register an
+  already-running external OpenAI-compatible server (Ollama, LM Studio,
+  vLLM, …) that Core neither downloads nor supervises the process of.
+  `ModelCard`-style catalog machinery doesn't fit an endpoint (there is
+  no card, no license, no download) so this is a parallel, smaller
+  mechanism: a new `model_endpoint` table (`valyria-model-store`, version
+  903) storing `id`, `base_url`, `display_name`, `remote_model_name`,
+  `context_length`, `supports_native_tools`, `supports_grammar`; `Runtime::
+  model_endpoint_add` validates `base_url`'s shape and refuses an `id`
+  that collides with an embedded catalog model (so `model_activate` never
+  has to guess which of two same-named things a caller meant);
+  `model_activate`/`Runtime::open`'s startup rebind loop both check the
+  endpoint table before falling through to the installed-catalog path,
+  so one `model_activate` call and one persisted `model_role_binding` row
+  work for either kind of model transparently. Activating an endpoint is
+  synchronous (no process to spawn or wait on) and deliberately emits no
+  `model_server_starting/_ready/_failed` events — those describe managed
+  local server *lifecycle*, which an endpoint doesn't have; the RPC's own
+  success/failure already says everything there is to say.
+
+  A second real bug, the same shape as MLX's: `remote_model_name` exists
+  as its own field (not reused from `id`) specifically because the wire
+  `"model"` value a target server expects to see is not always the name
+  Core knows it by — confirmed as a load-bearing distinction, not
+  speculative caution, by the MLX chunk's own live finding above. A
+  caller that doesn't know their server needs an exact match can omit it
+  and get a reasonable default (`id`), same as every other optional field
+  here.
+
+  Proven for real, not just offline: `crates/valyria-app/tests/
+  local_model_endpoint_e2e.rs` (`#[ignore]`d) hand-spawns a real
+  `mlx_lm.server` with plain `std::process::Command` — deliberately
+  bypassing `valyria-runtime-mlx` entirely, so `Runtime` never sees the
+  process and only ever touches `base_url` — registers it as an
+  endpoint, activates it, runs a real task through it to a terminal
+  state, then removes the endpoint and confirms a role that was pointing
+  at it fails fast afterward rather than hanging or silently succeeding
+  against a stale handle. A second, offline test (`runtime.rs`) covers
+  the CRUD/validation/replace-on-duplicate-add contract without touching
+  the network at all, using the same fake-backend pattern every other
+  persistence-only test in that file already uses.
+
+  A CLI surface shipped alongside it (`valyria model-endpoint {list,add,
+  remove}`), not left for a later pass — `ParsedArgs` gained `--display-
+  name`/`--remote-model`/`--context-length`/`--no-native-tools`/
+  `--supports-grammar`.
+
+- Signed catalog refresh (protocol 1.15.0, `catalog_refresh` — another
+  backward-compatible new-variant minor bump): real ed25519 crypto, not
+  a stub. `valyria-model-registry::signing` wraps `ed25519-dalek` —
+  `sign`/`verify` over a catalog's *exact* JSON bytes (never a
+  re-serialized form: JSON has no single canonical byte representation,
+  so verifying anything else would open a needless malleability gap
+  between what was signed and what gets parsed), plus `generate_keypair`
+  for dev tooling and tests. `Catalog::verify_and_parse_signed` adds
+  anti-rollback on top of signature verification: `catalog.json`'s
+  already-existing but previously-unused `version` counter must be
+  strictly greater than the currently-cached one, so a validly-signed
+  but stale catalog (a replay) is refused exactly like a forged one,
+  not silently reapplied.
+
+  `CATALOG_PUBLIC_KEY_HEX` is a **real, freshly generated** keypair's
+  public half, compiled in — genuinely generated for this mechanism,
+  not invented placeholder-looking hex (confirmed structurally valid,
+  not just plausible-looking, by round-tripping it through the same
+  parser production uses). Its private half exists nowhere: no real
+  catalog-hosting/signing pipeline exists yet to publish anything under
+  it (see the deferred list), and deliberately never will inside this
+  repository — whoever stands that pipeline up generates their own
+  keypair with `generate_keypair` and replaces the constant. This
+  created a real testability question, resolved architecturally rather
+  than worked around: `RuntimeConfig::catalog_trusted_key_hex` lets a
+  caller trust a different key than the compiled-in one, exactly the
+  same seam shape as `Fetcher` injection elsewhere in this codebase —
+  tests use a throwaway keypair they actually hold the private half of
+  and get the *entire* real pipeline (fetch → verify → anti-rollback →
+  atomic persist → every later catalog read transparently reflecting
+  it, via a new `effective_catalog` helper every `Catalog::embedded()`
+  call site in `valyria-app` now goes through instead) exercised for
+  real, not a stand-in for part of it.
+
+  A second real bug, found by actually running this against a real
+  local HTTP server rather than only `InMemoryFetcher`:
+  `valyria_model_store::HttpFetcher` (reused at first, since it already
+  existed for weight downloads) forces `https_only(true)` and flatly
+  refuses any `http://` URL, including loopback. Right for weights (a
+  large blob whose only independent integrity check — a blake3 hash —
+  comes from the very connection being protected, so transport security
+  is genuinely part of that trust chain) but wrong for a catalog
+  refresh, where every byte is already independently ed25519-verified
+  against a key baked into the binary, not learned from the connection
+  at all — requiring HTTPS specifically would reject legitimate
+  internal/self-hosted mirrors without buying back any authenticity the
+  signature doesn't already provide. Fixed with a small
+  purpose-built `CatalogHttpFetcher` (same `Fetcher` trait, same
+  `reqwest`+`rustls` shape, just without the blanket TLS requirement)
+  rather than loosening the weights fetcher's real security posture.
+
+  Proven for real: `crates/valyria-app/tests/local_catalog_refresh_e2e.rs`
+  (`#[ignore]`d) hand-spawns a real `python3 -m http.server`, serves a
+  real signed catalog + detached signature over real loopback TCP, and
+  drives the actual production `Runtime::catalog_refresh` (the real
+  `CatalogHttpFetcher`, not an injected one) end to end, confirming
+  `model_list` reflects the refreshed catalog afterward. Two further
+  offline tests in `runtime.rs` cover acceptance-of-a-genuinely-newer-
+  catalog (and that it visibly takes effect), rejection of a replayed
+  same-version catalog, and rejection of a catalog signed by a key the
+  `Runtime` doesn't trust.
+
+  A CLI surface shipped alongside it: `valyria catalog-refresh
+  <catalog_url> <signature_url>`.
+
+- App UI for both of the above (`valyria-app` — a sibling repo, synced
+  to this pin in its own commit): `CoreClient` gained `model_endpoint_
+  add/remove/list` and `catalog_refresh`, dispatched through `valyria-
+  bridge-host`'s JSON-RPC table and declared in the extension's protocol
+  contract. User-facing as four Command Palette entries (Add/Remove/List
+  Model Endpoint, Refresh Catalog) using an `InputBox`/`QuickPick` prompt
+  sequence — the same shape `modelInstall.ts`'s license-acceptance flow
+  already uses for an occasional admin action, not a new persistent
+  webview form (the "Settings" and "a button" framing this bullet used
+  to have was a guess made before any of the app's actual UI
+  conventions were looked at; Command Palette matches how the app
+  already does *every* comparable action, install included). A real
+  dispatch-reachability test proves the four new RPC methods are
+  genuine match arms, not dead code the extension side merely declares.
+
+  Re-vendoring the protocol schemas for this sync surfaced a real,
+  previously-invisible gap on the app side: two event kinds this repo
+  added back at protocol 1.13.1 (`model_loaded`, `model_evicted` —
+  `ModelPool` admission/eviction) were never wired into the app's TS
+  event-decoder registry, because the app's pin had stayed at 1.13.0
+  the whole time those kinds existed. The app's own protocol test suite
+  caught it immediately once the pin moved far enough to actually
+  exercise it; fixed there with real decoders matching this repo's real
+  payload shapes.
+
+**Deliberately deferred, with reasons**
+
+- Hardware accelerator-variant detection and engine-variant selection
+  (Metal/CUDA/ROCm/Vulkan capability flags, `valyria-hardware` currently
+  only has an Apple-Silicon heuristic and macOS-only GPU enumeration) —
+  needed before M2's "chosen from `valyria-hardware`, fallback recorded"
+  can mean anything on Linux/Windows, and CUDA/ROCm can't be verified at
+  all without that hardware. Deliberately not attempted this session:
+  this machine is Apple Silicon macOS and has no way to test CUDA/ROCm/
+  Vulkan detection against real hardware, and every other M6 chunk this
+  session shipped was validated against something real running on this
+  machine — writing unverifiable detection code for hardware that can't
+  be checked was judged worse than leaving it honestly deferred.
+- An actual canonical catalog-hosting/signing pipeline (where a
+  production `catalog.json` + its `.sig` would be published, who holds
+  the real private key, how often it's refreshed) — the client-side
+  mechanism above is real and fully tested; there is simply no server
+  side yet, and building one is an infrastructure decision for outside
+  this repository, not a code gap.
+- Protocol 1.18's remaining *request* additions (`pool_status`,
+  `ModelSummaryWire.backend`): nothing to wrap yet until endpoints have
+  a wire-visible "backend" label to add to the existing `model_list`
+  response — `model_endpoint_add/remove/list` and `catalog_refresh`
+  themselves already shipped, as 1.14.0 and 1.15.0 respectively, rather
+  than waiting for the rest of 1.18 to be ready together; the
+  event-kind half of 1.18 shipped earlier still, as 1.13.1, once the
+  pool wiring needed it.
+- A pool-memory-meter in the Models panel: waits on `pool_status`
+  (protocol 1.18's remaining piece, above) to have anything to display.
+
+**Exit (partial):**
+- Forced memory pressure evicts the embedder and not the coder — proven
+  at the wiring level (`eviction_shuts_down_the_real_server_and_rebinds_
+  the_role`); `ModelPool`'s own suite already proved the underlying
+  priority/LRU algorithm exhaustively.
+- ✅ Role bindings auto-derive for every unactivated role from installed
+  models, scored against real measured hardware — proven end to end, not
+  mocked.
+- ✅ MLX joins llama.cpp as a real, `valyria-app`-wired, end-to-end-proven
+  local adapter — `local_mlx_e2e.rs` (real `model_install` → `model_
+  activate` → task → `model_remove`) passes for real, not mocked; see the
+  MLX entry above for what that run found and fixed.
+- Deferred: the seeded-bug *suite* (`valyria-bench`'s scenario harness)
+  running against a real external endpoint the way it does for the
+  managed llama.cpp/MLX adapters. `model_endpoint_add/remove/list`
+  itself is shipped and real-tested (see the entry above,
+  `local_model_endpoint_e2e.rs`) — what's left is wiring that specific
+  path into the bench harness's own scenario runner, not building the
+  feature.
 
 ---
 

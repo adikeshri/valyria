@@ -17,9 +17,10 @@ use std::sync::Arc;
 use futures::StreamExt;
 use valyria_app::{load_scenario, serve, EmbeddedClient, Runtime, RuntimeConfig};
 use valyria_protocol::{
-    Client, Empty, MemoryListRequest, ModelActivateRequest, ModelIdRequest, ModelInstallRequest,
-    ModelRecommendRequest, PermissionResolveRequest, Request, Response, StoragePurgeRequest,
-    TaskCreateRequest, TaskIdRequest, TaskRollbackRequest, TaskStatusRequest,
+    CatalogRefreshRequest, Client, Empty, MemoryListRequest, ModelActivateRequest,
+    ModelEndpointAddRequest, ModelIdRequest, ModelInstallRequest, ModelRecommendRequest,
+    PermissionResolveRequest, Request, Response, StoragePurgeRequest, TaskCreateRequest,
+    TaskIdRequest, TaskRollbackRequest, TaskStatusRequest,
 };
 use valyria_util::CancellationToken;
 
@@ -45,6 +46,8 @@ fn main() -> ExitCode {
         Some("status") => tokio_main(cmd_status(argv[1..].to_vec())),
         Some("config") => tokio_main(cmd_config(argv[1..].to_vec())),
         Some("model") => tokio_main(cmd_model(argv[1..].to_vec())),
+        Some("model-endpoint") => tokio_main(cmd_model_endpoint(argv[1..].to_vec())),
+        Some("catalog-refresh") => tokio_main(cmd_catalog_refresh(argv[1..].to_vec())),
         Some("memory") => tokio_main(cmd_memory(argv[1..].to_vec())),
         Some("serve") => tokio_main(cmd_serve(argv[1..].to_vec())),
         _ => {
@@ -79,6 +82,10 @@ fn print_usage() {
         "    valyria model <list|recommend <role>|inspect <id>|install <id> [--accept-license]"
     );
     eprintln!("                  |cancel <id>|activate <id> <role>|remove <id>> [--json]");
+    eprintln!("    valyria model-endpoint <list|add <id> <base_url> [--display-name NAME]");
+    eprintln!("                  [--remote-model NAME] [--context-length N] [--no-native-tools]");
+    eprintln!("                  [--supports-grammar]|remove <id>> [--json]");
+    eprintln!("    valyria catalog-refresh <catalog_url> <signature_url> [--json]");
     eprintln!("    valyria memory list [<query>] [--json]  inspect stored memory");
     eprintln!("    valyria clean --scope <memory|cache|tasks|logs> [--dry-run] [--json]");
     eprintln!("    valyria serve [--socket <path>]         run the daemon");
@@ -304,6 +311,107 @@ async fn cmd_model(raw: Vec<String>) -> ExitCode {
             ExitCode::from(64)
         }
     }
+}
+
+/// `valyria model-endpoint {add,remove,list}` — register an already-
+/// running external OpenAI-compatible server (Ollama, LM Studio, vLLM,
+/// …) so it can be `model activate`d like an installed catalog model,
+/// without Core downloading or supervising it.
+async fn cmd_model_endpoint(raw: Vec<String>) -> ExitCode {
+    let sub = raw.first().map(String::as_str).unwrap_or("list");
+    let rest: Vec<String> = raw.get(1..).unwrap_or(&[]).to_vec();
+
+    match sub {
+        "list" => {
+            one_shot(
+                rest,
+                "model-endpoint list",
+                |_| Request::ModelEndpointList(Empty {}),
+                render::model_endpoint_list,
+            )
+            .await
+        }
+        "add" => {
+            let parsed = match parse(&rest) {
+                Ok(p) => p,
+                Err(e) => return print_error_and_fail("invalid arguments", &e),
+            };
+            let (Some(id), Some(base_url)) = (
+                parsed.positional.first().cloned(),
+                parsed.positional.get(1).cloned(),
+            ) else {
+                eprintln!(
+                    "error: usage: valyria model-endpoint add <id> <base_url> \
+                     [--display-name NAME] [--remote-model NAME] [--context-length N] \
+                     [--no-native-tools] [--supports-grammar]"
+                );
+                return ExitCode::from(64);
+            };
+            one_shot(
+                rest,
+                "model-endpoint add",
+                move |p| {
+                    Request::ModelEndpointAdd(ModelEndpointAddRequest {
+                        id: id.clone(),
+                        base_url: base_url.clone(),
+                        display_name: p.display_name.clone(),
+                        remote_model_name: p.remote_model.clone(),
+                        context_length: p.context_length,
+                        supports_native_tools: Some(!p.no_native_tools),
+                        supports_grammar: Some(p.supports_grammar),
+                    })
+                },
+                |_| println!("endpoint registered"),
+            )
+            .await
+        }
+        "remove" => {
+            let Some(id) = rest.iter().find(|a| !a.starts_with("--")).cloned() else {
+                eprintln!("error: usage: valyria model-endpoint remove <id>");
+                return ExitCode::from(64);
+            };
+            one_shot(
+                rest,
+                "model-endpoint remove",
+                move |_| Request::ModelEndpointRemove(ModelIdRequest { id: id.clone() }),
+                |_| println!("endpoint removed"),
+            )
+            .await
+        }
+        other => {
+            eprintln!(
+                "error: unknown `model-endpoint` subcommand `{other}` \
+                 (expected: list, add, remove)"
+            );
+            ExitCode::from(64)
+        }
+    }
+}
+
+/// `valyria catalog-refresh <catalog_url> <signature_url>` — fetch a
+/// candidate catalog and its detached ed25519 signature, verify against
+/// this build's compiled-in trusted key, and (only if genuinely newer)
+/// accept it in place of the embedded baseline.
+async fn cmd_catalog_refresh(raw: Vec<String>) -> ExitCode {
+    let (Some(catalog_url), Some(signature_url)) = (
+        raw.iter().find(|a| !a.starts_with("--")).cloned(),
+        raw.iter().filter(|a| !a.starts_with("--")).nth(1).cloned(),
+    ) else {
+        eprintln!("error: usage: valyria catalog-refresh <catalog_url> <signature_url>");
+        return ExitCode::from(64);
+    };
+    one_shot(
+        raw,
+        "catalog-refresh",
+        move |_| {
+            Request::CatalogRefresh(CatalogRefreshRequest {
+                catalog_url: catalog_url.clone(),
+                signature_url: signature_url.clone(),
+            })
+        },
+        render::catalog_refresh,
+    )
+    .await
 }
 
 /// `valyria model install <id> [--accept-license]`. Without the flag this

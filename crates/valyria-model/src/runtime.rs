@@ -35,3 +35,21 @@ pub trait ModelRuntime: Send + Sync {
         cancel: CancellationToken,
     ) -> BoxStream<'static, Result<Chunk, ModelError>>;
 }
+
+/// A locally-spawned model server: it can serve [`ModelRuntime`] calls and
+/// it can be told to stop. One shared trait rather than a per-engine copy
+/// so a caller (`valyria-app`'s `ModelRuntimeRegistry`, the boot path) can
+/// hold `Arc<dyn LocalModelServer>` without caring which engine
+/// (`valyria-runtime-llamacpp`, `valyria-runtime-mlx`, ...) is actually
+/// running underneath.
+#[async_trait::async_trait]
+pub trait LocalModelServer: ModelRuntime {
+    /// Graceful stop: `SIGTERM`, drain, hard-kill after a bounded timeout.
+    /// Idempotent.
+    async fn shutdown(&self);
+    fn model_id(&self) -> &str;
+    /// The loopback port it's serving on — carried on `model_server_ready`
+    /// so the app can show it (and, one day, dial it directly for a health
+    /// chip).
+    fn port(&self) -> u16;
+}

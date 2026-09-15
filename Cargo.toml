@@ -73,6 +73,8 @@ anyhow = "1"
 # --- ids / hashing ---
 ulid = { version = "1", features = ["serde"] }
 blake3 = "1"
+# --- signing (catalog refresh, § M6) ---
+ed25519-dalek = { version = "2", features = ["rand_core"] }
 
 # --- storage ---
 rusqlite = { version = "0.32", features = ["bundled", "backup"] }

@@ -14,19 +14,19 @@ use std::sync::Arc;
 use futures::stream::{BoxStream, StreamExt};
 use valyria_events::{Delivery, EventEnvelope, Seq};
 use valyria_protocol::{
-    capability, ArtifactWire, Client, ConfigEntryWire, ConfigShowResponse, CpuInfoWire,
-    DoctorCheckWire, DoctorRunResponse, GitBranchWire, GitBranchesResponse, GitCommitWire,
-    GitDiffResponse, GitFileStatusWire, GitLogResponse, GitStatusResponse, GpuInfoWire,
-    HardwareProbeResponse, HelloResponse, IndexStatusResponse, LedgerChangeWire,
+    capability, ArtifactWire, CatalogRefreshResponse, Client, ConfigEntryWire, ConfigShowResponse,
+    CpuInfoWire, DoctorCheckWire, DoctorRunResponse, GitBranchWire, GitBranchesResponse,
+    GitCommitWire, GitDiffResponse, GitFileStatusWire, GitLogResponse, GitStatusResponse,
+    GpuInfoWire, HardwareProbeResponse, HelloResponse, IndexStatusResponse, LedgerChangeWire,
     LedgerChangesResponse, MemoryEntryWire, MemoryListRequest, MemoryListResponse,
-    ModelCandidateWire, ModelInspectResponse, ModelListResponse, ModelRecommendResponse,
-    ModelRemoveResponse, ModelSummaryWire, PermissionResolveRequest, PlanDiffWire, PlanGetResponse,
-    PlanRevisionWire, PlanRevisionsResponse, PlanStepSummary, PurgeResponse, Request, Response,
-    ScoreExplanationWire, SearchFeatureWire, SearchHitWire, SearchQueryResponse,
-    SearchStageScoreWire, StorageEntryWire, StorageInspectResponse, StoragePurgeRequest,
-    TaskArtifactsResponse, TaskChildrenResponse, TaskCreateResponse, TaskIdRequest,
-    TaskListResponse, TaskReportResponse, TaskRollbackRequest, TaskRollbackResponse,
-    TaskStatusResponse, TaskSummary, VerifiedClaimWire, WireError, WireEvent,
+    ModelCandidateWire, ModelEndpointListResponse, ModelEndpointWire, ModelInspectResponse,
+    ModelListResponse, ModelRecommendResponse, ModelRemoveResponse, ModelSummaryWire,
+    PermissionResolveRequest, PlanDiffWire, PlanGetResponse, PlanRevisionWire,
+    PlanRevisionsResponse, PlanStepSummary, PurgeResponse, Request, Response, ScoreExplanationWire,
+    SearchFeatureWire, SearchHitWire, SearchQueryResponse, SearchStageScoreWire, StorageEntryWire,
+    StorageInspectResponse, StoragePurgeRequest, TaskArtifactsResponse, TaskChildrenResponse,
+    TaskCreateResponse, TaskIdRequest, TaskListResponse, TaskReportResponse, TaskRollbackRequest,
+    TaskRollbackResponse, TaskStatusResponse, TaskSummary, VerifiedClaimWire, WireError, WireEvent,
     WorkspaceStatusResponse, PROTOCOL_VERSION,
 };
 use valyria_types::{CheckpointId, ErrorCode, PermissionMode, TaskId};
@@ -861,6 +861,62 @@ impl Client for EmbeddedClient {
                 Ok(v) => Response::ModelInspect(model_inspect_wire(v)),
                 Err(e) => error_response(e),
             },
+            Request::ModelEndpointAdd(r) => {
+                let opts = crate::runtime::ModelEndpointOptions {
+                    display_name: r.display_name.as_deref(),
+                    remote_model_name: r.remote_model_name.as_deref(),
+                    context_length: r.context_length,
+                    supports_native_tools: r.supports_native_tools,
+                    supports_grammar: r.supports_grammar,
+                };
+                match self
+                    .runtime
+                    .model_endpoint_add(&r.id, &r.base_url, opts)
+                    .await
+                {
+                    Ok(()) => Response::Ack,
+                    Err(e) => error_response(e),
+                }
+            }
+            Request::ModelEndpointRemove(r) => {
+                match self.runtime.model_endpoint_remove(&r.id).await {
+                    Ok(()) => Response::Ack,
+                    Err(e) => error_response(e),
+                }
+            }
+            Request::ModelEndpointList(_) => match self.runtime.model_endpoint_list().await {
+                Ok(views) => Response::ModelEndpointList(ModelEndpointListResponse {
+                    endpoints: views
+                        .into_iter()
+                        .map(|v| ModelEndpointWire {
+                            id: v.row.id,
+                            base_url: v.row.base_url,
+                            display_name: v.row.display_name,
+                            remote_model_name: v.row.remote_model_name,
+                            context_length: v.row.context_length,
+                            supports_native_tools: v.row.supports_native_tools,
+                            supports_grammar: v.row.supports_grammar,
+                            created_at_ms: v.row.created_at_ms,
+                            active_roles: v.active_roles,
+                        })
+                        .collect(),
+                }),
+                Err(e) => error_response(e),
+            },
+            Request::CatalogRefresh(r) => {
+                match self
+                    .runtime
+                    .catalog_refresh(&r.catalog_url, &r.signature_url)
+                    .await
+                {
+                    Ok(outcome) => Response::CatalogRefresh(CatalogRefreshResponse {
+                        previous_version: outcome.previous_version,
+                        new_version: outcome.new_version,
+                        model_count: outcome.model_count as u32,
+                    }),
+                    Err(e) => error_response(e),
+                }
+            }
             Request::LedgerChanges(r) => {
                 let task_id = match parse_task_id(&r.task_id) {
                     Ok(id) => id,

@@ -82,6 +82,17 @@ pub enum EventKind {
     /// `valyria-agent::role_pipeline`) — payload `{ role, kind }`
     /// (`valyria-plan::roles::{AgentRole, ArtifactKind}::as_str`).
     ArtifactPublished,
+    /// A model was admitted into the `ModelPool`'s memory budget (M6,
+    /// `valyria-orchestrator::pool::PoolEvent::Loaded`) — payload
+    /// `{ id, footprint_bytes }`. Distinct from `ModelServerReady`: this
+    /// fires the moment the pool accounts for the model's memory, before
+    /// the server process itself has necessarily finished health-checking.
+    ModelLoaded,
+    /// A model was unloaded from the `ModelPool`, either to make room for
+    /// a higher-priority admission or manually (M6,
+    /// `valyria-orchestrator::pool::PoolEvent::Evicted`) — payload
+    /// `{ id, reason }` (`memory_pressure` | `manual`).
+    ModelEvicted,
 }
 
 impl EventKind {
@@ -124,6 +135,8 @@ impl EventKind {
         EventKind::SubtaskStarted,
         EventKind::SubtaskCompleted,
         EventKind::ArtifactPublished,
+        EventKind::ModelLoaded,
+        EventKind::ModelEvicted,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -163,6 +176,8 @@ impl EventKind {
             EventKind::SubtaskStarted => "subtask_started",
             EventKind::SubtaskCompleted => "subtask_completed",
             EventKind::ArtifactPublished => "artifact_published",
+            EventKind::ModelLoaded => "model_loaded",
+            EventKind::ModelEvicted => "model_evicted",
         }
     }
 }
@@ -199,7 +214,7 @@ mod tests {
         for k in EventKind::ALL {
             let _: &str = k.as_str();
         }
-        assert_eq!(EventKind::ALL.len(), 35);
+        assert_eq!(EventKind::ALL.len(), 37);
     }
 
     #[test]
@@ -209,6 +224,8 @@ mod tests {
             (EventKind::SubtaskStarted, "subtask_started"),
             (EventKind::SubtaskCompleted, "subtask_completed"),
             (EventKind::ArtifactPublished, "artifact_published"),
+            (EventKind::ModelLoaded, "model_loaded"),
+            (EventKind::ModelEvicted, "model_evicted"),
             (EventKind::PlanCheckpoint, "plan_checkpoint"),
             (EventKind::ModelInstallProgress, "model_install_progress"),
             (EventKind::ModelInstallCompleted, "model_install_completed"),

@@ -1,16 +1,20 @@
-//! [`ModelRuntimeRegistry`]: owns the live `llama-server` handles this
-//! `Runtime` started, keyed by the role each one serves. The orchestrator
-//! holds an `Arc<dyn ModelRuntime>` *view* of the same object — this
-//! registry is the only thing allowed to call `shutdown` on it, and the
-//! only place that knows which catalog model id is behind a role right
-//! now (for `model_remove`'s "which servers does this touch?" query).
+//! [`ModelRuntimeRegistry`]: owns the live local model-server handles
+//! this `Runtime` started (`llama-server`, `mlx_lm.server`, ...), keyed
+//! by the role each one serves. The orchestrator holds an `Arc<dyn
+//! ModelRuntime>` *view* of the same object — this registry is the only
+//! thing allowed to call `shutdown` on it, and the only place that knows
+//! which catalog model id is behind a role right now (for
+//! `model_remove`'s "which servers does this touch?" query). Engine-
+//! agnostic by design: it holds `Arc<dyn LocalModelServer>`, the trait
+//! every local engine adapter implements, and never needs to know which
+//! one is actually running.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
+use valyria_model::LocalModelServer;
 use valyria_orchestrator::Role;
-use valyria_runtime_llamacpp::LocalModelServer;
 
 struct LiveModel {
     model_id: String,

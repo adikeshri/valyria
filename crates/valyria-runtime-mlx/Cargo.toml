@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
-description = "Apple-silicon MLX adapter."
+description = "A managed `python -m mlx_lm.server` subprocess (its venv provisioned by valyria-engine-store) behind the OpenAI-compatible ModelRuntime adapter."
 
 [package.metadata.valyria]
 layer = 4
@@ -14,9 +14,21 @@ phase = 9
 [dependencies]
 valyria-types = { workspace = true }
 valyria-util = { workspace = true }
+valyria-model = { workspace = true }
+valyria-model-registry = { workspace = true }
+valyria-runtime-openai-compat = { workspace = true }
+valyria-process = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 tracing = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 valyria-testkit = { workspace = true }
+tempfile = { workspace = true }

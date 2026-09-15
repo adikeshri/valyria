@@ -674,6 +674,82 @@
       }
     },
     {
+      "description": "Register an already-running external OpenAI-compatible server. Protocol 1.14.0 (M6).",
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "model_endpoint_add"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/ModelEndpointAddRequest"
+        }
+      }
+    },
+    {
+      "description": "Unregister one; unbinds any role currently pointing at it. Protocol 1.14.0 (M6).",
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "model_endpoint_remove"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/ModelIdRequest"
+        }
+      }
+    },
+    {
+      "description": "List every registered external endpoint. Protocol 1.14.0 (M6).",
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "model_endpoint_list"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/Empty"
+        }
+      }
+    },
+    {
+      "description": "Verify and, if newer, accept a signed catalog refresh. Protocol 1.15.0 (M6).",
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "catalog_refresh"
+          ]
+        },
+        "params": {
+          "$ref": "#/definitions/CatalogRefreshRequest"
+        }
+      }
+    },
+    {
       "type": "object",
       "required": [
         "method",
@@ -693,6 +769,22 @@
     }
   ],
   "definitions": {
+    "CatalogRefreshRequest": {
+      "description": "`catalog_refresh` (protocol 1.15.0, M6) — fetch a candidate catalog and its detached signature from `catalog_url`/`signature_url`, verify against this build's compiled-in trusted key, and (only if it's strictly newer than what's currently in effect) durably persist it as the catalog every other model-listing call reads through. Two separate URLs rather than a convention (`catalog_url` + `.sig`) because no canonical hosting for this exists yet — see `docs/ COMPLETION-PLAN.md`'s M6 section.",
+      "type": "object",
+      "required": [
+        "catalog_url",
+        "signature_url"
+      ],
+      "properties": {
+        "catalog_url": {
+          "type": "string"
+        },
+        "signature_url": {
+          "type": "string"
+        }
+      }
+    },
     "ConfigSetRequest": {
       "description": "Write one dotted config leaf to a Core-owned config file, then report the re-resolved effective view (§24). Additive as of protocol 1.1.0.\n\nThe write is validated against the policy floor (`valyria_config::validate_floor`) *before* it touches disk: a value that would loosen access past the compiled-in ceiling is rejected with `config.policy_floor_violation` and nothing is written.",
       "type": "object",
@@ -826,6 +918,59 @@
         "role": {
           "description": "The role to bind `id` to (a `ModelRole` name).",
           "type": "string"
+        }
+      }
+    },
+    "ModelEndpointAddRequest": {
+      "description": "`model_endpoint_add` (protocol 1.14.0, M6) — register an already- running OpenAI-compatible server (Ollama, LM Studio, vLLM, …) that Core does not download, spawn, or manage the lifecycle of. `id` is a local name chosen by the caller, distinct from the embedded catalog's ids — it must not collide with either an installed catalog model or an existing endpoint.",
+      "type": "object",
+      "required": [
+        "base_url",
+        "id"
+      ],
+      "properties": {
+        "base_url": {
+          "description": "e.g. `http://127.0.0.1:11434/v1` — everything before `/chat/ completions` and `/health`.",
+          "type": "string"
+        },
+        "context_length": {
+          "description": "This server's actual context window. Core cannot discover it by asking the server (no standard endpoint reports it), so it must be told; defaults to a conservative 8192 when omitted.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "display_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "remote_model_name": {
+          "description": "The exact model name this server expects in each request's `\"model\"` field. Many OpenAI-compatible servers use it to select which loaded model answers and reject (or, worse, silently try to fetch) an unrecognized one — the same failure mode confirmed live against `mlx_lm.server` for the managed MLX adapter. Defaults to `id` when omitted, which is only correct if the two happen to match; set this explicitly whenever they don't.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "supports_grammar": {
+          "description": "Defaults to `false` — constrained/grammar decoding is far less standardized across third-party servers than native tool calls.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "supports_native_tools": {
+          "description": "Defaults to `true` (most modern OpenAI-compatible servers support native `tool_calls`); set `false` for one that doesn't.",
+          "type": [
+            "boolean",
+            "null"
+          ]
         }
       }
     },

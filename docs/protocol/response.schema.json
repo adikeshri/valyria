@@ -508,6 +508,44 @@
       }
     },
     {
+      "description": "Protocol 1.14.0 (M6).",
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "model_endpoint_list"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/ModelEndpointListResponse"
+        }
+      }
+    },
+    {
+      "description": "Protocol 1.15.0 (M6).",
+      "type": "object",
+      "required": [
+        "result",
+        "value"
+      ],
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "catalog_refresh"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/CatalogRefreshResponse"
+        }
+      }
+    },
+    {
       "type": "object",
       "required": [
         "result",
@@ -526,7 +564,7 @@
       }
     },
     {
-      "description": "A request that succeeded with nothing to return (`task.pause`, `task.resume`, `task.cancel`, `permission.resolve`, `model.install`, `model.install_cancel`, `model.activate`).",
+      "description": "A request that succeeded with nothing to return (`task.pause`, `task.resume`, `task.cancel`, `permission.resolve`, `model.install`, `model.install_cancel`, `model.activate`, `model.endpoint_add`, `model.endpoint_remove`).",
       "type": "object",
       "required": [
         "result"
@@ -583,6 +621,31 @@
         "produced_by": {
           "description": "`researcher` | `planner` | `implementer` | `tester` | `reviewer`.",
           "type": "string"
+        }
+      }
+    },
+    "CatalogRefreshResponse": {
+      "type": "object",
+      "required": [
+        "model_count",
+        "new_version",
+        "previous_version"
+      ],
+      "properties": {
+        "model_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "new_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "previous_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
         }
       }
     },
@@ -1170,6 +1233,71 @@
           "type": "integer",
           "format": "uint32",
           "minimum": 0.0
+        }
+      }
+    },
+    "ModelEndpointListResponse": {
+      "type": "object",
+      "required": [
+        "endpoints"
+      ],
+      "properties": {
+        "endpoints": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ModelEndpointWire"
+          }
+        }
+      }
+    },
+    "ModelEndpointWire": {
+      "description": "One registered external endpoint, as `model_endpoint_list` reports it.",
+      "type": "object",
+      "required": [
+        "active_roles",
+        "base_url",
+        "context_length",
+        "created_at_ms",
+        "display_name",
+        "id",
+        "remote_model_name",
+        "supports_grammar",
+        "supports_native_tools"
+      ],
+      "properties": {
+        "active_roles": {
+          "description": "Roles currently bound to this endpoint (mirrors `ModelSummaryWire:: active_roles` for installed catalog models).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "base_url": {
+          "type": "string"
+        },
+        "context_length": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "created_at_ms": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "remote_model_name": {
+          "type": "string"
+        },
+        "supports_grammar": {
+          "type": "boolean"
+        },
+        "supports_native_tools": {
+          "type": "boolean"
         }
       }
     },

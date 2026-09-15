@@ -635,6 +635,86 @@ pub struct ModelIdRequest {
     pub id: String,
 }
 
+/// `model_endpoint_add` (protocol 1.14.0, M6) — register an already-
+/// running OpenAI-compatible server (Ollama, LM Studio, vLLM, …) that
+/// Core does not download, spawn, or manage the lifecycle of. `id` is a
+/// local name chosen by the caller, distinct from the embedded catalog's
+/// ids — it must not collide with either an installed catalog model or
+/// an existing endpoint.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelEndpointAddRequest {
+    pub id: String,
+    /// e.g. `http://127.0.0.1:11434/v1` — everything before `/chat/
+    /// completions` and `/health`.
+    pub base_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// The exact model name this server expects in each request's
+    /// `"model"` field. Many OpenAI-compatible servers use it to select
+    /// which loaded model answers and reject (or, worse, silently try to
+    /// fetch) an unrecognized one — the same failure mode confirmed live
+    /// against `mlx_lm.server` for the managed MLX adapter. Defaults to
+    /// `id` when omitted, which is only correct if the two happen to
+    /// match; set this explicitly whenever they don't.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_model_name: Option<String>,
+    /// This server's actual context window. Core cannot discover it by
+    /// asking the server (no standard endpoint reports it), so it must
+    /// be told; defaults to a conservative 8192 when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<u32>,
+    /// Defaults to `true` (most modern OpenAI-compatible servers support
+    /// native `tool_calls`); set `false` for one that doesn't.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_native_tools: Option<bool>,
+    /// Defaults to `false` — constrained/grammar decoding is far less
+    /// standardized across third-party servers than native tool calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_grammar: Option<bool>,
+}
+
+/// One registered external endpoint, as `model_endpoint_list` reports it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelEndpointWire {
+    pub id: String,
+    pub base_url: String,
+    pub display_name: String,
+    pub remote_model_name: String,
+    pub context_length: u32,
+    pub supports_native_tools: bool,
+    pub supports_grammar: bool,
+    pub created_at_ms: i64,
+    /// Roles currently bound to this endpoint (mirrors `ModelSummaryWire::
+    /// active_roles` for installed catalog models).
+    pub active_roles: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelEndpointListResponse {
+    pub endpoints: Vec<ModelEndpointWire>,
+}
+
+/// `catalog_refresh` (protocol 1.15.0, M6) — fetch a candidate catalog
+/// and its detached signature from `catalog_url`/`signature_url`, verify
+/// against this build's compiled-in trusted key, and (only if it's
+/// strictly newer than what's currently in effect) durably persist it as
+/// the catalog every other model-listing call reads through. Two
+/// separate URLs rather than a convention (`catalog_url` + `.sig`)
+/// because no canonical hosting for this exists yet — see `docs/
+/// COMPLETION-PLAN.md`'s M6 section.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CatalogRefreshRequest {
+    pub catalog_url: String,
+    pub signature_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CatalogRefreshResponse {
+    pub previous_version: u32,
+    pub new_version: u32,
+    pub model_count: u32,
+}
+
 /// `model_install` — begin a download. `accept_license` is the wire record
 /// of the user's acceptance of the model's license (its text is on
 /// `ModelInspectResponse::license_text`). Core **refuses** the install with

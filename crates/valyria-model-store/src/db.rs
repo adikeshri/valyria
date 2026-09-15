@@ -41,6 +41,20 @@ pub const MIGRATIONS: &[Migration] = &[
         description: "record license acceptance on installed models",
         sql: "ALTER TABLE installed_model ADD COLUMN license_accepted_at_ms INTEGER;",
     },
+    Migration {
+        version: 903,
+        description: "create model_endpoint table",
+        sql: "CREATE TABLE model_endpoint (
+        id TEXT PRIMARY KEY,
+        base_url TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        remote_model_name TEXT NOT NULL,
+        context_length INTEGER NOT NULL,
+        supports_native_tools INTEGER NOT NULL,
+        supports_grammar INTEGER NOT NULL,
+        created_at_ms INTEGER NOT NULL
+    );",
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,6 +240,125 @@ impl InstalledModelStore {
             .await?;
         Ok(())
     }
+
+    // --- external endpoints (§ M6: a registered, already-running
+    // OpenAI-compatible server Core neither downloads nor supervises) ---
+
+    /// Register (or replace) an external endpoint.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn add_endpoint(
+        &self,
+        id: &str,
+        base_url: &str,
+        display_name: &str,
+        remote_model_name: &str,
+        context_length: u32,
+        supports_native_tools: bool,
+        supports_grammar: bool,
+        created_at_ms: i64,
+    ) -> Result<()> {
+        let (id, base_url, display_name, remote_model_name) = (
+            id.to_string(),
+            base_url.to_string(),
+            display_name.to_string(),
+            remote_model_name.to_string(),
+        );
+        self.store
+            .call(move |conn| {
+                conn.execute(
+                    "INSERT OR REPLACE INTO model_endpoint
+                     (id, base_url, display_name, remote_model_name, context_length, supports_native_tools, supports_grammar, created_at_ms)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                    params![
+                        id,
+                        base_url,
+                        display_name,
+                        remote_model_name,
+                        context_length,
+                        supports_native_tools,
+                        supports_grammar,
+                        created_at_ms
+                    ],
+                )?;
+                Ok(())
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn endpoint(&self, id: &str) -> Result<Option<EndpointRow>> {
+        let id = id.to_string();
+        let row = self
+            .store
+            .call(move |conn| {
+                let row = conn
+                    .query_row(
+                        "SELECT id, base_url, display_name, remote_model_name, context_length, supports_native_tools, supports_grammar, created_at_ms
+                         FROM model_endpoint WHERE id = ?1",
+                        params![id],
+                        map_endpoint_row,
+                    )
+                    .optional()?;
+                Ok(row)
+            })
+            .await?;
+        Ok(row)
+    }
+
+    pub async fn endpoints(&self) -> Result<Vec<EndpointRow>> {
+        let rows = self
+            .store
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT id, base_url, display_name, remote_model_name, context_length, supports_native_tools, supports_grammar, created_at_ms
+                     FROM model_endpoint ORDER BY id",
+                )?;
+                let rows = stmt
+                    .query_map([], map_endpoint_row)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            })
+            .await?;
+        Ok(rows)
+    }
+
+    /// Returns whether a row was actually removed.
+    pub async fn remove_endpoint(&self, id: &str) -> Result<bool> {
+        let id = id.to_string();
+        let removed = self
+            .store
+            .call(move |conn| {
+                let n = conn.execute("DELETE FROM model_endpoint WHERE id = ?1", params![id])?;
+                Ok(n > 0)
+            })
+            .await?;
+        Ok(removed)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndpointRow {
+    pub id: String,
+    pub base_url: String,
+    pub display_name: String,
+    pub remote_model_name: String,
+    pub context_length: u32,
+    pub supports_native_tools: bool,
+    pub supports_grammar: bool,
+    pub created_at_ms: i64,
+}
+
+fn map_endpoint_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EndpointRow> {
+    Ok(EndpointRow {
+        id: row.get(0)?,
+        base_url: row.get(1)?,
+        display_name: row.get(2)?,
+        remote_model_name: row.get(3)?,
+        context_length: row.get::<_, i64>(4)? as u32,
+        supports_native_tools: row.get(5)?,
+        supports_grammar: row.get(6)?,
+        created_at_ms: row.get(7)?,
+    })
 }
 
 fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<InstalledModelRow> {
@@ -258,6 +391,7 @@ mod tests {
         assert!(applied.contains(&900));
         assert!(applied.contains(&901));
         assert!(applied.contains(&902));
+        assert!(applied.contains(&903));
     }
 
     #[test]
@@ -300,5 +434,64 @@ mod tests {
             db.role_binding("primary_coder").await.unwrap().as_deref(),
             Some("llama-y")
         );
+    }
+
+    #[tokio::test]
+    async fn endpoints_round_trip_replace_and_remove() {
+        let store = Arc::new(Store::open_in_memory(MIGRATIONS).unwrap());
+        let db = InstalledModelStore::new(store);
+
+        assert_eq!(db.endpoint("ollama-local").await.unwrap(), None);
+        assert!(db.endpoints().await.unwrap().is_empty());
+
+        db.add_endpoint(
+            "ollama-local",
+            "http://127.0.0.1:11434/v1",
+            "My Ollama",
+            "qwen2.5-coder:7b",
+            32768,
+            true,
+            false,
+            100,
+        )
+        .await
+        .unwrap();
+
+        let row = db.endpoint("ollama-local").await.unwrap().unwrap();
+        assert_eq!(row.base_url, "http://127.0.0.1:11434/v1");
+        assert_eq!(row.display_name, "My Ollama");
+        assert_eq!(row.remote_model_name, "qwen2.5-coder:7b");
+        assert_eq!(row.context_length, 32768);
+        assert!(row.supports_native_tools);
+        assert!(!row.supports_grammar);
+        assert_eq!(db.endpoints().await.unwrap().len(), 1);
+
+        // Re-adding the same id replaces rather than erroring or duplicating.
+        db.add_endpoint(
+            "ollama-local",
+            "http://127.0.0.1:11434/v1",
+            "My Ollama (renamed)",
+            "qwen2.5-coder:7b",
+            32768,
+            true,
+            false,
+            101,
+        )
+        .await
+        .unwrap();
+        assert_eq!(db.endpoints().await.unwrap().len(), 1);
+        assert_eq!(
+            db.endpoint("ollama-local")
+                .await
+                .unwrap()
+                .unwrap()
+                .display_name,
+            "My Ollama (renamed)"
+        );
+
+        assert!(db.remove_endpoint("ollama-local").await.unwrap());
+        assert_eq!(db.endpoint("ollama-local").await.unwrap(), None);
+        // Removing something already gone is a clean `false`, not an error.
+        assert!(!db.remove_endpoint("ollama-local").await.unwrap());
     }
 }

@@ -56,6 +56,8 @@ pub const EVENT_KINDS: &[&str] = &[
     "subtask_started",
     "subtask_completed",
     "artifact_published",
+    "model_loaded",
+    "model_evicted",
 ];
 
 /// `state_changed` — an `AgentState` transition.
@@ -247,6 +249,33 @@ pub struct ArtifactPublishedPayload {
     pub kind: String,
 }
 
+/// `resource_pressure` — admitting a model required evicting another (M6,
+/// `valyria-orchestrator::pool::PoolEvent::ResourcePressure`). Always
+/// immediately followed in the same admission by one or more
+/// `model_evicted` events and then a `model_loaded` for the model that
+/// triggered it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ResourcePressurePayload {
+    pub requested_bytes: u64,
+    pub budget_bytes: u64,
+}
+
+/// `model_loaded` — a model was admitted into the `ModelPool`'s memory
+/// budget (M6).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelLoadedPayload {
+    pub id: String,
+    pub footprint_bytes: u64,
+}
+
+/// `model_evicted` — a model was unloaded from the `ModelPool` (M6).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelEvictedPayload {
+    pub id: String,
+    /// `memory_pressure` | `manual`.
+    pub reason: String,
+}
+
 /// A parsed verification failure location (§19, §35, G15).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct FailureLocationPayload {
@@ -318,6 +347,9 @@ pub fn payload_schemas() -> Vec<(&'static str, String)> {
         ("subtask_started", s::<SubtaskStartedPayload>()),
         ("subtask_completed", s::<SubtaskCompletedPayload>()),
         ("artifact_published", s::<ArtifactPublishedPayload>()),
+        ("resource_pressure", s::<ResourcePressurePayload>()),
+        ("model_loaded", s::<ModelLoadedPayload>()),
+        ("model_evicted", s::<ModelEvictedPayload>()),
     ]
 }
 

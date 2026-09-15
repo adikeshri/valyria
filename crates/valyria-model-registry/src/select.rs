@@ -272,6 +272,7 @@ mod tests {
                 min_vram_bytes: None,
             },
             transport_preference: TransportPreference::Native,
+            engine: crate::card::EngineKind::LlamaCpp,
             supports_native_tools: true,
             supports_grammar: true,
             source_url: "u".into(),

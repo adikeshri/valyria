@@ -1,9 +1,9 @@
-//! `LlamaServerRuntime`: a [`ModelRuntime`] backed by a managed
-//! `llama-server` child process. Owns the process (via [`LlamaServer`])
-//! *and* wraps [`OpenAiCompatRuntime`] pointed at its loopback port — this
-//! crate contributes process supervision only; every byte of the wire
-//! protocol is `valyria-runtime-openai-compat`'s, reused wholesale exactly
-//! as that crate's own doc comment always said it would be.
+//! `MlxServerRuntime`: the [`ModelRuntime`] adapter that owns one
+//! [`MlxServer`] child process and speaks to it through the shared
+//! [`OpenAiCompatRuntime`] wire-protocol client — the exact same
+//! composition `valyria-runtime-llamacpp::LlamaServerRuntime` uses, just
+//! with a different process-supervision half. Every method delegates to
+//! `inner`; this type's own job is process lifecycle only.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -18,48 +18,56 @@ use valyria_runtime_openai_compat::{HttpTransport, OpenAiCompatRuntime, ReqwestT
 use valyria_util::CancellationToken;
 
 use crate::error::Result;
-use crate::server::{LlamaServer, LlamaServerConfig, DEFAULT_READY_TIMEOUT};
+use crate::server::{MlxServer, MlxServerConfig, DEFAULT_READY_TIMEOUT};
 
-pub struct LlamaServerRuntime {
-    server: LlamaServer,
+pub struct MlxServerRuntime {
+    server: MlxServer,
     inner: OpenAiCompatRuntime<ReqwestTransport>,
     model_id: String,
 }
 
-impl LlamaServerRuntime {
-    /// Spawn `binary` against `weights`, wait for it to answer `/health`,
-    /// and wrap it as a `ModelRuntime` for `card`. `log_path` collects the
-    /// child's interleaved stdout/stderr — surfaced in the error if
-    /// startup fails, and on disk for later inspection either way.
+impl MlxServerRuntime {
+    /// Spawn `python -m mlx_lm.server` against `model_dir` (a local
+    /// Hugging Face-layout directory — MLX has no single-file format the
+    /// way GGUF is one), wait for it to answer `/health`, and wrap it as
+    /// a `ModelRuntime` for `card`.
     pub async fn start(
-        binary: PathBuf,
-        weights: PathBuf,
+        python: PathBuf,
+        model_dir: PathBuf,
         card: &ModelCard,
         log_path: PathBuf,
     ) -> Result<Self> {
-        Self::start_with_timeout(binary, weights, card, log_path, DEFAULT_READY_TIMEOUT).await
+        Self::start_with_timeout(python, model_dir, card, log_path, DEFAULT_READY_TIMEOUT).await
     }
 
     pub async fn start_with_timeout(
-        binary: PathBuf,
-        weights: PathBuf,
+        python: PathBuf,
+        model_dir: PathBuf,
         card: &ModelCard,
         log_path: PathBuf,
         ready_timeout: Duration,
     ) -> Result<Self> {
-        // llama-server's `-c 0` means "use the model's own trained
-        // context"; anything else is clamped to the catalog's own
-        // declared window so we never ask for more than the weights
-        // support.
-        let ctx_size = card.context_length.max(512);
-        let config = LlamaServerConfig {
-            binary,
-            weights,
-            ctx_size,
+        // `mlx_lm.server` supports per-request model switching: it reads
+        // the request body's own `"model"` field (defaulting to the CLI
+        // `--model` only when that field is absent) and, on any mismatch,
+        // tries to *load a different model by that name* — treating it as
+        // a fresh Hugging Face repo id, not a display label. Confirmed
+        // live: sending `card.id` (valyria's catalog id, e.g. `"qwen2.5-
+        // coder-7b-instruct-mlx-4bit"`) instead of the real repo id here
+        // made a real, already-booted server 404 trying to "load" that
+        // catalog id as a repo. So unlike `LlamaServerRuntime` (where
+        // `llama-server` ignores the field entirely and this distinction
+        // never mattered), the wire `"model"` name here *must* be the
+        // same string the process was actually started with —
+        // `model_dir` — not the catalog id.
+        let wire_model_name = model_dir.to_string_lossy().into_owned();
+        let config = MlxServerConfig {
+            python,
+            model_dir,
             extra_args: Vec::new(),
             log_path,
         };
-        let server = LlamaServer::spawn(config).await?;
+        let server = MlxServer::spawn(config).await?;
         let base = format!("http://127.0.0.1:{}", server.port());
         let transport = ReqwestTransport::new(base)?;
 
@@ -72,7 +80,7 @@ impl LlamaServerRuntime {
             .await?;
 
         let capabilities = caps_from_card(card);
-        let inner = OpenAiCompatRuntime::new(transport, card.id.clone(), capabilities);
+        let inner = OpenAiCompatRuntime::new(transport, wire_model_name, capabilities);
         Ok(Self {
             server,
             inner,
@@ -95,7 +103,7 @@ fn caps_from_card(card: &ModelCard) -> Capabilities {
 }
 
 #[async_trait::async_trait]
-impl ModelRuntime for LlamaServerRuntime {
+impl ModelRuntime for MlxServerRuntime {
     fn capabilities(&self) -> Capabilities {
         self.inner.capabilities()
     }
@@ -126,7 +134,7 @@ impl ModelRuntime for LlamaServerRuntime {
 }
 
 #[async_trait::async_trait]
-impl LocalModelServer for LlamaServerRuntime {
+impl LocalModelServer for MlxServerRuntime {
     async fn shutdown(&self) {
         self.server.shutdown().await;
     }
